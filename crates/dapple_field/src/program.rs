@@ -61,6 +61,10 @@ use crate::hash::hash;
 use crate::noise::{Basis, Noise};
 use crate::types::{NormalBlend, NormalFrame, PortType, Primaries, Value};
 
+mod flat;
+
+pub use flat::{EvaluationStats, Evaluator};
+
 /// Version of the fingerprint encoding. Changing any word the encoding emits
 /// requires a new version, so persisted fingerprints never collide.
 pub const FINGERPRINT_VERSION: u64 = 1;
@@ -595,20 +599,14 @@ impl ProgramBuilder {
         if !found.is_scalar() {
             return Err(ProgramError::OutputType { found });
         }
-        Ok(FieldProgram {
-            nodes: self.nodes,
-            output,
-        })
+        Ok(FieldProgram::new(self.nodes, output))
     }
 
     /// Finishes a program whose output may have any [`PortType`].
     pub fn finish_value(self, output: NodeId) -> Result<ValueProgram, ProgramError> {
         self.node(output)?;
         Ok(ValueProgram {
-            program: FieldProgram {
-                nodes: self.nodes,
-                output,
-            },
+            program: FieldProgram::new(self.nodes, output),
         })
     }
 
@@ -1054,15 +1052,42 @@ const fn cell_output_tag(output: CellOutput) -> u64 {
 
 /// A finished, immutable field program.
 ///
-/// Evaluation walks the DAG from the output. A node shared by several
-/// consumers is evaluated once per consumer; there is no per-point cache.
+/// Finishing compiles a flat plan of the output (see [`Evaluator`]): each
+/// node is evaluated once per point in each context it is reached in, so a
+/// subgraph shared by several consumers is not repeated.
+/// [`ScalarField::eval`] uses the plan when it saves work and walks the DAG
+/// recursively otherwise; both give the same bits. For many points, keep one
+/// [`Self::evaluator`] to reuse its buffers. [`Self::evaluation_stats`]
+/// reports the saving.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldProgram {
     nodes: Vec<Node>,
     output: NodeId,
+    plan: flat::Plan,
 }
 
 impl FieldProgram {
+    fn new(nodes: Vec<Node>, output: NodeId) -> Self {
+        let plan = flat::Plan::new(&nodes, output);
+        Self {
+            nodes,
+            output,
+            plan,
+        }
+    }
+
+    /// An evaluator of the output through the flat plan.
+    #[must_use]
+    pub fn evaluator(&self) -> Evaluator<'_> {
+        Evaluator::new(self)
+    }
+
+    /// Evaluation counts of the output, flat and recursive.
+    #[must_use]
+    pub fn evaluation_stats(&self) -> EvaluationStats {
+        self.plan.stats()
+    }
+
     /// The output node.
     #[must_use]
     pub const fn output(&self) -> NodeId {
@@ -1140,62 +1165,80 @@ impl FieldProgram {
     /// Panics if `id` is not a node of this program.
     #[must_use]
     pub fn eval_value(&self, id: NodeId, p: Vec2, footprint: Footprint) -> Value {
-        let scalar = |id: NodeId| self.eval_node(id, p, footprint);
-        match self.nodes[id.0 as usize].kernel {
-            Kernel::Constant(value) => Value::Scalar(value),
-            Kernel::Noise(ref noise) => Value::Scalar(noise.eval(p, footprint)),
-            Kernel::Fractal(ref fractal) => Value::Scalar(fractal.eval(p, footprint)),
-            Kernel::Cellular(ref cellular) => Value::Scalar(cellular.eval(p, footprint)),
+        let node = &self.nodes[id.0 as usize];
+        match node.kernel {
             Kernel::Transform {
                 input,
                 transform,
                 stretch,
             } => self.eval_value(input, transform.apply(p), footprint.scaled(stretch)),
             Kernel::Pass(input) => self.eval_value(input, p, footprint),
-            Kernel::Binary(op, a, b) => {
-                let a = self.eval_value(a, p, footprint);
-                let b = self.eval_value(b, p, footprint);
-                componentwise(a, b, |a, b| match op {
-                    BinaryOp::Add => a + b,
-                    BinaryOp::Sub => a - b,
-                    BinaryOp::Mul => a * b,
-                    BinaryOp::Min => a.min(b),
-                    BinaryOp::Max => a.max(b),
-                })
-            }
-            Kernel::Abs(input) => Value::Scalar(scalar(input).abs()),
-            Kernel::Clamp(input, min, max) => Value::Scalar(scalar(input).clamp(min, max)),
-            Kernel::Remap {
-                input,
-                scale,
-                from,
-                to,
-            } => Value::Scalar(to + (scalar(input) - from) * scale),
-            Kernel::Mix(a, b, t) => {
-                let a = self.eval_value(a, p, footprint);
-                let b = self.eval_value(b, p, footprint);
-                let t = scalar(t);
-                componentwise(a, b, |a, b| a + (b - a) * t)
-            }
             Kernel::Warp {
                 input,
                 dx,
                 dy,
                 amount,
             } => {
-                let offset = Vec2::new(scalar(dx), scalar(dy)) * amount;
+                let offset = warp_offset(
+                    self.eval_value(dx, p, footprint),
+                    self.eval_value(dy, p, footprint),
+                    amount,
+                );
                 self.eval_value(input, p + offset, footprint)
             }
-            Kernel::Vector2(x, y) => Value::Vector2(Vec2::new(scalar(x), scalar(y))),
-            Kernel::Vector3(x, y, z) => Value::Vector3(Vec3::new(scalar(x), scalar(y), scalar(z))),
-            Kernel::Component(input, index) => Value::Scalar(
-                self.eval_value(input, p, footprint)
+            ref kernel => {
+                let mut args = [Value::Scalar(0.0); 3];
+                let mut count = 0;
+                for input in node.op.inputs().iter() {
+                    args[count] = self.eval_value(input, p, footprint);
+                    count += 1;
+                }
+                kernel.combine(p, footprint, &args[..count])
+            }
+        }
+    }
+}
+
+fn warp_offset(dx: Value, dy: Value, amount: f32) -> Vec2 {
+    let scalar = |v: Value| v.scalar().expect("warp displacements are scalars");
+    Vec2::new(scalar(dx), scalar(dy)) * amount
+}
+
+impl Kernel {
+    /// Evaluates a pure kernel from its operands' values, in operand order.
+    fn combine(&self, p: Vec2, footprint: Footprint, args: &[Value]) -> Value {
+        let scalar = |i: usize| args[i].scalar().expect("operand types were checked");
+        match *self {
+            Self::Constant(value) => Value::Scalar(value),
+            Self::Noise(ref noise) => Value::Scalar(noise.eval(p, footprint)),
+            Self::Fractal(ref fractal) => Value::Scalar(fractal.eval(p, footprint)),
+            Self::Cellular(ref cellular) => Value::Scalar(cellular.eval(p, footprint)),
+            Self::Binary(op, ..) => componentwise(args[0], args[1], |a, b| match op {
+                BinaryOp::Add => a + b,
+                BinaryOp::Sub => a - b,
+                BinaryOp::Mul => a * b,
+                BinaryOp::Min => a.min(b),
+                BinaryOp::Max => a.max(b),
+            }),
+            Self::Abs(_) => Value::Scalar(scalar(0).abs()),
+            Self::Clamp(_, min, max) => Value::Scalar(scalar(0).clamp(min, max)),
+            Self::Remap {
+                scale, from, to, ..
+            } => Value::Scalar(to + (scalar(0) - from) * scale),
+            Self::Mix(..) => {
+                let t = scalar(2);
+                componentwise(args[0], args[1], |a, b| a + (b - a) * t)
+            }
+            Self::Vector2(..) => Value::Vector2(Vec2::new(scalar(0), scalar(1))),
+            Self::Vector3(..) => Value::Vector3(Vec3::new(scalar(0), scalar(1), scalar(2))),
+            Self::Component(_, index) => Value::Scalar(
+                args[0]
                     .component(index)
                     .expect("component index was checked"),
             ),
-            Kernel::AsMask(input) => Value::Scalar(scalar(input).clamp(0.0, 1.0)),
-            Kernel::ToId(input, levels) => {
-                let v = scalar(input);
+            Self::AsMask(_) => Value::Scalar(scalar(0).clamp(0.0, 1.0)),
+            Self::ToId(_, levels) => {
+                let v = scalar(0);
                 let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
                 #[expect(
                     clippy::cast_possible_truncation,
@@ -1205,20 +1248,20 @@ impl FieldProgram {
                 let id = libm::floorf(v * levels as f32) as u32;
                 Value::Id(id.min(levels - 1))
             }
-            Kernel::Normalize(input) => {
-                let Value::Vector3(v) = self.eval_value(input, p, footprint) else {
+            Self::Normalize(_) => {
+                let Value::Vector3(v) = args[0] else {
                     unreachable!("normalize input was type-checked");
                 };
                 Value::Vector3(v.try_normalize().unwrap_or(Vec3::Z))
             }
-            Kernel::BlendNormals(base, detail, method) => {
-                let (Value::Vector3(n1), Value::Vector3(n2)) = (
-                    self.eval_value(base, p, footprint),
-                    self.eval_value(detail, p, footprint),
-                ) else {
+            Self::BlendNormals(_, _, method) => {
+                let (Value::Vector3(base), Value::Vector3(detail)) = (args[0], args[1]) else {
                     unreachable!("blend inputs were type-checked");
                 };
-                Value::Vector3(blend_normals(n1, n2, method))
+                Value::Vector3(blend_normals(base, detail, method))
+            }
+            Self::Transform { .. } | Self::Pass(_) | Self::Warp { .. } => {
+                unreachable!("only pure kernels combine")
             }
         }
     }
@@ -1266,7 +1309,12 @@ impl ScalarField for FieldProgram {
     }
 
     fn eval(&self, p: Vec2, footprint: Footprint) -> f32 {
-        self.eval_node(self.output, p, footprint)
+        let stats = self.plan.stats();
+        if stats.instances < stats.tree_evaluations {
+            self.evaluator().eval(p, footprint)
+        } else {
+            self.eval_node(self.output, p, footprint)
+        }
     }
 }
 
@@ -1308,7 +1356,13 @@ impl ValueProgram {
     /// Evaluates the output at `p`.
     #[must_use]
     pub fn eval(&self, p: Vec2, footprint: Footprint) -> Value {
-        self.program.eval_value(self.program.output, p, footprint)
+        self.program.evaluator().eval_value(p, footprint)
+    }
+
+    /// An evaluator of the output, reusing its buffers across points.
+    #[must_use]
+    pub fn evaluator(&self) -> Evaluator<'_> {
+        self.program.evaluator()
     }
 
     /// Component `index` of the output as a scalar program: the output
@@ -1931,5 +1985,90 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn flat_plans_match_recursion_bit_for_bit() {
+        let mut b = ProgramBuilder::new();
+        let out = bark(&mut b);
+        let program = b.finish(out).unwrap();
+        let mut evaluator = program.evaluator();
+        for i in 0..64 {
+            let p = Vec2::new(i as f32 * 0.071, (i * 7 % 13) as f32 * 0.09);
+            for footprint in [Footprint::POINT, Footprint::new(0.02).unwrap()] {
+                let recursive = program.eval_node(program.output(), p, footprint);
+                assert_eq!(evaluator.eval(p, footprint).to_bits(), recursive.to_bits());
+                assert_eq!(program.eval(p, footprint).to_bits(), recursive.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn shared_subgraphs_evaluate_once_per_context() {
+        let d = torus();
+        let mut b = ProgramBuilder::new();
+        let n = noise(&mut b, 1);
+        // `n` feeds both operands of both products, and the sum.
+        let square = b.add(Op::Mul { a: n, b: n }).unwrap();
+        let sum = b
+            .add(Op::Add {
+                a: square,
+                b: square,
+            })
+            .unwrap();
+        let shift = Affine2 {
+            matrix: Mat2::IDENTITY,
+            translation: Vec2::new(0.25, 0.0),
+        };
+        let moved = b
+            .add(Op::Transform {
+                input: sum,
+                transform: shift,
+            })
+            .unwrap();
+        let total = b.add(Op::Add { a: sum, b: moved }).unwrap();
+        let program = b.finish(total).unwrap();
+        assert_eq!(
+            program.evaluation_stats(),
+            EvaluationStats {
+                // n, square, sum at the output's point and at the shifted
+                // one, plus the total.
+                instances: 7,
+                // total + 2 × (sum + 2 × (square + 2 × n)).
+                tree_evaluations: 1 + 2 * (1 + 2 * (1 + 2)),
+                contexts: 2,
+            }
+        );
+        let direct = Noise::new(Basis::Gradient, d, Vec2::splat(4.0), 1).unwrap();
+        let p = Vec2::new(0.3, 0.6);
+        let at = |q: Vec2| {
+            let v = direct.eval(q, Footprint::POINT);
+            (v * v) + (v * v)
+        };
+        assert_eq!(
+            program.eval(p, Footprint::POINT).to_bits(),
+            (at(p) + at(p + Vec2::new(0.25, 0.0))).to_bits()
+        );
+
+        // A program without sharing keeps equal counts.
+        let mut b = ProgramBuilder::new();
+        let n = noise(&mut b, 2);
+        let program = b.finish(n).unwrap();
+        let stats = program.evaluation_stats();
+        assert_eq!((stats.instances, stats.tree_evaluations), (1, 1));
+    }
+
+    #[test]
+    fn value_programs_evaluate_through_the_plan() {
+        let mut b = ProgramBuilder::new();
+        let n = noise(&mut b, 4);
+        let color = b.add(Op::Color { r: n, g: n, b: n }).unwrap();
+        let program = b.finish_value(color).unwrap();
+        assert_eq!(program.program().evaluation_stats().instances, 2);
+        let p = Vec2::new(0.9, 0.1);
+        assert_eq!(
+            program.eval(p, Footprint::POINT),
+            program.program().eval_value(color, p, Footprint::POINT)
+        );
     }
 }

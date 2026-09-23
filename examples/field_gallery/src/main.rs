@@ -135,7 +135,16 @@ fn bark(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
         program.fingerprint(),
         program.len()
     );
+    let stats = program.evaluation_stats();
+    let start = std::time::Instant::now();
     let height = realize(&program, Realization::period(torus, SIZE, SIZE)?)?;
+    println!(
+        "bark realized in {:?}: {} node evaluations per texel ({} recursively), {} contexts",
+        start.elapsed(),
+        stats.instances,
+        stats.tree_evaluations,
+        stats.contexts
+    );
     write_raster(out, "bark-height-2x2", &height)?;
 
     // Heights are in [0, 1]; 1 means 15 mm of relief on a 1 m tile.

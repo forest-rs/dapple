@@ -558,6 +558,13 @@ small public surface ("fissure depth", "moss coverage") over a large internal
 graph. That is the `Substance` "exposed parameters" idea, done as graph
 inputs.
 
+Today the data form is `dapple_graph::Recipe`: labeled nodes plus outputs
+naming the material maps they fill, versioned by `RECIPE_VERSION`, with
+content fingerprints computed from the recipe alone. `tools/dapple_bake`
+bakes the recipes a TOML manifest lists, as Lightweald's `texture_bake`
+bakes photographs, and skips materials whose recipe fingerprint and settings
+are unchanged. Named exposed parameters are still to come.
+
 ## Introspection
 
 Every realization returns a report with:

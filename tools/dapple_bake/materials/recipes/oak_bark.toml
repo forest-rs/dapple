@@ -1,0 +1,168 @@
+# Oak-like bark on a 1 m repeating tile: plates separated by wavy vertical
+# fissures, with fine grain on top. Heights are in [0, 1]; 1 means 15 mm of
+# relief.
+version = 1
+
+[[nodes]]
+label = "cells"
+kind = "field"
+inputs = []
+# Cells stretched along y: few rows, many columns. Border distance is in cell
+# units.
+op = { op = "cellular", domain = { periodic = { period = [1, 1] } }, frequency = [9.0, 2.0], jitter = 1.0, seed = 7, output = "border" }
+
+[[nodes]]
+label = "wobble_x"
+kind = "field"
+inputs = []
+op = { op = "fractal", basis = "gradient", domain = { periodic = { period = [1, 1] } }, frequency = [3.0, 6.0], seed = 8, params = {} }
+
+[[nodes]]
+label = "wobble_y"
+kind = "field"
+inputs = []
+op = { op = "fractal", basis = "gradient", domain = { periodic = { period = [1, 1] } }, frequency = [3.0, 6.0], seed = 9, params = {} }
+
+[[nodes]]
+label = "wavy"
+kind = "field"
+inputs = ["cells", "wobble_x", "wobble_y"]
+op = { op = "warp", input = 0, dx = 1, dy = 2, amount = 0.03 }
+
+# Plates flatten 0.25 cells in from the fissures.
+[[nodes]]
+label = "plates_clamped"
+kind = "field"
+inputs = ["wavy"]
+op = { op = "clamp", input = 0, min = 0.0, max = 0.25 }
+
+[[nodes]]
+label = "plates"
+kind = "field"
+inputs = ["plates_clamped"]
+op = { op = "remap", input = 0, from = [0.0, 0.25], to = [0.0, 0.85] }
+
+[[nodes]]
+label = "grain_noise"
+kind = "field"
+inputs = []
+op = { op = "fractal", basis = "gradient", domain = { periodic = { period = [1, 1] } }, frequency = [24.0, 6.0], seed = 10, params = { octaves = 4 } }
+
+[[nodes]]
+label = "grain"
+kind = "field"
+inputs = ["grain_noise"]
+op = { op = "remap", input = 0, from = [-1.0, 1.0], to = [0.0, 0.15] }
+
+[[nodes]]
+label = "height"
+kind = "field"
+inputs = ["plates", "grain"]
+op = { op = "add", a = 0, b = 1 }
+
+# Linear colors: dark fissures, lighter plate tops, mixed by height / 0.6.
+[[nodes]]
+label = "tone_raw"
+kind = "field"
+inputs = ["height"]
+op = { op = "remap", input = 0, from = [0.0, 0.6], to = [0.0, 1.0] }
+
+[[nodes]]
+label = "tone"
+kind = "field"
+inputs = ["tone_raw"]
+op = { op = "clamp", input = 0, min = 0.0, max = 1.0 }
+
+[[nodes]]
+label = "red"
+kind = "field"
+inputs = ["tone"]
+op = { op = "remap", input = 0, from = [0.0, 1.0], to = [0.035, 0.24] }
+
+[[nodes]]
+label = "green"
+kind = "field"
+inputs = ["tone"]
+op = { op = "remap", input = 0, from = [0.0, 1.0], to = [0.026, 0.19] }
+
+[[nodes]]
+label = "blue"
+kind = "field"
+inputs = ["tone"]
+op = { op = "remap", input = 0, from = [0.0, 1.0], to = [0.02, 0.15] }
+
+# Fissures are rougher than plate tops.
+[[nodes]]
+label = "height_unit"
+kind = "field"
+inputs = ["height"]
+op = { op = "clamp", input = 0, min = 0.0, max = 1.0 }
+
+[[nodes]]
+label = "roughness"
+kind = "field"
+inputs = ["height_unit"]
+op = { op = "remap", input = 0, from = [0.0, 1.0], to = [0.9, 0.55] }
+
+[[nodes]]
+label = "height_map"
+kind = "realize"
+input = "height"
+width = 512
+height = 512
+
+[[nodes]]
+label = "red_map"
+kind = "realize"
+input = "red"
+width = 512
+height = 512
+
+[[nodes]]
+label = "green_map"
+kind = "realize"
+input = "green"
+width = 512
+height = 512
+
+[[nodes]]
+label = "blue_map"
+kind = "realize"
+input = "blue"
+width = 512
+height = 512
+
+[[nodes]]
+label = "roughness_map"
+kind = "realize"
+input = "roughness"
+width = 512
+height = 512
+
+[[nodes]]
+label = "normal_map"
+kind = "raster"
+input = "height_map"
+params = { op = "height_to_normal", scale = 0.015 }
+
+[[nodes]]
+label = "ao_map"
+kind = "raster"
+input = "height_map"
+params = { op = "ambient_occlusion", radius = 0.02, directions = 12, scale = 0.015 }
+
+[[outputs]]
+role = "base_color"
+channels = ["red_map", "green_map", "blue_map"]
+
+[[outputs]]
+role = "normal"
+channels = ["normal_map"]
+
+[[outputs]]
+role = "specular_roughness"
+channels = ["roughness_map"]
+
+[[outputs]]
+role = "occlusion"
+channels = ["ao_map"]

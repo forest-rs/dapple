@@ -36,6 +36,7 @@ pub enum FractalKind {
 /// Octave structure of a [`Fractal`].
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct FractalParams {
     /// How octaves combine.
     pub kind: FractalKind,

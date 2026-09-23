@@ -1,0 +1,12 @@
+# Materials baked by dapple_bake:
+#
+#     cargo run -p dapple_bake --release -- --manifest tools/dapple_bake/materials/materials.toml
+#
+# Each recipe is a dapple_graph recipe written as TOML; its outputs name the
+# material maps it fills.
+
+[[material]]
+id = "oak_bark"
+recipe = "recipes/oak_bark.toml"
+profiles = ["lightweald", "gltf"]
+filter = "kaiser"

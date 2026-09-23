@@ -15,13 +15,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use dapple_encode::Filter;
 use dapple_field::hash::hash;
 use dapple_field::program::{Fingerprint, Op};
 use execution_graph::NodeId;
 
 use crate::{
     MaterialError, MaterialGraph, NodeKind, Params, RasterParams, fingerprint_words,
-    normals_fingerprint, raster_fingerprint, realize_fingerprint,
+    mip_fingerprint, normals_fingerprint, raster_fingerprint, realize_fingerprint,
 };
 
 /// The recipe format version this crate reads and writes.
@@ -58,6 +59,13 @@ pub enum Step {
         input: String,
         /// The operation.
         params: RasterParams,
+    },
+    /// A mip node ([`MaterialGraph::mip`]).
+    Mip {
+        /// Label of the realize, raster or mip node.
+        input: String,
+        /// The filter.
+        filter: Filter,
     },
     /// A normals node over one period of its field
     /// ([`MaterialGraph::normals`]).
@@ -193,6 +201,7 @@ impl Step {
             Self::Realize { .. } => NodeKind::Realize,
             Self::Raster { .. } => NodeKind::Raster,
             Self::Normals { .. } => NodeKind::Normals,
+            Self::Mip { .. } => NodeKind::Mip,
         }
     }
 }
@@ -231,7 +240,7 @@ impl Recipe {
                         return Err(wrong(input));
                     }
                 }
-                Step::Raster { input, .. } => {
+                Step::Raster { input, .. } | Step::Mip { input, .. } => {
                     if input_kind(input)? == NodeKind::Field {
                         return Err(wrong(input));
                     }
@@ -327,6 +336,12 @@ impl Recipe {
                     }
                     NodeFingerprint::Field(_) => unreachable!("checked: rasters read rasters"),
                 },
+                Step::Mip { input, filter } => match out[input] {
+                    NodeFingerprint::Raster(fp) => {
+                        NodeFingerprint::Raster(mip_fingerprint(*filter, fp))
+                    }
+                    NodeFingerprint::Field(_) => unreachable!("checked: mips read rasters"),
+                },
             };
             out.insert(node.label.clone(), fingerprint);
         }
@@ -402,6 +417,7 @@ impl Recipe {
                     height,
                 } => graph.realize(&node.label, ids[input], *width, *height)?,
                 Step::Raster { input, params } => graph.raster(&node.label, *params, ids[input])?,
+                Step::Mip { input, filter } => graph.mip(&node.label, ids[input], *filter)?,
                 Step::Normals {
                     input,
                     width,
@@ -439,6 +455,10 @@ impl MaterialGraph {
                     Params::Raster(params) => Step::Raster {
                         input: label(&entry.upstream[0]),
                         params: *params,
+                    },
+                    Params::Mip(filter) => Step::Mip {
+                        input: label(&entry.upstream[0]),
+                        filter: *filter,
                     },
                     Params::Normals {
                         width,

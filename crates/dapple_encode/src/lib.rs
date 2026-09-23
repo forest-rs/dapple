@@ -80,7 +80,7 @@ use dapple_raster::{Raster, RasterError};
 /// `dapple_raster`.
 pub use dapple_raster::Edge;
 
-pub use filter::{Filter, KAISER_BETA, KAISER_RADIUS};
+pub use filter::{Filter, KAISER_BETA, KAISER_RADIUS, next_level, next_level_into, source_span};
 pub use mips::{
     CoverageLevel, MipChain, NormalChain, color_mips, data_mips, direction_mips, field_mips,
     id_mips, normal_mips, preserve_coverage,
@@ -132,6 +132,9 @@ pub enum EncodeError {
         /// Parameter name.
         name: &'static str,
     },
+    /// A level passed to [`next_level_into`] does not have the next level's
+    /// size, channels and edge policy, or the rect is not inside it.
+    LevelMismatch,
     /// Realizing a field failed; see [`RasterError`].
     Raster(RasterError),
 }
@@ -162,6 +165,7 @@ impl fmt::Display for EncodeError {
                 )
             }
             Self::InvalidParameter { name } => write!(f, "parameter {name} is out of range"),
+            Self::LevelMismatch => f.write_str("not the next mip level, or the rect is outside it"),
             Self::Raster(error) => error.fmt(f),
         }
     }

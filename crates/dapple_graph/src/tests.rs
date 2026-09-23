@@ -461,6 +461,7 @@ fn graphs_export_recipes_that_rebuild_them() {
             }
             Step::Realize { input, .. }
             | Step::Raster { input, .. }
+            | Step::Mip { input, .. }
             | Step::Normals { input, .. } => {
                 input.insert_str(0, "x.");
             }
@@ -669,4 +670,137 @@ fn derivation_changes_with_equal_texels_rerun_without_recomputing_tiles() {
     );
     assert_eq!(texels(&g), before);
     assert_ne!(g.raster_value(soft).unwrap().fingerprint, fingerprint);
+}
+
+/// A disk over noise realized at 128², then a Box and a Kaiser mip chain
+/// down three levels.
+fn mipped(x: f32) -> (MaterialGraph, NodeId, NodeId, Vec<NodeId>) {
+    let mut g = MaterialGraph::with_tile_size(16);
+    let noise = g.field("noise", noise_op(1), &[]).unwrap();
+    let disk = g.field("disk", disk_op(x), &[]).unwrap();
+    let height = g
+        .field(
+            "height",
+            Op::Max {
+                a: operand(0),
+                b: operand(1),
+            },
+            &[noise, disk],
+        )
+        .unwrap();
+    let map = g.realize("map", height, 128, 128).unwrap();
+    let mut levels = Vec::new();
+    for (name, filter) in [("box", Filter::Box), ("kaiser", Filter::Kaiser)] {
+        let mut above = map;
+        for level in 1..=3 {
+            above = g.mip(&format!("{name}{level}"), above, filter).unwrap();
+            levels.push(above);
+        }
+    }
+    (g, disk, map, levels)
+}
+
+fn scalar(g: &MaterialGraph, node: NodeId) -> &Raster {
+    match &g.raster_value(node).unwrap().data {
+        RasterData::Scalar(r) => r,
+        RasterData::Vector3(_) => panic!("mips are scalar"),
+    }
+}
+
+#[test]
+fn mip_nodes_match_encode_chains_bit_for_bit() {
+    let (mut g, _, map, levels) = mipped(0.2);
+    g.run().unwrap();
+    let base = scalar(&g, map);
+    let image = Image::new(
+        base.width(),
+        base.height(),
+        1,
+        base.edge(),
+        base.values().to_vec(),
+    )
+    .unwrap();
+    for (chain, filter) in levels.chunks(3).zip([Filter::Box, Filter::Kaiser]) {
+        let expected = dapple_encode::data_mips(&image, filter);
+        for (level, &node) in chain.iter().enumerate() {
+            let raster = scalar(&g, node);
+            let want = &expected.levels()[level + 1];
+            assert_eq!(
+                (raster.width(), raster.height()),
+                (want.width(), want.height())
+            );
+            let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(
+                bits(raster.values()),
+                bits(want.values()),
+                "{filter:?} {level}"
+            );
+            // Each level covers the same region with larger texels.
+            assert_eq!(
+                raster.texel(),
+                base.texel() * f32::powi(2.0, i32::try_from(level).unwrap() + 1)
+            );
+        }
+    }
+}
+
+#[test]
+fn mip_nodes_recompute_only_reached_tiles() {
+    let (mut g, disk, _, levels) = mipped(0.2);
+    g.run().unwrap();
+    g.set_field_op(disk, disk_op(0.25)).unwrap();
+    g.run().unwrap();
+    let report = g.tile_report();
+    // map 64 tiles, box/kaiser levels 16 + 4 + 1 tiles each: 106 in all.
+    assert_eq!(report.whole_recomputes, 0, "{report:?}");
+    assert!(report.tiles_recomputed < 106 / 2, "{report:?}");
+
+    let (mut fresh, _, _, fresh_levels) = mipped(0.25);
+    fresh.run().unwrap();
+    for (&a, &b) in levels.iter().zip(&fresh_levels) {
+        assert_eq!(scalar(&g, a).digest(), scalar(&fresh, b).digest());
+    }
+
+    // A new filter re-keys that node and recomputes it whole.
+    g.set_mip_filter(levels[0], Filter::Kaiser).unwrap();
+    g.run().unwrap();
+    assert_eq!(
+        scalar(&g, levels[0]).digest(),
+        scalar(&g, levels[3]).digest()
+    );
+}
+
+#[test]
+fn recipes_carry_mip_nodes() {
+    let (mut g, _, _, levels) = mipped(0.2);
+    g.run().unwrap();
+    let recipe = g.recipe();
+    let predicted = recipe.fingerprints().unwrap();
+    for (node, label) in levels
+        .iter()
+        .zip(["box1", "box2", "box3", "kaiser1", "kaiser2", "kaiser3"])
+    {
+        assert_eq!(
+            predicted[label],
+            NodeFingerprint::Raster(g.raster_value(*node).unwrap().fingerprint),
+            "{label}"
+        );
+    }
+    let (mut rebuilt, ids) = recipe.build(16).unwrap();
+    rebuilt.run().unwrap();
+    assert_eq!(
+        scalar(&rebuilt, ids["kaiser3"]).digest(),
+        scalar(&g, levels[5]).digest()
+    );
+    // Mips read rasters, not fields.
+    let mut wrong = recipe.clone();
+    for node in &mut wrong.nodes {
+        if let Step::Mip { input, .. } = &mut node.step {
+            *input = "height".into();
+        }
+    }
+    assert!(matches!(
+        wrong.fingerprints(),
+        Err(RecipeError::WrongInput { .. })
+    ));
 }

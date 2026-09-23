@@ -11,6 +11,7 @@ keywords = ["procedural", "texture", "incremental", "no_std"]
 categories = ["graphics", "no-std"]
 
 [dependencies]
+dapple_encode.workspace = true
 dapple_field.workspace = true
 dapple_raster.workspace = true
 execution_graph.workspace = true
@@ -22,7 +23,12 @@ serde = { optional = true, workspace = true }
 [features]
 default = []
 # Serialize recipes and node parameters.
-serde = ["dep:serde", "dapple_field/serde", "dapple_raster/serde"]
+serde = [
+    "dep:serde",
+    "dapple_encode/serde",
+    "dapple_field/serde",
+    "dapple_raster/serde",
+]
 
 [lints]
 workspace = true

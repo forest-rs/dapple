@@ -180,6 +180,7 @@ dependencies = [
  "dapple_raster",
  "libm",
  "png",
+ "serde",
 ]
 
 [[package]]
@@ -196,6 +197,7 @@ dependencies = [
 name = "dapple_graph"
 version = "0.0.1"
 dependencies = [
+ "dapple_encode",
  "dapple_field",
  "dapple_raster",
  "execution_graph",

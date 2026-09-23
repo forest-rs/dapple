@@ -321,8 +321,9 @@ nodes at mip level 0:
   themselves can be dropped and recomputed on demand. That waits for a
   consumer that needs it.
 
-Still to come: mip levels and `Sample` as graph nodes, with per-level tiles
-and bounded-warp tile dependencies.
+Mip levels are graph nodes, one level each, whose tiles depend on the
+level-above tiles their filter taps read. Still to come: `Sample` as a graph
+node, with bounded-warp tile dependencies.
 
 ### Fingerprints and caches
 

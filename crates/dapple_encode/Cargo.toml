@@ -15,6 +15,7 @@ dapple_field.workspace = true
 dapple_raster.workspace = true
 libm.workspace = true
 png = { optional = true, workspace = true }
+serde = { optional = true, workspace = true }
 
 [lints]
 workspace = true
@@ -23,6 +24,8 @@ workspace = true
 default = []
 # PNG output through the `png` crate.
 std = ["dep:png"]
+# Serialize filter choices.
+serde = ["dep:serde", "dapple_raster/serde"]
 
 [package.metadata.docs.rs]
 all-features = true

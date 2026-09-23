@@ -6,9 +6,9 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use dapple_raster::Edge;
+use dapple_raster::{Edge, TexelRect};
 
-use crate::Image;
+use crate::{EncodeError, Image};
 
 /// Kaiser window shape parameter used by [`Filter::Kaiser`].
 pub const KAISER_BETA: f64 = 4.0;
@@ -18,6 +18,8 @@ pub const KAISER_RADIUS: f64 = 2.0;
 
 /// How a mip level is filtered from the one above it.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Filter {
     /// Each destination texel averages exactly the source area it covers.
     /// For even sizes this is the 2×2 average; odd sizes weight partially
@@ -136,35 +138,71 @@ fn resolve(index: i64, size: u32, edge: Edge) -> usize {
 
 /// Filters `image` down to the next mip level size.
 pub(crate) fn downsample(image: &Image, filter: Filter) -> Image {
+    let (dw, dh) = (next_size(image.width), next_size(image.height));
+    let mut out = Image {
+        width: dw,
+        height: dh,
+        channels: image.channels,
+        edge: image.edge,
+        values: vec![0.0; dw as usize * dh as usize * image.channels],
+    };
+    downsample_rect(image, filter, TexelRect::full(dw, dh), &mut out);
+    out
+}
+
+/// Writes the texels of `rect` of the next mip level of `image` into `out`,
+/// which has the next level's size. Each destination texel's arithmetic is
+/// the same as in [`downsample`], so any set of rects covering the level
+/// reproduces it bit for bit.
+fn downsample_rect(image: &Image, filter: Filter, rect: TexelRect, out: &mut Image) {
     let (sw, sh) = (image.width, image.height);
-    let (dw, dh) = (next_size(sw), next_size(sh));
+    let (dw, dh) = (out.width, out.height);
     let c = image.channels;
     let x_taps = taps(filter, sw, dw);
     let y_taps = taps(filter, sh, dh);
+    let (x0, x1) = (rect.x0 as usize, rect.x1 as usize);
+    let span = x1 - x0;
 
-    // Horizontal pass: sh rows of dw texels, accumulated in f64.
-    let mut rows = vec![0.0_f64; sh as usize * dw as usize * c];
-    for y in 0..sh as usize {
-        let src_row = &image.values[y * sw as usize * c..(y + 1) * sw as usize * c];
-        for (x, t) in x_taps.iter().enumerate() {
-            let out = &mut rows[(y * dw as usize + x) * c..(y * dw as usize + x + 1) * c];
-            for (k, w) in t.weights.iter().enumerate() {
-                let sx = resolve(
-                    t.first + i64::try_from(k).expect("tap index fits i64"),
-                    sw,
-                    image.edge,
-                );
-                for ch in 0..c {
-                    out[ch] += w * f64::from(src_row[sx * c + ch]);
+    // Horizontal pass, only for the source rows the rect's y taps read:
+    // `span` destination columns per row, accumulated in f64.
+    let mut rows: Vec<Option<Vec<f64>>> = vec![None; sh as usize];
+    for t in &y_taps[rect.y0 as usize..rect.y1 as usize] {
+        for k in 0..t.weights.len() {
+            let sy = resolve(
+                t.first + i64::try_from(k).expect("tap index fits i64"),
+                sh,
+                image.edge,
+            );
+            if rows[sy].is_some() {
+                continue;
+            }
+            let src_row = &image.values[sy * sw as usize * c..(sy + 1) * sw as usize * c];
+            let mut row = vec![0.0_f64; span * c];
+            for (x, t) in x_taps[x0..x1].iter().enumerate() {
+                let out = &mut row[x * c..(x + 1) * c];
+                for (k, w) in t.weights.iter().enumerate() {
+                    let sx = resolve(
+                        t.first + i64::try_from(k).expect("tap index fits i64"),
+                        sw,
+                        image.edge,
+                    );
+                    for ch in 0..c {
+                        out[ch] += w * f64::from(src_row[sx * c + ch]);
+                    }
                 }
             }
+            rows[sy] = Some(row);
         }
     }
 
     // Vertical pass.
-    let mut values = vec![0.0_f32; dh as usize * dw as usize * c];
-    for (y, t) in y_taps.iter().enumerate() {
-        for x in 0..dw as usize {
+    for (y, t) in y_taps
+        .iter()
+        .enumerate()
+        .take(rect.y1 as usize)
+        .skip(rect.y0 as usize)
+    {
+        for x in 0..span {
             for ch in 0..c {
                 let mut sum = 0.0_f64;
                 for (k, w) in t.weights.iter().enumerate() {
@@ -173,24 +211,82 @@ pub(crate) fn downsample(image: &Image, filter: Filter) -> Image {
                         sh,
                         image.edge,
                     );
-                    sum += w * rows[(sy * dw as usize + x) * c + ch];
+                    let row = rows[sy].as_ref().expect("row computed for its tap");
+                    sum += w * row[x * c + ch];
                 }
                 #[expect(
                     clippy::cast_possible_truncation,
                     reason = "filtered values are narrowed back to the image's f32"
                 )]
                 let v = sum as f32;
-                values[(y * dw as usize + x) * c + ch] = v;
+                out.values[(y * dw as usize + x0 + x) * c + ch] = v;
             }
         }
     }
-    Image {
-        width: dw,
-        height: dh,
-        channels: c,
-        edge: image.edge,
-        values,
+}
+
+/// Recomputes the texels of `rect` in `next`, the next mip level of
+/// `image` under `filter` (as [`next_level`] builds it).
+///
+/// Every texel's arithmetic matches [`next_level`], so rects covering the
+/// level reproduce it bit for bit. Use [`source_span`] to find which source
+/// texels a rect reads.
+///
+/// # Errors
+///
+/// [`EncodeError::LevelMismatch`] when `next` does not have the next
+/// level's size, channels and edge, or `rect` is not inside it.
+pub fn next_level_into(
+    image: &Image,
+    filter: Filter,
+    rect: TexelRect,
+    next: &mut Image,
+) -> Result<(), EncodeError> {
+    let fits = next.width == next_size(image.width)
+        && next.height == next_size(image.height)
+        && next.channels == image.channels
+        && next.edge == image.edge
+        && rect.x0 <= rect.x1
+        && rect.y0 <= rect.y1
+        && rect.x1 <= next.width
+        && rect.y1 <= next.height;
+    if !fits {
+        return Err(EncodeError::LevelMismatch);
     }
+    downsample_rect(image, filter, rect, next);
+    Ok(())
+}
+
+/// The next mip level of `image` under `filter`: half the size (rounding
+/// down, at least 1), as each level of [`data_mips`](crate::data_mips).
+#[must_use]
+pub fn next_level(image: &Image, filter: Filter) -> Image {
+    downsample(image, filter)
+}
+
+/// The source texels along one axis that destination texels `lo..hi` of the
+/// next level read, as a half-open index range before the edge policy
+/// (indices may fall outside `0..src`, where the edge wraps or clamps).
+///
+/// # Panics
+///
+/// Panics when `lo..hi` is empty or not within the next level's size.
+#[must_use]
+pub fn source_span(filter: Filter, src: u32, lo: u32, hi: u32) -> (i64, i64) {
+    let dst = next_size(src);
+    assert!(lo < hi && hi <= dst, "destination span out of range");
+    let taps = taps(filter, src, dst);
+    let first = taps[lo as usize..hi as usize]
+        .iter()
+        .map(|t| t.first)
+        .min()
+        .expect("non-empty span");
+    let last = taps[lo as usize..hi as usize]
+        .iter()
+        .map(|t| t.first + i64::try_from(t.weights.len()).expect("tap count fits i64"))
+        .max()
+        .expect("non-empty span");
+    (first, last)
 }
 
 /// Downsamples a single-channel identifier image: each destination texel
@@ -253,6 +349,79 @@ pub(crate) fn downsample_majority(image: &Image) -> Image {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn image(width: u32, height: u32, channels: usize, edge: Edge) -> Image {
+        let n = width as usize * height as usize * channels;
+        let values = (0..n)
+            .map(|i| {
+                dapple_field::hash::unit_f32(dapple_field::hash::hash(7, &[i as u64])) * 2.0 - 0.5
+            })
+            .collect();
+        Image::new(width, height, channels, edge, values).unwrap()
+    }
+
+    #[test]
+    fn rects_reproduce_the_next_level_bit_for_bit() {
+        for (w, h, edge) in [
+            (16, 12, Edge::Wrap),
+            (13, 7, Edge::Clamp),
+            (5, 1, Edge::Wrap),
+        ] {
+            for filter in [Filter::Box, Filter::Kaiser] {
+                let src = image(w, h, 2, edge);
+                let whole = next_level(&src, filter);
+                let mut tiled = next_level(&image(w, h, 2, edge), filter);
+                for v in &mut tiled.values {
+                    *v = f32::NAN;
+                }
+                let (dw, dh) = (whole.width(), whole.height());
+                let step = 3_u32;
+                for y0 in (0..dh).step_by(3) {
+                    for x0 in (0..dw).step_by(3) {
+                        let rect = TexelRect {
+                            x0,
+                            y0,
+                            x1: (x0 + step).min(dw),
+                            y1: (y0 + step).min(dh),
+                        };
+                        next_level_into(&src, filter, rect, &mut tiled).unwrap();
+                    }
+                }
+                let bits = |i: &Image| i.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+                assert_eq!(bits(&whole), bits(&tiled), "{w}x{h} {edge:?} {filter:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn source_spans_cover_every_tap() {
+        for filter in [Filter::Box, Filter::Kaiser] {
+            for src in [1_u32, 2, 5, 16] {
+                let dst = next_size(src);
+                let taps = taps(filter, src, dst);
+                for lo in 0..dst {
+                    for hi in lo + 1..=dst {
+                        let (first, last) = source_span(filter, src, lo, hi);
+                        for t in &taps[lo as usize..hi as usize] {
+                            assert!(first <= t.first);
+                            let n = i64::try_from(t.weights.len()).unwrap();
+                            assert!(t.first + n <= last);
+                        }
+                    }
+                }
+            }
+        }
+        let mismatched = next_level(&image(4, 4, 1, Edge::Wrap), Filter::Box);
+        assert_eq!(
+            next_level_into(
+                &image(8, 8, 1, Edge::Wrap),
+                Filter::Box,
+                TexelRect::full(2, 2),
+                &mut mismatched.clone()
+            ),
+            Err(EncodeError::LevelMismatch)
+        );
+    }
 
     #[test]
     fn box_taps_cover_the_source_exactly() {

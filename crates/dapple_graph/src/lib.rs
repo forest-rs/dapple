@@ -15,6 +15,8 @@
 //! - **Raster nodes** apply a `dapple_raster` operation.
 //! - **Normals nodes** realize a scalar field's normals from its gradient,
 //!   analytic where the field's ops allow.
+//! - **Mip nodes** filter a scalar raster down one mip level, as each level
+//!   of `dapple_encode::data_mips`; chain them for a whole mip chain.
 //!
 //! Each node's parameters (the op, the resolution, the raster operation) are
 //! an input of that node, named `<label>.params`. Editing them with
@@ -41,7 +43,8 @@
 //!   change, grown by half its footprint, and recomputes whole on an
 //!   unbounded change ([`TileReport::unbounded_changes`]).
 //! - Each raster-node tile depends, through an `invalidation` tracker, on
-//!   the input tiles its kernel footprint reads. A node compares every
+//!   the input tiles its kernel footprint reads; each mip-node tile on the
+//!   level-above tiles its filter taps read. A node compares every
 //!   recomputed tile with its previous bits and marks the dependents of the
 //!   tiles that changed, so unchanged tiles stop propagating. Global
 //!   operations, such as the distance transform, recompute whole when their
@@ -95,6 +98,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
+use dapple_encode::{EncodeError, Filter, Image, next_level, next_level_into, source_span};
 use dapple_field::hash::hash;
 use dapple_field::program::{
     Change, Fingerprint, NodeId as FieldNode, Op, ProgramBuilder, ProgramError, ValueProgram,
@@ -154,6 +158,8 @@ pub enum Params {
     },
     /// A raster node's operation.
     Raster(RasterParams),
+    /// A mip node's filter.
+    Mip(Filter),
     /// A normals node's resolution and height scale.
     Normals {
         /// Texels per row.
@@ -248,6 +254,8 @@ pub enum NodeKind {
     Raster,
     /// Realizes a scalar field's normals from its gradient.
     Normals,
+    /// Filters a scalar raster down one mip level.
+    Mip,
 }
 
 /// State a field node keeps between runs.
@@ -286,6 +294,10 @@ enum Source {
     },
     Raster {
         params: RasterParams,
+        input: u32,
+    },
+    Mip {
+        filter: Filter,
         input: u32,
     },
 }
@@ -331,6 +343,8 @@ pub enum NodeError {
         /// The operand's position.
         index: u32,
     },
+    /// Filtering a mip level failed; see [`EncodeError`].
+    Mip(EncodeError),
 }
 
 impl fmt::Display for NodeError {
@@ -343,6 +357,7 @@ impl fmt::Display for NodeError {
             }
             Self::WrongValue { expected } => write!(f, "expected a {expected} input"),
             Self::MissingOperand { index } => write!(f, "operand {index} has no input"),
+            Self::Mip(error) => error.fmt(f),
         }
     }
 }
@@ -539,6 +554,16 @@ fn raster_fingerprint(params: RasterParams, input: u64) -> u64 {
     let mut key = vec![tag, input];
     key.extend(words);
     hash(0x7261_7374_6572_6f70, &key)
+}
+
+/// Content fingerprint of the next mip level, under `filter`, of a raster
+/// fingerprinted `input`.
+fn mip_fingerprint(filter: Filter, input: u64) -> u64 {
+    let tag = match filter {
+        Filter::Box => 0,
+        Filter::Kaiser => 1,
+    };
+    hash(0x0000_006d_6970_6d61, &[tag, input]) // "mipma"
 }
 
 fn fingerprint_words(fp: Fingerprint) -> [u64; 2] {
@@ -961,6 +986,102 @@ fn run_raster(
     Ok(keep(tiles, node, state, out))
 }
 
+/// The next mip level's size along one axis, as `dapple_encode` halves it.
+const fn next_size(size: u32) -> u32 {
+    if size > 1 { size / 2 } else { 1 }
+}
+
+fn run_mip(
+    tiles: &mut Tiles,
+    node: u32,
+    state: &mut TileState,
+    filter: Filter,
+    input: &GraphValue,
+) -> Result<GraphValue, NodeError> {
+    let value = raster_input(input)?;
+    let RasterData::Scalar(raster) = &value.data else {
+        return Err(NodeError::WrongValue {
+            expected: "scalar raster",
+        });
+    };
+    let (sw, sh, edge) = (raster.width(), raster.height(), raster.edge());
+    let (dw, dh) = (next_size(sw), next_size(sh));
+    let source_grid = Grid::new(sw, sh, tiles.size(), edge);
+    let grid = Grid::new(dw, dh, tiles.size(), edge);
+    let source = Source::Mip {
+        filter,
+        input: value.tile_space,
+    };
+    let same = state.source.as_ref() == Some(&source)
+        && state
+            .output
+            .as_ref()
+            .is_some_and(|out| out.data.grid(tiles.size()) == grid);
+    if !same || state.keys.len() != grid.count() as usize {
+        // A new filter, input, or size: re-key and re-wire the tiles to the
+        // level-above tiles their filter taps read.
+        state.keys = tiles.keys(node, grid, &state.keys);
+        for t in 0..grid.count() {
+            let r = grid.rect(t);
+            let (x0, x1) = source_span(filter, sw, r.x0, r.x1);
+            let (y0, y1) = source_span(filter, sh, r.y0, r.y1);
+            let inputs: Vec<InternId> = source_grid
+                .overlapping(x0, x1, y0, y1)
+                .into_iter()
+                .map(|i| tiles.key(value.tile_space, i))
+                .collect();
+            tiles.depend(state.keys[t as usize], inputs);
+        }
+    }
+    let marked = tiles.take_marked(&state.keys);
+    let dirty: Dirty = if same { Some(marked) } else { None };
+    let dirty = tiles.schedule(&mut state.pending, dirty, grid.count());
+    let image = Image::new(sw, sh, 1, edge, raster.values().to_vec()).map_err(NodeError::Mip)?;
+    let previous = match state.output.as_ref().map(|v| &v.data) {
+        Some(RasterData::Scalar(r)) if same => Some(r),
+        _ => None,
+    };
+    let (next, recomputed) = match (&dirty, previous) {
+        (Some(dirty), Some(previous)) => {
+            let mut next =
+                Image::new(dw, dh, 1, edge, previous.values().to_vec()).map_err(NodeError::Mip)?;
+            for &t in dirty {
+                next_level_into(&image, filter, grid.rect(t), &mut next).map_err(NodeError::Mip)?;
+            }
+            (next, dirty.clone())
+        }
+        _ => (next_level(&image, filter), (0..grid.count()).collect()),
+    };
+    // The level covers the same region with fewer, larger texels.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "mip sizes are far below f32's exact integer range"
+    )]
+    let scale = Vec2::new(sw as f32 / dw as f32, sh as f32 / dh as f32);
+    let level = Raster::from_values(
+        dw,
+        dh,
+        raster.origin(),
+        raster.texel() * scale,
+        edge,
+        next.values().to_vec(),
+    )
+    .map_err(NodeError::Raster)?;
+    if !same {
+        state.output = None;
+    }
+    let data = RasterData::Scalar(level);
+    let changed = settle(tiles, node, state, &data, &recomputed, dirty.is_none());
+    let out = RasterValue {
+        data,
+        fingerprint: mip_fingerprint(filter, value.fingerprint),
+        changed,
+        tile_space: node,
+    };
+    state.source = Some(source);
+    Ok(keep(tiles, node, state, out))
+}
+
 impl Executor for DappleExecutor {
     type Value = GraphValue;
     type Node = DappleNode;
@@ -1006,6 +1127,13 @@ impl Executor for DappleExecutor {
                 node.key,
                 &mut node.tiles,
                 (*width, *height, *scale),
+                &upstream[0],
+            )?,
+            (NodeKind::Mip, Params::Mip(filter)) => run_mip(
+                &mut self.tiles,
+                node.key,
+                &mut node.tiles,
+                *filter,
                 &upstream[0],
             )?,
             _ => {
@@ -1207,6 +1335,19 @@ impl MaterialGraph {
         self.add(NodeKind::Raster, label, Params::Raster(params), &[raster])
     }
 
+    /// Adds a node filtering the scalar raster of `raster` down one mip
+    /// level with `filter`: half the size, rounding down, at least 1, bit
+    /// for bit as each level of `dapple_encode::data_mips`. Chain mip nodes
+    /// for a whole chain.
+    pub fn mip(
+        &mut self,
+        label: &str,
+        raster: NodeId,
+        filter: Filter,
+    ) -> Result<NodeId, MaterialError> {
+        self.add(NodeKind::Mip, label, Params::Mip(filter), &[raster])
+    }
+
     fn set_params(
         &mut self,
         node: NodeId,
@@ -1260,6 +1401,11 @@ impl MaterialGraph {
                 scale,
             },
         )
+    }
+
+    /// Changes a mip node's filter.
+    pub fn set_mip_filter(&mut self, node: NodeId, filter: Filter) -> Result<(), MaterialError> {
+        self.set_params(node, NodeKind::Mip, Params::Mip(filter))
     }
 
     /// Replaces a raster node's operation.

@@ -18,7 +18,10 @@ Each kind of data gets its own mip rule:
   band-limited fields give exact, alias-free mips with no filtering.
 
 Box (exact area, any size) and Kaiser-windowed sinc filters follow the image's
-edge policy, so wrapping textures tile on every level.
+edge policy, so wrapping textures tile on every level. `next_level` builds one
+level and `next_level_into` recomputes a rect of it bit for bit, with
+`source_span` naming the source texels a rect reads, for incremental callers
+such as `dapple_graph`'s mip nodes.
 
 `pack` turns OpenPBR maps into 8-bit textures for a profile:
 - `Lightweald`: the `lightweald_material` slots, with a two-channel normal map

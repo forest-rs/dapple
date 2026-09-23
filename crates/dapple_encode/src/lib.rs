@@ -78,11 +78,13 @@ use dapple_raster::{Edge, Raster, RasterError};
 
 pub use filter::{Filter, KAISER_BETA, KAISER_RADIUS};
 pub use mips::{
-    CoverageLevel, MipChain, NormalChain, color_mips, data_mips, field_mips, normal_mips,
-    preserve_coverage,
+    CoverageLevel, MipChain, NormalChain, color_mips, data_mips, direction_mips, field_mips,
+    id_mips, normal_mips, preserve_coverage,
 };
-pub use pack::{Bundle, EncodedTexture, MaterialMaps, PackReport, PackSettings, Profile, pack};
-pub use quantize::{PixelFormat, linear_to_srgb, quantize_unorm8};
+pub use pack::{
+    Bundle, EncodedTexture, MaterialMaps, PackReport, PackSettings, Profile, encode_data, pack,
+};
+pub use quantize::{PixelFormat, linear_to_srgb, quantize_unorm8, quantize_unorm16};
 
 /// Largest supported image dimension.
 pub const MAX_DIMENSION: u32 = 1 << 15;

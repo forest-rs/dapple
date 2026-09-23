@@ -11,6 +11,9 @@ Each kind of data gets its own mip rule:
 - **Normals:** renormalized, with the lost length moved into roughness as
   variance (Toksvig), so distant bumpy surfaces keep their energy.
 - **Data:** filtered as-is.
+- **Directions:** averaged as doubled-angle vectors, so opposite ends of an
+  axis agree and crossing axes cancel; packed anisotropy fades where they do.
+- **Identifiers:** the majority over each texel's source area, never blended.
 - **Fields:** realized afresh at every level with that level's footprint, so
   band-limited fields give exact, alias-free mips with no filtering.
 
@@ -23,8 +26,9 @@ edge policy, so wrapping textures tile on every level.
 - `Gltf`: glTF 2.0 textures;
 - `Raw`: one texture per parameter.
 
-`ktx2::write` writes a texture with its whole mip chain as KTX2, and
-`png::write` (feature `std`) writes level 0 as PNG. The KTX2 files are
-uncompressed; block compression comes later.
+`encode_data` writes any chain, such as height or identifiers, in 8-bit,
+16-bit or float formats. `ktx2::write` writes a texture with its whole mip
+chain as KTX2, and `png::write` (feature `std`) writes level 0 as PNG. The
+KTX2 files are uncompressed; block compression comes later.
 
 `#![no_std]` with `alloc`; the `std` feature adds PNG output.

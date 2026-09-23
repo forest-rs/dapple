@@ -14,16 +14,36 @@ pub enum PixelFormat {
     Rgba8Unorm,
     /// RGB encoded with the sRGB transfer function; alpha linear.
     Rgba8Srgb,
+    /// One linear 16-bit channel, little-endian, for data such as height.
+    R16Unorm,
+    /// One 32-bit IEEE float channel, little-endian, for unbounded data.
+    R32Float,
 }
 
 impl PixelFormat {
     /// Bytes per texel.
     #[must_use]
     pub const fn bytes_per_texel(self) -> usize {
+        self.channels() * self.bytes_per_channel()
+    }
+
+    /// Channels per texel.
+    #[must_use]
+    pub const fn channels(self) -> usize {
         match self {
-            Self::R8Unorm => 1,
+            Self::R8Unorm | Self::R16Unorm | Self::R32Float => 1,
             Self::Rg8Unorm => 2,
             Self::Rgba8Unorm | Self::Rgba8Srgb => 4,
+        }
+    }
+
+    /// Bytes per channel.
+    #[must_use]
+    pub const fn bytes_per_channel(self) -> usize {
+        match self {
+            Self::R8Unorm | Self::Rg8Unorm | Self::Rgba8Unorm | Self::Rgba8Srgb => 1,
+            Self::R16Unorm => 2,
+            Self::R32Float => 4,
         }
     }
 
@@ -59,6 +79,19 @@ pub fn quantize_unorm8(v: f32) -> u8 {
     q
 }
 
+/// A `[0, 1]` value as a 16-bit unsigned normalized integer, rounding to
+/// nearest. Values outside `[0, 1]` clamp; NaN becomes 0.
+#[must_use]
+pub fn quantize_unorm16(v: f32) -> u16 {
+    let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the value is clamped to [0, 65535.5) before narrowing"
+    )]
+    let q = libm::floor(f64::from(v) * 65535.0 + 0.5) as u16;
+    q
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,6 +104,9 @@ mod tests {
         assert_eq!(quantize_unorm8(-3.0), 0);
         assert_eq!(quantize_unorm8(7.0), 255);
         assert_eq!(quantize_unorm8(f32::NAN), 0);
+        assert_eq!(quantize_unorm16(0.5), 32768);
+        assert_eq!(quantize_unorm16(1.0), 65535);
+        assert_eq!(quantize_unorm16(-1.0), 0);
     }
 
     #[test]

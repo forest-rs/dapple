@@ -49,6 +49,8 @@ fn material() -> MaterialMaps {
         specular_roughness: Some(image(1, rough)),
         base_metalness: None,
         occlusion: Some(image(1, occlusion)),
+        anisotropy_direction: None,
+        specular_roughness_anisotropy: None,
     }
 }
 

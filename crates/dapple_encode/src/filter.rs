@@ -193,6 +193,63 @@ pub(crate) fn downsample(image: &Image, filter: Filter) -> Image {
     }
 }
 
+/// Downsamples a single-channel identifier image: each destination texel
+/// takes the identifier covering most of its source area (box weights), ties
+/// going to the smaller identifier. Identifiers are never averaged.
+pub(crate) fn downsample_majority(image: &Image) -> Image {
+    debug_assert_eq!(image.channels, 1, "identifiers are one channel");
+    let (sw, sh) = (image.width, image.height);
+    let (dw, dh) = (next_size(sw), next_size(sh));
+    let x_taps = taps(Filter::Box, sw, dw);
+    let y_taps = taps(Filter::Box, sh, dh);
+    let mut values = Vec::with_capacity(dw as usize * dh as usize);
+    let mut votes: Vec<(f32, f64)> = Vec::new();
+    for ty in &y_taps {
+        for tx in &x_taps {
+            votes.clear();
+            for (ky, wy) in ty.weights.iter().enumerate() {
+                let sy = resolve(
+                    ty.first + i64::try_from(ky).expect("tap index fits i64"),
+                    sh,
+                    image.edge,
+                );
+                for (kx, wx) in tx.weights.iter().enumerate() {
+                    let sx = resolve(
+                        tx.first + i64::try_from(kx).expect("tap index fits i64"),
+                        sw,
+                        image.edge,
+                    );
+                    let id = image.values[sy * sw as usize + sx];
+                    let weight = wx * wy;
+                    match votes.iter_mut().find(|(v, _)| v.to_bits() == id.to_bits()) {
+                        Some((_, total)) => *total += weight,
+                        None => votes.push((id, weight)),
+                    }
+                }
+            }
+            let winner = votes
+                .iter()
+                .copied()
+                .reduce(|best, vote| {
+                    if vote.1 > best.1 || (vote.1 == best.1 && vote.0 < best.0) {
+                        vote
+                    } else {
+                        best
+                    }
+                })
+                .expect("every texel has taps");
+            values.push(winner.0);
+        }
+    }
+    Image {
+        width: dw,
+        height: dh,
+        channels: 1,
+        edge: image.edge,
+        values,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +312,14 @@ mod tests {
             let b = roll(&downsample(&image, filter), 1, 2);
             assert_eq!(a.values, b.values, "{filter:?}");
         }
+    }
+
+    #[test]
+    fn identifiers_take_the_majority() {
+        // 4×2: left block mostly 7, right block tied between 2 and 9.
+        let values = vec![7.0, 7.0, 2.0, 9.0, 7.0, 3.0, 9.0, 2.0];
+        let image = Image::new(4, 2, 1, Edge::Clamp, values).unwrap();
+        let down = downsample_majority(&image);
+        assert_eq!(down.values, [7.0, 2.0]);
     }
 }

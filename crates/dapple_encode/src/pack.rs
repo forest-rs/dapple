@@ -9,8 +9,10 @@ use alloc::vec::Vec;
 use dapple_raster::Edge;
 
 use crate::filter::Filter;
-use crate::mips::{CoverageLevel, MipChain, color_mips, data_mips, normal_mips, preserve_coverage};
-use crate::quantize::{PixelFormat, linear_to_srgb, quantize_unorm8};
+use crate::mips::{
+    CoverageLevel, MipChain, color_mips, data_mips, direction_mips, normal_mips, preserve_coverage,
+};
+use crate::quantize::{PixelFormat, linear_to_srgb, quantize_unorm8, quantize_unorm16};
 use crate::{EncodeError, Image};
 
 /// Who the textures are for.
@@ -49,6 +51,12 @@ pub struct MaterialMaps {
     /// Ambient occlusion, 1 channel; an auxiliary output, not an OpenPBR
     /// parameter.
     pub occlusion: Option<Image>,
+    /// The anisotropy axis, 2 channels: the doubled-angle vector
+    /// `(cos 2θ, sin 2θ)` of `dapple_field`'s `PortType::Direction`, with `θ`
+    /// measured in the normal map's domain frame.
+    pub anisotropy_direction: Option<Image>,
+    /// OpenPBR `specular_roughness_anisotropy`, 1 channel.
+    pub specular_roughness_anisotropy: Option<Image>,
 }
 
 /// Settings for [`pack()`].
@@ -65,11 +73,14 @@ pub struct PackSettings {
     pub base_color: [f32; 3],
     /// `base_metalness` where no map is given.
     pub base_metalness: f32,
+    /// `specular_roughness_anisotropy` where a direction map is given but no
+    /// strength map.
+    pub specular_roughness_anisotropy: f32,
 }
 
 impl Default for PackSettings {
     /// Box filtering, no coverage preservation, and OpenPBR's defaults:
-    /// roughness 0.3, base color 0.8, metalness 0.
+    /// roughness 0.3, base color 0.8, metalness 0, anisotropy 0.
     fn default() -> Self {
         Self {
             filter: Filter::Box,
@@ -77,6 +88,7 @@ impl Default for PackSettings {
             specular_roughness: 0.3,
             base_color: [0.8; 3],
             base_metalness: 0.0,
+            specular_roughness_anisotropy: 0.0,
         }
     }
 }
@@ -113,8 +125,9 @@ pub struct PackReport {
 pub struct Bundle {
     /// The profile the textures follow.
     pub profile: Profile,
-    /// The textures, in a fixed order: `base_color`, `normal`, `orm` (raw:
-    /// one per parameter, in [`MaterialMaps`] field order).
+    /// The textures, in a fixed order: `base_color`, `normal`, `orm`,
+    /// `anisotropy` (raw: one per parameter, in [`MaterialMaps`] field
+    /// order).
     pub textures: Vec<EncodedTexture>,
     /// Measurements.
     pub report: PackReport,
@@ -206,6 +219,11 @@ fn encode(
 
 /// Builds mips for every present map and packs them for `profile`.
 ///
+/// Anisotropy (Lightweald's and glTF's `KHR_materials_anisotropy` layout)
+/// packs the axis in RG and the strength in B. Each level's strength is scaled
+/// by how much the axes it averages agree, so regions whose axes disagree
+/// fade toward isotropic instead of flickering.
+///
 /// Opacity mips preserve coverage at `settings.alpha_cutoff`. Normal mips
 /// widen roughness by their variance, so the roughness channel is written
 /// whenever normals are present, even without a roughness map. Lightweald and
@@ -223,6 +241,16 @@ pub fn pack(
     check(maps.specular_roughness.as_ref(), "specular_roughness", 1)?;
     check(maps.base_metalness.as_ref(), "base_metalness", 1)?;
     check(maps.occlusion.as_ref(), "occlusion", 1)?;
+    check(
+        maps.anisotropy_direction.as_ref(),
+        "anisotropy_direction",
+        2,
+    )?;
+    check(
+        maps.specular_roughness_anisotropy.as_ref(),
+        "specular_roughness_anisotropy",
+        1,
+    )?;
     let present = [
         ("base_color", maps.base_color.as_ref()),
         ("opacity", maps.opacity.as_ref()),
@@ -230,6 +258,11 @@ pub fn pack(
         ("specular_roughness", maps.specular_roughness.as_ref()),
         ("base_metalness", maps.base_metalness.as_ref()),
         ("occlusion", maps.occlusion.as_ref()),
+        ("anisotropy_direction", maps.anisotropy_direction.as_ref()),
+        (
+            "specular_roughness_anisotropy",
+            maps.specular_roughness_anisotropy.as_ref(),
+        ),
     ];
     let Some(first) = present.iter().find_map(|(_, i)| *i) else {
         return Ok(Bundle {
@@ -303,6 +336,15 @@ pub fn pack(
         .occlusion
         .as_ref()
         .map(|o| data_mips(o, settings.filter));
+    let direction = maps
+        .anisotropy_direction
+        .as_ref()
+        .map(|d| direction_mips(d, settings.filter))
+        .transpose()?;
+    let strength = maps
+        .specular_roughness_anisotropy
+        .as_ref()
+        .map(|a| data_mips(a, settings.filter));
 
     let reference = data_mips(&filled(first, 0.0), Filter::Box);
     let level_count = reference.levels().len();
@@ -430,10 +472,122 @@ pub fn pack(
             }
         }
     }
+    if let Some(direction) = &direction {
+        // The axis θ from the averaged doubled-angle vector, and how much the
+        // texels it averages agree (1 for one axis, 0 when they cancel).
+        let axis = |level: usize, i: usize| {
+            let v = &direction.levels()[level].values[i * 2..i * 2 + 2];
+            let coherence = libm::sqrtf(v[0] * v[0] + v[1] * v[1]).min(1.0);
+            let theta = 0.5 * libm::atan2f(v[1], v[0]);
+            (libm::cosf(theta), libm::sinf(theta), coherence)
+        };
+        let unit = |v: f32| v * 0.5 + 0.5;
+        match profile {
+            Profile::Lightweald | Profile::Gltf => textures.push(encode(
+                "anisotropy",
+                PixelFormat::Rgba8Unorm,
+                level_count,
+                edge,
+                |level, i, out| {
+                    let (c, s, coherence) = axis(level, i);
+                    let strength =
+                        value(&strength, level, i, settings.specular_roughness_anisotropy);
+                    // +Y toward the image top, as for normals. An axis and its
+                    // opposite are one direction, so the sign of the pair is free.
+                    out.push(quantize_unorm8(unit(c)));
+                    out.push(quantize_unorm8(unit(-s)));
+                    out.push(quantize_unorm8(strength * coherence));
+                    out.push(255);
+                },
+                size,
+            )),
+            Profile::Raw => {
+                textures.push(encode(
+                    "anisotropy_direction",
+                    PixelFormat::Rg8Unorm,
+                    level_count,
+                    edge,
+                    |level, i, out| {
+                        let (c, s, _) = axis(level, i);
+                        out.push(quantize_unorm8(unit(c)));
+                        out.push(quantize_unorm8(unit(s)));
+                    },
+                    size,
+                ));
+                textures.push(encode(
+                    "specular_roughness_anisotropy",
+                    PixelFormat::R8Unorm,
+                    level_count,
+                    edge,
+                    |level, i, out| {
+                        let (_, _, coherence) = axis(level, i);
+                        let strength =
+                            value(&strength, level, i, settings.specular_roughness_anisotropy);
+                        out.push(quantize_unorm8(strength * coherence));
+                    },
+                    size,
+                ));
+            }
+        }
+    }
     Ok(Bundle {
         profile,
         textures,
         report,
+    })
+}
+
+/// Encodes an arbitrary chain of data, such as height or identifiers, as one
+/// texture in `format`.
+///
+/// Values are written as they are: clamped and quantized for unsigned
+/// normalized formats (sRGB-encoded RGB for [`PixelFormat::Rgba8Srgb`]), and
+/// as little-endian IEEE bits for [`PixelFormat::R32Float`]. The chain's
+/// channel count must match the format's.
+pub fn encode_data(
+    name: &'static str,
+    chain: &MipChain,
+    format: PixelFormat,
+) -> Result<EncodedTexture, EncodeError> {
+    let base = chain.base();
+    if base.channels != format.channels() {
+        return Err(EncodeError::ChannelMismatch {
+            role: name,
+            expected: format.channels(),
+            found: base.channels,
+        });
+    }
+    let levels = chain
+        .levels()
+        .iter()
+        .map(|level| {
+            let mut bytes = Vec::with_capacity(level.values.len() * format.bytes_per_channel());
+            for (i, &v) in level.values.iter().enumerate() {
+                match format {
+                    PixelFormat::R8Unorm | PixelFormat::Rg8Unorm | PixelFormat::Rgba8Unorm => {
+                        bytes.push(quantize_unorm8(v));
+                    }
+                    PixelFormat::Rgba8Srgb => bytes.push(quantize_unorm8(if i % 4 == 3 {
+                        v
+                    } else {
+                        linear_to_srgb(v)
+                    })),
+                    PixelFormat::R16Unorm => {
+                        bytes.extend_from_slice(&quantize_unorm16(v).to_le_bytes());
+                    }
+                    PixelFormat::R32Float => bytes.extend_from_slice(&v.to_le_bytes()),
+                }
+            }
+            bytes
+        })
+        .collect();
+    Ok(EncodedTexture {
+        name,
+        format,
+        width: base.width,
+        height: base.height,
+        edge: base.edge,
+        levels,
     })
 }
 
@@ -541,5 +695,94 @@ mod tests {
         let color = bundle.texture("base_color").unwrap();
         // No base color map: OpenPBR's 0.8 default fills RGB.
         assert_eq!(color.levels[0][0], quantize_unorm8(linear_to_srgb(0.8)));
+    }
+
+    #[test]
+    fn anisotropy_packs_axis_and_agreement() {
+        // θ = 30° everywhere, strength 0.8: RG is (cos θ, −sin θ), B is 0.8.
+        let theta = core::f32::consts::FRAC_PI_6;
+        let doubled = [libm::cosf(2.0 * theta), libm::sinf(2.0 * theta)];
+        let maps = MaterialMaps {
+            anisotropy_direction: Some(flat(2, &doubled)),
+            specular_roughness_anisotropy: Some(flat(1, &[0.8])),
+            ..MaterialMaps::default()
+        };
+        let bundle = pack(&maps, Profile::Gltf, &PackSettings::default()).unwrap();
+        let aniso = bundle.texture("anisotropy").unwrap();
+        let unit = |v: f32| quantize_unorm8(v * 0.5 + 0.5);
+        assert_eq!(
+            &aniso.levels[0][..4],
+            [
+                unit(libm::cosf(theta)),
+                unit(-libm::sinf(theta)),
+                quantize_unorm8(0.8),
+                255
+            ]
+        );
+
+        // Perpendicular axes in every 2×2 block cancel: no anisotropy left.
+        let axis = |a: f32| [libm::cosf(2.0 * a), libm::sinf(2.0 * a)];
+        let half_pi = core::f32::consts::FRAC_PI_2;
+        let values: Vec<f32> = (0..16)
+            .flat_map(|i| {
+                if (i + i / 4) % 2 == 0 {
+                    axis(0.0)
+                } else {
+                    axis(half_pi)
+                }
+            })
+            .collect();
+        let maps = MaterialMaps {
+            anisotropy_direction: Some(Image::new(4, 4, 2, Edge::Wrap, values).unwrap()),
+            ..MaterialMaps::default()
+        };
+        let settings = PackSettings {
+            specular_roughness_anisotropy: 1.0,
+            ..PackSettings::default()
+        };
+        let raw = pack(&maps, Profile::Raw, &settings).unwrap();
+        let strength = raw.texture("specular_roughness_anisotropy").unwrap();
+        assert_eq!(strength.levels[0][0], 255);
+        assert!(
+            strength.levels[1].iter().all(|&b| b == 0),
+            "{:?}",
+            strength.levels[1]
+        );
+    }
+
+    #[test]
+    fn data_encodes_in_wide_formats() {
+        let height = Image::new(2, 2, 1, Edge::Clamp, vec![0.0, 0.5, 1.0, 2.0]).unwrap();
+        let chain = data_mips(&height, Filter::Box);
+        let short = encode_data("height", &chain, PixelFormat::R16Unorm).unwrap();
+        assert_eq!(short.levels[0], [0, 0, 0, 128, 255, 255, 255, 255]);
+        assert_eq!(
+            short.levels[1],
+            57_343_u16.to_le_bytes(),
+            "unclamped values average: (0 + 0.5 + 1 + 2) / 4 = 0.875"
+        );
+        let float = encode_data("height", &chain, PixelFormat::R32Float).unwrap();
+        assert_eq!(float.levels[0][12..16], 2.0_f32.to_le_bytes(), "unclamped");
+        assert_eq!(float.levels[1], 0.875_f32.to_le_bytes());
+        assert!(encode_data("height", &chain, PixelFormat::Rg8Unorm).is_err());
+        let file = crate::ktx2::write(&short);
+        assert_eq!(u32::from_le_bytes(file[12..16].try_into().unwrap()), 70);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn png_writes_sixteen_bits_and_refuses_floats() {
+        let image = Image::new(2, 1, 1, Edge::Clamp, vec![0.25, 1.0]).unwrap();
+        let chain = data_mips(&image, Filter::Box);
+        let short = encode_data("h", &chain, PixelFormat::R16Unorm).unwrap();
+        let bytes = crate::png::write(&short).unwrap();
+        assert_eq!(&bytes[1..4], b"PNG");
+        let float = encode_data("h", &chain, PixelFormat::R32Float).unwrap();
+        assert!(matches!(
+            crate::png::write(&float),
+            Err(crate::png::PngError::UnsupportedFormat(
+                PixelFormat::R32Float
+            ))
+        ));
     }
 }

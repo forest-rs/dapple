@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use dapple_field::ScalarField;
 use dapple_raster::{Realization, realize};
 
-use crate::filter::{Filter, downsample, next_size};
+use crate::filter::{Filter, downsample, downsample_majority, next_size};
 use crate::{EncodeError, Image};
 
 /// Mip levels of one image, largest first; each level halves the one above
@@ -61,6 +61,42 @@ impl MipChain {
 #[must_use]
 pub fn data_mips(image: &Image, filter: Filter) -> MipChain {
     MipChain::build(image.clone(), |level| downsample(level, filter))
+}
+
+/// Mips of a single-channel identifier image (region or cell IDs stored as
+/// exact integers in `f32`).
+///
+/// Each level takes, per texel, the identifier covering most of its source
+/// area, ties going to the smaller one: identifiers are never blended, so no
+/// level invents an ID that is not in the one above.
+pub fn id_mips(image: &Image) -> Result<MipChain, EncodeError> {
+    if image.channels != 1 {
+        return Err(EncodeError::ChannelMismatch {
+            role: "id",
+            expected: 1,
+            found: image.channels,
+        });
+    }
+    Ok(MipChain::build(image.clone(), downsample_majority))
+}
+
+/// Mips of an undirected-direction image: two channels holding the
+/// doubled-angle vector `(cos 2θ, sin 2θ)` of `dapple_field`'s
+/// `PortType::Direction`.
+///
+/// Averaging in that space is the correct rule: it is sign-free, so `θ` and
+/// `θ + π` reinforce instead of cancelling, and the averaged vector's length
+/// falls where the directions disagree. Levels keep the unnormalized average
+/// so packing can scale anisotropy by that agreement.
+pub fn direction_mips(image: &Image, filter: Filter) -> Result<MipChain, EncodeError> {
+    if image.channels != 2 {
+        return Err(EncodeError::ChannelMismatch {
+            role: "direction",
+            expected: 2,
+            found: image.channels,
+        });
+    }
+    Ok(data_mips(image, filter))
 }
 
 /// Mips realized from fields, one channel per field, instead of filtered.
@@ -488,5 +524,32 @@ mod tests {
         let filtered = data_mips(chain.base(), Filter::Box);
         assert!(spread(&chain.levels()[3]) <= spread(&filtered.levels()[3]) + 1e-6);
         assert!(field_mips::<FieldProgram>(&[], realization).is_err());
+    }
+
+    #[test]
+    fn directions_average_sign_free() {
+        // Angles 0 and π are one axis; 0 and π/2 cancel.
+        let axis = |angle: f32| [libm::cosf(2.0 * angle), libm::sinf(2.0 * angle)];
+        let pi = core::f32::consts::PI;
+        let values: Vec<f32> = [axis(0.0), axis(pi), axis(0.0), axis(pi)]
+            .into_iter()
+            .chain([axis(0.0), axis(pi / 2.0), axis(0.0), axis(pi / 2.0)])
+            .flatten()
+            .collect();
+        let image = Image::new(4, 2, 2, Edge::Clamp, values).unwrap();
+        let chain = direction_mips(&image, Filter::Box).unwrap();
+        let level = &chain.levels()[1];
+        // Left 2×2 block: 0, π, 0, π/2 → three of one axis, one crossed.
+        let (x, y) = (level.values[0], level.values[1]);
+        assert!((x - 0.5).abs() < 1e-6 && y.abs() < 1e-6, "{x} {y}");
+        assert!(
+            direction_mips(
+                &Image::new(1, 1, 1, Edge::Clamp, vec![0.0]).unwrap(),
+                Filter::Box
+            )
+            .is_err()
+        );
+        let ids = Image::new(2, 2, 1, Edge::Wrap, vec![4.0, 4.0, 1.0, 4.0]).unwrap();
+        assert_eq!(id_mips(&ids).unwrap().levels()[1].values, [4.0]);
     }
 }

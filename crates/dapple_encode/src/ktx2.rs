@@ -10,7 +10,8 @@
 //! - every level of the texture's chain, uncompressed (no
 //!   supercompression);
 //! - the Vulkan format of its [`PixelFormat`]: `VK_FORMAT_R8_UNORM`,
-//!   `R8G8_UNORM`, `R8G8B8A8_UNORM` or `R8G8B8A8_SRGB`;
+//!   `R8G8_UNORM`, `R8G8B8A8_UNORM`, `R8G8B8A8_SRGB`, `R16_UNORM` or
+//!   `R32_SFLOAT`;
 //! - a Basic Data Format Descriptor (KDF 1.3) with one sample per channel,
 //!   BT.709 primaries, and the sRGB or linear transfer function; in sRGB
 //!   files the alpha sample is flagged linear;
@@ -19,7 +20,8 @@
 //!   `lcm(texel size, 4)`, as the specification requires, and indexed
 //!   largest first.
 //!
-//! These are the uncompressed formats `lightweald_texture_io` reads.
+//! The 8-bit formats are the uncompressed formats `lightweald_texture_io`
+//! reads; the 16-bit and float formats carry data such as height.
 //! Block-compressed formats are a later step.
 
 use alloc::vec::Vec;
@@ -43,6 +45,8 @@ pub const fn vk_format(format: PixelFormat) -> u32 {
         PixelFormat::Rg8Unorm => 16,
         PixelFormat::Rgba8Unorm => 37,
         PixelFormat::Rgba8Srgb => 43,
+        PixelFormat::R16Unorm => 70,
+        PixelFormat::R32Float => 100,
     }
 }
 
@@ -67,7 +71,9 @@ fn len_u32(n: usize) -> u32 {
 
 /// The Basic Data Format Descriptor block, prefixed by its total size.
 fn data_format_descriptor(format: PixelFormat) -> Vec<u8> {
-    let channels = format.bytes_per_texel();
+    let channels = format.channels();
+    let bits = len_u32(format.bytes_per_channel() * 8);
+    let float = format == PixelFormat::R32Float;
     let block_bytes = 24 + 16 * channels;
     let mut out = Vec::with_capacity(4 + block_bytes);
     put_u32(&mut out, len_u32(4 + block_bytes));
@@ -82,7 +88,7 @@ fn data_format_descriptor(format: PixelFormat) -> Vec<u8> {
     // texelBlockDimension0..3, each stored minus one: a 1×1×1×1 block.
     put_u32(&mut out, 0);
     // bytesPlane0 is the texel size; planes 1..7 are unused.
-    put_u32(&mut out, len_u32(channels));
+    put_u32(&mut out, len_u32(format.bytes_per_texel()));
     put_u32(&mut out, 0);
     for channel in 0..channels {
         let id: u32 = if channel == 3 { 15 } else { len_u32(channel) };
@@ -92,14 +98,24 @@ fn data_format_descriptor(format: PixelFormat) -> Vec<u8> {
         } else {
             0
         };
-        let bit_offset = len_u32(channel * 8);
+        // Floats are signed; their range is written as float bits.
+        let qualifiers: u32 = if float { 0xC0 } else { 0 };
+        let bit_offset = len_u32(channel) * bits;
         // bitOffset, bitLength − 1, channelType with qualifiers.
-        put_u32(&mut out, bit_offset | (7 << 16) | ((id | linear) << 24));
+        put_u32(
+            &mut out,
+            bit_offset | ((bits - 1) << 16) | ((id | linear | qualifiers) << 24),
+        );
         // samplePosition0..3.
         put_u32(&mut out, 0);
         // sampleLower, sampleUpper.
-        put_u32(&mut out, 0);
-        put_u32(&mut out, 255);
+        if float {
+            put_u32(&mut out, (-1.0_f32).to_bits());
+            put_u32(&mut out, 1.0_f32.to_bits());
+        } else {
+            put_u32(&mut out, 0);
+            put_u32(&mut out, (1_u32 << bits) - 1);
+        }
     }
     out
 }
@@ -140,7 +156,7 @@ pub fn write(texture: &EncodedTexture) -> Vec<u8> {
     let kvd_offset = dfd_offset + dfd.len();
     let level_alignment = match texel {
         1 | 2 | 4 => 4,
-        _ => unreachable!("texel sizes are 1, 2 or 4"),
+        _ => unreachable!("texel sizes are 1, 2 or 4 bytes"),
     };
     // Levels are stored smallest first.
     let mut offsets = alloc::vec![0_usize; levels];
@@ -154,7 +170,8 @@ pub fn write(texture: &EncodedTexture) -> Vec<u8> {
     let mut out = Vec::with_capacity(cursor);
     out.extend_from_slice(&IDENTIFIER);
     put_u32(&mut out, vk_format(texture.format));
-    put_u32(&mut out, 1); // typeSize: 8-bit components.
+    // typeSize: the size of one component, for endianness conversion.
+    put_u32(&mut out, len_u32(texture.format.bytes_per_channel()));
     put_u32(&mut out, texture.width);
     put_u32(&mut out, texture.height);
     put_u32(&mut out, 0); // pixelDepth
@@ -233,12 +250,14 @@ mod tests {
             PixelFormat::Rg8Unorm,
             PixelFormat::Rgba8Unorm,
             PixelFormat::Rgba8Srgb,
+            PixelFormat::R16Unorm,
+            PixelFormat::R32Float,
         ] {
             let tex = texture(format, 8, 3);
             let file = write(&tex);
             assert_eq!(&file[..12], &IDENTIFIER);
             assert_eq!(u32_at(&file, 12), vk_format(format));
-            assert_eq!(u32_at(&file, 16), 1);
+            assert_eq!(u32_at(&file, 16) as usize, format.bytes_per_channel());
             assert_eq!((u32_at(&file, 20), u32_at(&file, 24)), (8, 3));
             assert_eq!((u32_at(&file, 28), u32_at(&file, 32)), (0, 0));
             assert_eq!(u32_at(&file, 36), 1);
@@ -283,6 +302,12 @@ mod tests {
             [0, 1, 2, 15 | 0x10],
             "RGB, then alpha flagged linear"
         );
+        let float = data_format_descriptor(PixelFormat::R32Float);
+        assert_eq!(u32_at(&float, 28) >> 24, 0xC0, "signed float red");
+        assert_eq!((u32_at(&float, 28) >> 16) & 0xFF, 31, "32 bits");
+        assert_eq!(u32_at(&float, 40), 1.0_f32.to_bits(), "sampleUpper");
+        let short = data_format_descriptor(PixelFormat::R16Unorm);
+        assert_eq!(u32_at(&short, 40), 65535, "sampleUpper");
         let linear = data_format_descriptor(PixelFormat::Rg8Unorm);
         assert_eq!((u32_at(&linear, 12) >> 16) & 0xFF, 1, "linear transfer");
         assert_eq!(u32_at(&linear, 28 + 16) & 0xFFFF, 8, "G starts at bit 8");

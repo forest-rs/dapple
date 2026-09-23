@@ -1,19 +1,20 @@
 [package]
-name = "dapple_library"
+name = "dapple_elements"
 version = "0.0.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Ready-made dapple materials built as field programs"
+description = "Keyed element sets for dapple: layouts with stable identity, surface programs, and explicit compositing ownership"
 readme = "README.md"
 keywords = ["procedural", "texture", "material", "no_std"]
 categories = ["graphics", "no-std"]
 
 [dependencies]
-dapple_elements.workspace = true
 dapple_field.workspace = true
+dapple_raster.workspace = true
 glam.workspace = true
+libm.workspace = true
 
 [lints]
 workspace = true

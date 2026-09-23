@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/dapple_compress",
+    "crates/dapple_elements",
     "crates/dapple_encode",
     "crates/dapple_exedra",
     "crates/dapple_field",
@@ -10,6 +11,7 @@ members = [
     "crates/dapple_library",
     "crates/dapple_raster",
     "examples/field_gallery",
+    "examples/glazed_brick",
     "examples/imaging_gallery",
     "examples/timber_bake",
     "tools/dapple_bake",
@@ -79,6 +81,7 @@ clippy.allow_attributes = "warn"
 
 [workspace.dependencies]
 dapple_compress = { path = "crates/dapple_compress" }
+dapple_elements = { path = "crates/dapple_elements" }
 dapple_encode = { path = "crates/dapple_encode" }
 dapple_exedra = { path = "crates/dapple_exedra" }
 dapple_field = { path = "crates/dapple_field" }

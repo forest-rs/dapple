@@ -13,12 +13,17 @@
 //! - [`brick`]: a running-bond brick wall, tileable.
 //! - [`gravel`]: scattered pebbles of three sizes over sand, tileable.
 //! - [`parquet`]: oak planks in herringbone, tileable.
+//! - [`glazed_brick`]: keyed glazed bricks whose identity drives shape,
+//!   glaze and chips (`dapple_elements`), tileable.
 
 #![no_std]
+
+extern crate alloc;
 
 use dapple_field::program::{NodeId, Op, ProgramBuilder, ProgramError};
 
 pub mod brick;
+pub mod glazed_brick;
 pub mod gravel;
 pub mod oak;
 pub mod parquet;

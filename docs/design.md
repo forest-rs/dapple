@@ -876,6 +876,11 @@ meaning.
   sample), and the dependencies are checked: a per-element value may depend
   on material parameters and element attributes, never on the sample
   position. The compiler may hoist further work when it can prove it.
+  *Implemented* as `dapple_elements::program`: a small expression body
+  (`Node`) that samples field programs as declared resources, rather than
+  new ops in the field IR. Slice 2's programmable IR core absorbs it; its
+  `SurfaceProgram` value and scope rules are the contract that carries
+  over.
 - **Demo: glazed brickwork.** One brick's identity drives its shape, bevel,
   glaze (tone, thickness, pooling toward the lower edge), chips, and the
   ceramic body the chips expose.

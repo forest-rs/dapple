@@ -198,6 +198,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dapple_elements"
+version = "0.0.1"
+dependencies = [
+ "dapple_field",
+ "dapple_raster",
+ "glam",
+ "libm",
+]
+
+[[package]]
 name = "dapple_encode"
 version = "0.0.1"
 dependencies = [
@@ -258,6 +268,7 @@ dependencies = [
 name = "dapple_library"
 version = "0.0.1"
 dependencies = [
+ "dapple_elements",
  "dapple_field",
  "glam",
 ]
@@ -507,6 +518,18 @@ checksum = "a0990707078259d76f65619a692e87c82645be66cbee224173cd1af151e54ba2"
 dependencies = [
  "libm",
  "serde_core",
+]
+
+[[package]]
+name = "glazed_brick"
+version = "0.0.0"
+dependencies = [
+ "dapple_elements",
+ "dapple_field",
+ "dapple_library",
+ "dapple_raster",
+ "glam",
+ "png",
 ]
 
 [[package]]

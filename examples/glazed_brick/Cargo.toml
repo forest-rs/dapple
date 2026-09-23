@@ -1,0 +1,20 @@
+[package]
+name = "glazed_brick"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Writes review images of dapple_library's keyed glazed brickwork"
+publish = false
+
+[dependencies]
+dapple_elements.workspace = true
+dapple_field.workspace = true
+dapple_library.workspace = true
+dapple_raster.workspace = true
+glam.workspace = true
+png.workspace = true
+
+[lints]
+workspace = true

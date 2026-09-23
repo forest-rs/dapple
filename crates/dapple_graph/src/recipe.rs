@@ -17,12 +17,13 @@ use core::fmt;
 
 use dapple_encode::Filter;
 use dapple_field::hash::hash;
-use dapple_field::program::{Fingerprint, Op};
+use dapple_field::program::{Fingerprint, Op, sample_fingerprint};
 use execution_graph::NodeId;
 
 use crate::{
     MaterialError, MaterialGraph, NodeKind, Params, RasterParams, fingerprint_words,
     mip_fingerprint, normals_fingerprint, raster_fingerprint, realize_fingerprint,
+    sample_derivation,
 };
 
 /// The recipe format version this crate reads and writes.
@@ -66,6 +67,12 @@ pub enum Step {
         input: String,
         /// The filter.
         filter: Filter,
+    },
+    /// A sample node ([`MaterialGraph::sample`]): rasters read back as a
+    /// field.
+    Sample {
+        /// Labels of the base raster node and its mip nodes, finest first.
+        inputs: Vec<String>,
     },
     /// A normals node over one period of its field
     /// ([`MaterialGraph::normals`]).
@@ -165,6 +172,9 @@ pub enum RecipeError {
         /// The label it reads.
         input: String,
     },
+    /// A field node's op holds an image ([`Op::Sample`]), which recipes
+    /// cannot carry; sample rasters with a [`Step::Sample`] node instead.
+    EmbeddedImage(String),
     /// Building the graph failed.
     Material(MaterialError),
 }
@@ -181,6 +191,10 @@ impl fmt::Display for RecipeError {
             Self::WrongInput { at, input } => {
                 write!(f, "{at:?} cannot read {input:?}, a node of another kind")
             }
+            Self::EmbeddedImage(label) => write!(
+                f,
+                "field node {label:?} holds an image; sample rasters with a sample node"
+            ),
             Self::Material(error) => error.fmt(f),
         }
     }
@@ -202,8 +216,14 @@ impl Step {
             Self::Raster { .. } => NodeKind::Raster,
             Self::Normals { .. } => NodeKind::Normals,
             Self::Mip { .. } => NodeKind::Mip,
+            Self::Sample { .. } => NodeKind::Sample,
         }
     }
+}
+
+/// Whether nodes of `kind` output a field.
+const fn is_field(kind: NodeKind) -> bool {
+    matches!(kind, NodeKind::Field | NodeKind::Sample)
 }
 
 impl Recipe {
@@ -228,21 +248,37 @@ impl Recipe {
                 input: input.clone(),
             };
             match &node.step {
-                Step::Field { inputs, .. } => {
+                Step::Field { op, inputs } => {
+                    if matches!(op, Op::Sample { .. }) {
+                        return Err(RecipeError::EmbeddedImage(node.label.clone()));
+                    }
                     for input in inputs {
-                        if input_kind(input)? != NodeKind::Field {
+                        if !is_field(input_kind(input)?) {
                             return Err(wrong(input));
                         }
                     }
                 }
                 Step::Realize { input, .. } | Step::Normals { input, .. } => {
-                    if input_kind(input)? != NodeKind::Field {
+                    if !is_field(input_kind(input)?) {
                         return Err(wrong(input));
                     }
                 }
                 Step::Raster { input, .. } | Step::Mip { input, .. } => {
-                    if input_kind(input)? == NodeKind::Field {
+                    if is_field(input_kind(input)?) {
                         return Err(wrong(input));
+                    }
+                }
+                Step::Sample { inputs } => {
+                    if inputs.is_empty() {
+                        return Err(RecipeError::WrongInput {
+                            at: node.label.clone(),
+                            input: String::new(),
+                        });
+                    }
+                    for input in inputs {
+                        if is_field(input_kind(input)?) {
+                            return Err(wrong(input));
+                        }
                     }
                 }
             }
@@ -257,7 +293,7 @@ impl Recipe {
             for channel in &output.channels {
                 match kinds.get(channel.as_str()) {
                     None => return Err(RecipeError::UnknownLabel(channel.clone())),
-                    Some(NodeKind::Field) => {
+                    Some(NodeKind::Field | NodeKind::Sample) => {
                         return Err(RecipeError::WrongInput {
                             at: output.role.clone(),
                             input: channel.clone(),
@@ -342,6 +378,18 @@ impl Recipe {
                     }
                     NodeFingerprint::Field(_) => unreachable!("checked: mips read rasters"),
                 },
+                Step::Sample { inputs } => {
+                    let rasters: Vec<u64> = inputs
+                        .iter()
+                        .map(|label| match out[label] {
+                            NodeFingerprint::Raster(fp) => fp,
+                            NodeFingerprint::Field(_) => {
+                                unreachable!("checked: sample nodes read rasters")
+                            }
+                        })
+                        .collect();
+                    NodeFingerprint::Field(sample_fingerprint(sample_derivation(&rasters)))
+                }
             };
             out.insert(node.label.clone(), fingerprint);
         }
@@ -418,6 +466,10 @@ impl Recipe {
                 } => graph.realize(&node.label, ids[input], *width, *height)?,
                 Step::Raster { input, params } => graph.raster(&node.label, *params, ids[input])?,
                 Step::Mip { input, filter } => graph.mip(&node.label, ids[input], *filter)?,
+                Step::Sample { inputs } => {
+                    let levels: Vec<NodeId> = inputs.iter().map(|l| ids[l]).collect();
+                    graph.sample(&node.label, &levels)?
+                }
                 Step::Normals {
                     input,
                     width,
@@ -459,6 +511,9 @@ impl MaterialGraph {
                     Params::Mip(filter) => Step::Mip {
                         input: label(&entry.upstream[0]),
                         filter: *filter,
+                    },
+                    Params::Sample => Step::Sample {
+                        inputs: entry.upstream.iter().map(label).collect(),
                     },
                     Params::Normals {
                         width,

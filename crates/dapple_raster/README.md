@@ -7,7 +7,8 @@ their parameters in domain units and their kernel footprints in texels.
 - `realize` with a `Realization`: one period of a periodic field (wrapping
   edges) or any region (clamping edges).
 - `GaussianBlur`, `HeightToNormal`, `AmbientOcclusion`, `DistanceTransform`.
-- `SampledField`: a raster as a field again, with bilinear filtering.
+- `SampledField`: a raster as a field again, with bilinear filtering shared
+  with `dapple_field::SampleImage`. `Edge` is `dapple_field`'s.
 
 Wrapping rasters are tori: every operation commutes exactly with rolling the
 raster, so results tile. Results are bit-exact across platforms.

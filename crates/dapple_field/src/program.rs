@@ -59,6 +59,7 @@ use crate::domain::{Domain, DomainError, Footprint};
 use crate::field::{Affine2, ScalarField, check_transform};
 use crate::fractal::{Fractal, FractalKind, FractalParams};
 use crate::hash::hash;
+use crate::image::SampleImage;
 use crate::noise::{Basis, Noise};
 use crate::raster::Region;
 use crate::shape::Disk;
@@ -332,6 +333,19 @@ pub enum Op {
         /// The direction.
         input: NodeId,
     },
+    /// Texels read back as a field ([`SampleImage`]): bilinear, wrapping on a
+    /// periodic domain, filtered through the image's mips by the footprint.
+    ///
+    /// The image carries its texels, so programs holding one are values, not
+    /// descriptions: the op never serializes, and its fingerprint is the
+    /// image's [derivation](SampleImage::derivation), not a hash of the
+    /// texels. A material graph samples its rasters through sample nodes,
+    /// which recipes name by label.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    Sample {
+        /// The image and its domain.
+        image: SampleImage,
+    },
     /// A detail normal applied to a base normal, both in the same frame.
     BlendNormals {
         /// The base normal.
@@ -512,6 +526,10 @@ impl Op {
                 let t = transform.translation.to_array();
                 words.extend(m.iter().chain(&t).map(|v| float(*v)));
             }
+            Self::Sample { ref image } => {
+                let [lo, hi] = fingerprint_halves(image.derivation());
+                words.extend([lo, hi]);
+            }
             Self::Clamp { min, max, .. } => words.extend([float(min), float(max)]),
             Self::Remap { from, to, .. } => words.extend(from.iter().chain(&to).map(|v| float(*v))),
             Self::Warp { amount, .. } => words.push(float(amount)),
@@ -575,7 +593,8 @@ impl Op {
             | Self::Noise { .. }
             | Self::Fractal { .. }
             | Self::Cellular { .. }
-            | Self::Disk { .. } => {}
+            | Self::Disk { .. }
+            | Self::Sample { .. } => {}
             Self::Transform { input, .. }
             | Self::Demote { input }
             | Self::Abs { input }
@@ -629,7 +648,8 @@ impl Op {
             | Self::Noise { .. }
             | Self::Fractal { .. }
             | Self::Cellular { .. }
-            | Self::Disk { .. } => {}
+            | Self::Disk { .. }
+            | Self::Sample { .. } => {}
             Self::Transform { input, .. }
             | Self::Demote { input }
             | Self::Abs { input }
@@ -705,6 +725,7 @@ impl Op {
             Self::Angle { .. } => "angle",
             Self::Coherence { .. } => "coherence",
             Self::BlendNormals { .. } => "blend-normals",
+            Self::Sample { .. } => "sample",
         }
     }
 }
@@ -742,6 +763,8 @@ impl Inputs {
 /// - an [`Affine2`] as its matrix columns, then its translation;
 /// - a component index or identifier level count as itself, and a
 ///   [`NormalBlend`] as its declaration index;
+/// - an [`Op::Sample`] image as the two halves of its derivation
+///   ([`SampleImage::derivation`]); its texels and shape are not encoded;
 /// - each input as the two halves of its own fingerprint, in operand order.
 ///
 /// Node identities and creation order are not part of it: equal subgraphs
@@ -757,6 +780,23 @@ impl fmt::Display for Fingerprint {
 }
 
 const LANE_SEEDS: [u64; 2] = [0x6461_7070_6c65_2d30, 0x6461_7070_6c65_2d31]; // "dapple-0", "dapple-1"
+
+/// A fingerprint's low and high 64-bit halves.
+fn fingerprint_halves(fp: Fingerprint) -> [u64; 2] {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "splitting the 128-bit fingerprint into its halves"
+    )]
+    [fp.0 as u64, (fp.0 >> 64) as u64]
+}
+
+/// The fingerprint an [`Op::Sample`] node has for an image derived as
+/// `derivation`, for predicting it without the texels.
+#[must_use]
+pub fn sample_fingerprint(derivation: Fingerprint) -> Fingerprint {
+    let [lo, hi] = fingerprint_halves(derivation);
+    fingerprint_words(&[FINGERPRINT_VERSION, 28, lo, hi])
+}
 
 fn fingerprint_words(words: &[u64]) -> Fingerprint {
     let [lo, hi] = LANE_SEEDS.map(|seed| hash(seed, words));
@@ -831,6 +871,7 @@ enum Kernel {
     Fractal(Fractal),
     Cellular(CellularField),
     Disk(Disk),
+    Sample(SampleImage),
     Transform {
         input: NodeId,
         transform: Affine2,
@@ -1002,6 +1043,7 @@ impl ProgramBuilder {
             | Op::Fractal { domain, .. }
             | Op::Cellular { domain, .. }
             | Op::Disk { domain, .. } => domain,
+            Op::Sample { ref image } => image.domain(),
             Op::Demote { .. } => Domain::Plane,
             _ => {
                 let mut inputs = op
@@ -1057,6 +1099,7 @@ impl ProgramBuilder {
                 PortType::Scalar
             }
             Op::Disk { .. } => PortType::Mask,
+            Op::Sample { .. } => PortType::Scalar,
             Op::Transform { input, transform } => {
                 let found = port(input);
                 let directional = matches!(
@@ -1240,6 +1283,7 @@ impl ProgramBuilder {
                 radius,
                 softness,
             } => Kernel::Disk(Disk::new(domain, Vec2::from(center), radius, softness)?),
+            Op::Sample { ref image } => Kernel::Sample(image.clone()),
             Op::Transform { input, transform } => {
                 let stretch = check_transform(self.nodes[input.0 as usize].domain, transform)?;
                 Kernel::Transform {
@@ -1353,6 +1397,7 @@ fn op_tag(op: &Op) -> u64 {
         Op::Angle { .. } => 25,
         Op::Coherence { .. } => 26,
         Op::Disk { .. } => 27,
+        Op::Sample { .. } => 28,
     }
 }
 
@@ -1683,6 +1728,7 @@ impl Kernel {
             Self::Fractal(ref fractal) => fractal.eval_gradient(p, footprint).1,
             Self::Disk(ref disk) => disk.eval_gradient(p, footprint).1,
             Self::Cellular(ref cellular) => cellular.eval_gradient(p, footprint).1,
+            Self::Sample(ref image) => image.sample_gradient(p, footprint).1,
             Self::Binary(op, ..) => {
                 let (a, b) = (s(0)?, s(1)?);
                 let (ga, gb) = (gradients[0], gradients[1]);
@@ -1748,6 +1794,7 @@ impl Kernel {
             Self::Fractal(ref fractal) => Value::Scalar(fractal.eval(p, footprint)),
             Self::Cellular(ref cellular) => Value::Scalar(cellular.eval(p, footprint)),
             Self::Disk(ref disk) => Value::Scalar(disk.eval(p, footprint)),
+            Self::Sample(ref image) => Value::Scalar(image.sample(p, footprint)),
             Self::Binary(op, ..) => componentwise(args[0], args[1], |a, b| match op {
                 BinaryOp::Add => a + b,
                 BinaryOp::Sub => a - b,

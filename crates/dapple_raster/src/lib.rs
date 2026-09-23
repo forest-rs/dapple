@@ -57,6 +57,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use dapple_field::hash::hash;
+use dapple_field::image::{bilinear, texel_coordinates};
 use dapple_field::raster::Region;
 use dapple_field::{Domain, Footprint, ScalarField};
 use glam::Vec2;
@@ -69,14 +70,9 @@ pub use normal::HeightToNormal;
 /// Largest texel count per raster, so indices and sizes stay exact.
 pub const MAX_TEXELS: u64 = 1 << 28;
 
-/// How a raster continues past its border.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub enum Edge {
-    /// The raster is one period of a torus: coordinates wrap.
-    Wrap,
-    /// Coordinates clamp to the nearest border texel.
-    Clamp,
-}
+/// How a raster continues past its border: `dapple_field`'s [`Edge`], shared
+/// with sampled images.
+pub use dapple_field::Edge;
 
 /// A rejected realization or raster operation.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -838,62 +834,23 @@ impl ScalarField for SampledField {
         self.domain
     }
 
+    /// The bilinear sample at `p`, whatever the footprint: one raster level
+    /// is not band-limited. Sample through a mip chain with
+    /// `dapple_field::SampleImage` to filter by footprint.
     fn eval(&self, p: Vec2, _footprint: Footprint) -> f32 {
-        // Periodic coordinates are reduced exactly in f64 first, so every
-        // repeat of a point samples identical bits, as periodic fields must.
-        let local = |v: f32, origin: f32, texel: f32, period: Option<u32>| {
-            let mut v = f64::from(v) - f64::from(origin);
-            if let Some(period) = period {
-                // `fmod` is exact, so every repeat reduces to the same value.
-                let period = f64::from(period);
-                v = libm::fmod(v, period);
-                if v < 0.0 {
-                    v += period;
-                }
-            }
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "texel coordinates are bounded by the raster size"
-            )]
-            let t = (v / f64::from(texel) - 0.5) as f32;
-            t
-        };
-        let period = self.domain.period();
-        let t = Vec2::new(
-            local(
-                p.x,
-                self.raster.origin.x,
-                self.raster.texel.x,
-                period.map(|p| p[0]),
-            ),
-            local(
-                p.y,
-                self.raster.origin.y,
-                self.raster.texel.y,
-                period.map(|p| p[1]),
-            ),
+        let t = texel_coordinates(
+            p,
+            self.raster.origin,
+            self.raster.texel,
+            self.domain.period(),
         );
-        bilinear(&self.raster, t)
+        bilinear(
+            &self.raster.values,
+            [self.raster.width, self.raster.height],
+            self.raster.edge,
+            t,
+        )
     }
-}
-
-/// Bilinear sample at continuous texel coordinates (texel centers at
-/// integers), continued by the raster's edge policy.
-pub(crate) fn bilinear(raster: &Raster, t: Vec2) -> f32 {
-    let (fx, fy) = (libm::floorf(t.x), libm::floorf(t.y));
-    let (u, v) = (t.x - fx, t.y - fy);
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "floored coordinates are bounded by the raster size plus kernel reach"
-    )]
-    let (x, y) = (fx as i64, fy as i64);
-    let a = raster.at(x, y);
-    let b = raster.at(x + 1, y);
-    let c = raster.at(x, y + 1);
-    let d = raster.at(x + 1, y + 1);
-    let top = a + (b - a) * u;
-    let bottom = c + (d - c) * u;
-    top + (bottom - top) * v
 }
 
 #[cfg(test)]

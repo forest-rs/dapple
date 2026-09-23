@@ -10,6 +10,9 @@ Incremental material graphs for [dapple](../../docs/design.md), on
 - **Normals nodes** realize a scalar field's normals from its gradient.
 - **Mip nodes** filter a scalar raster down one level, bit for bit as
   `dapple_encode::data_mips`; chains of them build whole mip chains.
+- **Sample nodes** read a scalar raster and its mips back as a field, so
+  realized, blurred or eroded rasters feed further field ops; their change
+  regions come from the sampled rasters' changed tiles.
 
 Each node's parameters are one of its inputs, so editing them re-runs exactly
 that node and its dependents; a node whose output does not change cuts its

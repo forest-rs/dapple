@@ -454,7 +454,7 @@ fn graphs_export_recipes_that_rebuild_them() {
     for node in &mut relabeled.nodes {
         node.label.insert_str(0, "x.");
         match &mut node.step {
-            Step::Field { inputs, .. } => {
+            Step::Field { inputs, .. } | Step::Sample { inputs } => {
                 for i in inputs {
                     i.insert_str(0, "x.");
                 }
@@ -802,5 +802,165 @@ fn recipes_carry_mip_nodes() {
     assert!(matches!(
         wrong.fingerprints(),
         Err(RecipeError::WrongInput { .. })
+    ));
+}
+
+/// A disk over noise realized at 64², blurred, sampled back with its Box
+/// mips, warped by noise, and realized again.
+struct Resampled {
+    graph: MaterialGraph,
+    disk: NodeId,
+    soft: NodeId,
+    sample: NodeId,
+    again: NodeId,
+}
+
+fn resampled(x: f32) -> Resampled {
+    let mut g = MaterialGraph::with_tile_size(16);
+    let noise = g.field("noise", noise_op(1), &[]).unwrap();
+    let disk = g.field("disk", disk_op(x), &[]).unwrap();
+    let height = g
+        .field(
+            "height",
+            Op::Max {
+                a: operand(0),
+                b: operand(1),
+            },
+            &[noise, disk],
+        )
+        .unwrap();
+    let map = g.realize("map", height, 64, 64).unwrap();
+    let soft = g
+        .raster(
+            "soft",
+            RasterParams::Blur(GaussianBlur { sigma: 0.01 }),
+            map,
+        )
+        .unwrap();
+    let mip1 = g.mip("soft1", soft, Filter::Box).unwrap();
+    let mip2 = g.mip("soft2", mip1, Filter::Box).unwrap();
+    let sample = g.sample("sampled", &[soft, mip1, mip2]).unwrap();
+    let doubled = g
+        .field(
+            "doubled",
+            Op::Add {
+                a: operand(0),
+                b: operand(0),
+            },
+            &[sample],
+        )
+        .unwrap();
+    let again = g.realize("again", doubled, 64, 64).unwrap();
+    Resampled {
+        graph: g,
+        disk,
+        soft,
+        sample,
+        again,
+    }
+}
+
+#[test]
+fn sample_nodes_read_rasters_back_as_fields() {
+    let mut r = resampled(0.2);
+    r.graph.run().unwrap();
+    let soft = scalar(&r.graph, r.soft);
+    let program = r.graph.field_value(r.sample).unwrap();
+    // At texel centers with a point footprint the field is the raster.
+    for (y, x) in [(0_u32, 0_u32), (13, 40), (63, 63)] {
+        #[expect(clippy::cast_precision_loss, reason = "tiny test sizes")]
+        let p = Vec2::new((x as f32 + 0.5) / 64.0, (y as f32 + 0.5) / 64.0);
+        let value = program.eval(p, dapple_field::Footprint::POINT);
+        assert_eq!(
+            value.scalar().unwrap().to_bits(),
+            soft.values()[(y * 64 + x) as usize].to_bits()
+        );
+    }
+    // Realizing the doubled field at the same resolution doubles the texels:
+    // realization samples texel centers with a one-texel footprint, which
+    // reads level 0 exactly.
+    let again = scalar(&r.graph, r.again);
+    for (a, b) in again.values().iter().zip(soft.values()) {
+        assert_eq!(a.to_bits(), (b + b).to_bits());
+    }
+}
+
+#[test]
+fn sample_nodes_change_only_near_changed_tiles() {
+    let mut r = resampled(0.2);
+    r.graph.run().unwrap();
+    r.graph.set_field_op(r.disk, disk_op(0.25)).unwrap();
+    r.graph.run().unwrap();
+    let report = r.graph.tile_report();
+    assert_eq!(report.unbounded_changes, 0, "{report:?}");
+    // Every node, the resampled realization included, recomputes only the
+    // tiles the move reaches.
+    assert_eq!(report.whole_recomputes, 0, "{report:?}");
+    assert!(report.tiles_reused > 0, "{report:?}");
+    let mut fresh = resampled(0.25);
+    fresh.graph.run().unwrap();
+    assert_eq!(
+        scalar(&r.graph, r.again).digest(),
+        scalar(&fresh.graph, fresh.again).digest()
+    );
+    assert_eq!(
+        r.graph.field_value(r.sample).unwrap().fingerprint(),
+        fresh.graph.field_value(fresh.sample).unwrap().fingerprint()
+    );
+}
+
+#[test]
+fn recipes_carry_sample_nodes() {
+    let mut r = resampled(0.2);
+    r.graph.run().unwrap();
+    let recipe = r.graph.recipe();
+    let predicted = recipe.fingerprints().unwrap();
+    assert_eq!(
+        predicted["sampled"],
+        NodeFingerprint::Field(r.graph.field_value(r.sample).unwrap().fingerprint())
+    );
+    assert_eq!(
+        predicted["again"],
+        NodeFingerprint::Raster(r.graph.raster_value(r.again).unwrap().fingerprint)
+    );
+    let (mut rebuilt, ids) = recipe.build(16).unwrap();
+    rebuilt.run().unwrap();
+    assert_eq!(
+        scalar(&rebuilt, ids["again"]).digest(),
+        scalar(&r.graph, r.again).digest()
+    );
+    // Sample nodes read rasters, and are fields themselves.
+    let mut wrong = recipe.clone();
+    for node in &mut wrong.nodes {
+        if let Step::Sample { inputs } = &mut node.step {
+            inputs[0] = "height".into();
+        }
+    }
+    assert!(matches!(
+        wrong.fingerprints(),
+        Err(RecipeError::WrongInput { .. })
+    ));
+    // A field op holding an image cannot live in a recipe.
+    let image = match r.graph.field_value(r.sample).unwrap().program().op(r
+        .graph
+        .field_value(r.sample)
+        .unwrap()
+        .program()
+        .output())
+    {
+        Some(Op::Sample { image }) => image.clone(),
+        other => panic!("expected a sample op, found {other:?}"),
+    };
+    let mut embedded = recipe;
+    embedded.nodes.push(RecipeNode {
+        label: "embedded".into(),
+        step: Step::Field {
+            op: Op::Sample { image },
+            inputs: Vec::new(),
+        },
+    });
+    assert!(matches!(
+        embedded.fingerprints(),
+        Err(RecipeError::EmbeddedImage(_))
     ));
 }

@@ -172,9 +172,12 @@ A field has no resolution; a raster does. The graph makes the conversion
 explicit with a `Realize { resolution, domain, filter }` step. Any raster node
 downstream sees that resolution and nothing else.
 
-A raster can go back into a field through `Sample { filter }` (bilinear,
-bicubic, or exact box over a footprint). The graph can therefore mix freely,
-but every resolution-dependent choice is visible in the graph and in reports.
+A raster can go back into a field through `Op::Sample` (bilinear, with the
+raster's mip chain filtering by footprint, trilinearly between levels). The
+op holds its texels, fingerprinted by the producing nodes' derivation rather
+than by content, and never serializes: a recipe names the sampled raster
+nodes instead. The graph can therefore mix freely, but every
+resolution-dependent choice is visible in the graph and in reports.
 A resolution is never inferred from the output.
 
 One consequence: realizing the same graph at 1K and at 4K gives the same field
@@ -322,8 +325,11 @@ nodes at mip level 0:
   consumer that needs it.
 
 Mip levels are graph nodes, one level each, whose tiles depend on the
-level-above tiles their filter taps read. Still to come: `Sample` as a graph
-node, with bounded-warp tile dependencies.
+level-above tiles their filter taps read. Sample nodes mirror the tiles of
+the rasters they sample; the tiles whose bits changed, grown by one texel for
+the bilinear taps, become the sampled field's change regions, so realizing a
+resampled field recomputes only what an edit reaches. Still to come:
+bounded-warp dependencies, so a warp of a sampled field can stay local too.
 
 ### Fingerprints and caches
 

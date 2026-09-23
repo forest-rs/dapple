@@ -212,14 +212,20 @@ impl Tiles {
     /// `previous` are the node's keys on its previous grid; keys no longer
     /// used leave the tracker.
     pub(crate) fn keys(&mut self, node: u32, grid: Grid, previous: &[InternId]) -> Vec<InternId> {
+        self.level_keys(node, 0, grid, previous)
+    }
+
+    /// [`Self::keys`] for one of several rasters a node tracks, told apart
+    /// by `level`.
+    pub(crate) fn level_keys(
+        &mut self,
+        node: u32,
+        level: u8,
+        grid: Grid,
+        previous: &[InternId],
+    ) -> Vec<InternId> {
         let keys: Vec<InternId> = (0..grid.count())
-            .map(|tile| {
-                self.interner.intern(TileKey {
-                    node,
-                    level: 0,
-                    tile,
-                })
-            })
+            .map(|tile| self.interner.intern(TileKey { node, level, tile }))
             .collect();
         // Tile keys are interned by index, so the keys a smaller grid no
         // longer uses are exactly those past its count.
@@ -227,7 +233,7 @@ impl Tiles {
             if self
                 .interner
                 .get(key)
-                .is_some_and(|k| k.node == node && k.tile >= grid.count())
+                .is_some_and(|k| k.node == node && k.level == level && k.tile >= grid.count())
             {
                 self.tracker.remove_key(key);
             }

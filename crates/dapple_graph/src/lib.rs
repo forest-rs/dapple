@@ -17,6 +17,11 @@
 //!   analytic where the field's ops allow.
 //! - **Mip nodes** filter a scalar raster down one mip level, as each level
 //!   of `dapple_encode::data_mips`; chain them for a whole mip chain.
+//! - **Sample nodes** read scalar rasters back as a field
+//!   ([`Op::Sample`]): a base raster, optionally with its mip chain, sampled
+//!   bilinearly and filtered by footprint. Field nodes build on them like on
+//!   any other field, so a realized, blurred or eroded height can be warped,
+//!   combined and realized again.
 //!
 //! Each node's parameters (the op, the resolution, the raster operation) are
 //! an input of that node, named `<label>.params`. Editing them with
@@ -49,6 +54,11 @@
 //!   tiles that changed, so unchanged tiles stop propagating. Global
 //!   operations, such as the distance transform, recompute whole when their
 //!   input changed.
+//!
+//! - A sample node's field changes only near the tiles of its rasters whose
+//!   bits changed: each changed tile's region, grown by one texel for the
+//!   bilinear taps, becomes [`FieldValue::change`], so realizing the sampled
+//!   field downstream recomputes only the tiles those regions reach.
 //!
 //! Tile-wise results equal whole recomputation bit for bit.
 //! [`MaterialGraph::tile_report`] counts the work of the last run.
@@ -104,7 +114,7 @@ use dapple_field::program::{
     Change, Fingerprint, NodeId as FieldNode, Op, ProgramBuilder, ProgramError, ValueProgram,
 };
 use dapple_field::raster::Region;
-use dapple_field::{Domain, PortType};
+use dapple_field::{Domain, DomainError, ImageLevel, PortType, SampleImage};
 use dapple_raster::{
     AmbientOcclusion, DistanceTransform, Edge, GaussianBlur, HeightToNormal, Raster, RasterError,
     RasterOp, Realization, TexelRect, realize, realize_into, realize_normals, realize_normals_into,
@@ -160,6 +170,8 @@ pub enum Params {
     Raster(RasterParams),
     /// A mip node's filter.
     Mip(Filter),
+    /// A sample node, which has no parameters of its own.
+    Sample,
     /// A normals node's resolution and height scale.
     Normals {
         /// Texels per row.
@@ -256,6 +268,8 @@ pub enum NodeKind {
     Normals,
     /// Filters a scalar raster down one mip level.
     Mip,
+    /// Samples scalar rasters, with their mips, as a field.
+    Sample,
 }
 
 /// State a field node keeps between runs.
@@ -302,6 +316,16 @@ enum Source {
     },
 }
 
+/// State a sample node keeps between runs.
+#[derive(Clone, Debug, Default)]
+struct SampleState {
+    /// Per sampled raster: its tile space, its grid, and this node's keys
+    /// mirroring its tiles one to one.
+    levels: Vec<(u32, Grid, Vec<InternId>)>,
+    /// The previous program's fingerprint.
+    output: Option<Fingerprint>,
+}
+
 /// A graph node: its kind, its tile key space, and its state between runs.
 #[derive(Clone, Debug)]
 pub struct DappleNode {
@@ -309,6 +333,7 @@ pub struct DappleNode {
     key: u32,
     field: FieldState,
     tiles: TileState,
+    sample: SampleState,
 }
 
 impl DappleNode {
@@ -564,6 +589,16 @@ fn mip_fingerprint(filter: Filter, input: u64) -> u64 {
         Filter::Kaiser => 1,
     };
     hash(0x0000_006d_6970_6d61, &[tag, input]) // "mipma"
+}
+
+/// The derivation of a sample node's image: a hash of its rasters'
+/// fingerprints, base first.
+fn sample_derivation(rasters: &[u64]) -> Fingerprint {
+    let mut words = vec![0x0073_616d_706c_6500, rasters.len() as u64]; // "sample"
+    words.extend_from_slice(rasters);
+    let [lo, hi] = [0x7361_6d70_6c65_2d30, 0x7361_6d70_6c65_2d31] // "sample-0", "sample-1"
+        .map(|seed| hash(seed, &words));
+    Fingerprint((u128::from(hi) << 64) | u128::from(lo))
 }
 
 fn fingerprint_words(fp: Fingerprint) -> [u64; 2] {
@@ -1082,6 +1117,157 @@ fn run_mip(
     Ok(keep(tiles, node, state, out))
 }
 
+/// The domain an image of `raster` samples over: the period a wrapping
+/// raster covers, or the plane.
+fn image_domain(raster: &Raster) -> Result<Domain, NodeError> {
+    let invalid = NodeError::Program(ProgramError::Domain(DomainError::InvalidParameter {
+        name: "image",
+    }));
+    match raster.edge() {
+        Edge::Clamp => Ok(Domain::Plane),
+        Edge::Wrap => {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "raster sizes are far below f32's exact integer range"
+            )]
+            let covered = Vec2::new(raster.width() as f32, raster.height() as f32) * raster.texel();
+            let whole = |v: f32| {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "checked to be a small positive whole number first"
+                )]
+                let n = v as u32;
+                ((1.0..=16_777_216.0).contains(&v) && libm::floorf(v) == v).then_some(n)
+            };
+            let (x, y) = (whole(covered.x), whole(covered.y));
+            x.zip(y)
+                .and_then(|(x, y)| Domain::periodic(x, y))
+                .ok_or(invalid)
+        }
+    }
+}
+
+fn run_sample(
+    tiles: &mut Tiles,
+    node: u32,
+    state: &mut SampleState,
+    inputs: &[GraphValue],
+) -> Result<GraphValue, NodeError> {
+    let domain_error = |e: DomainError| NodeError::Program(ProgramError::Domain(e));
+    let mut rasters = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let value = raster_input(input)?;
+        let RasterData::Scalar(raster) = &value.data else {
+            return Err(NodeError::WrongValue {
+                expected: "scalar raster",
+            });
+        };
+        rasters.push((value, raster));
+    }
+    let Some(&(_, base)) = rasters.first() else {
+        return Err(NodeError::WrongValue { expected: "raster" });
+    };
+    let domain = image_domain(base)?;
+    let mut levels = Vec::with_capacity(rasters.len());
+    for (_, raster) in &rasters {
+        levels.push(
+            ImageLevel::new(
+                raster.width(),
+                raster.height(),
+                raster.texel(),
+                raster.values().to_vec(),
+            )
+            .map_err(domain_error)?,
+        );
+    }
+    let fingerprints: Vec<u64> = rasters.iter().map(|(v, _)| v.fingerprint).collect();
+    let image = SampleImage::new(
+        domain,
+        base.origin(),
+        levels,
+        sample_derivation(&fingerprints),
+    )
+    .map_err(domain_error)?;
+    let mut builder = ProgramBuilder::new();
+    let output = builder
+        .add(Op::Sample { image })
+        .map_err(NodeError::Program)?;
+    let program = builder.finish_value(output).map_err(NodeError::Program)?;
+
+    // Mirror each sampled raster's tiles, so the marks its changed tiles
+    // leave say where the image changed.
+    let grids: Vec<(u32, Grid)> = rasters
+        .iter()
+        .map(|(value, raster)| {
+            (
+                value.tile_space,
+                Grid::new(raster.width(), raster.height(), tiles.size(), raster.edge()),
+            )
+        })
+        .collect();
+    let same = state.output.is_some()
+        && state.levels.len() == grids.len()
+        && state
+            .levels
+            .iter()
+            .zip(&grids)
+            .all(|((space, grid, _), (s, g))| space == s && grid == g);
+    if !same {
+        let old = core::mem::take(&mut state.levels);
+        for (_, _, keys) in &old[grids.len().min(old.len())..] {
+            tiles.detach(keys);
+        }
+        for (level, &(space, grid)) in grids.iter().enumerate() {
+            let previous = old
+                .get(level)
+                .map_or(&[][..], |(_, _, keys)| keys.as_slice());
+            let level_index = u8::try_from(level).unwrap_or(u8::MAX);
+            let keys = tiles.level_keys(node, level_index, grid, previous);
+            for (t, &key) in keys.iter().enumerate() {
+                let input = tiles.key(space, u32::try_from(t).expect("tile counts fit u32"));
+                tiles.depend(key, [input]);
+            }
+            state.levels.push((space, grid, keys));
+        }
+    }
+    let mut change = Change::Nowhere;
+    for (level, (_, grid, keys)) in state.levels.iter().enumerate() {
+        let marked = tiles.take_marked(keys);
+        let raster = rasters[level].1;
+        let (origin, texel) = (raster.origin(), raster.texel());
+        let regions: Vec<Region> = marked
+            .into_iter()
+            .map(|t| {
+                let r = grid.rect(t);
+                // A texel reaches points within one texel of its center.
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "texel indices are far below f32's exact integer range"
+                )]
+                let (lo, hi) = (
+                    Vec2::new(r.x0 as f32 - 1.0, r.y0 as f32 - 1.0),
+                    Vec2::new(r.x1 as f32 + 1.0, r.y1 as f32 + 1.0),
+                );
+                Region {
+                    origin: origin + lo * texel,
+                    size: (hi - lo) * texel,
+                }
+            })
+            .collect();
+        if !regions.is_empty() {
+            change = change.union(Change::Within(regions));
+        }
+    }
+    let previous = state.output;
+    state.output = Some(program.fingerprint());
+    Ok(GraphValue::Field(Arc::new(FieldValue {
+        program,
+        previous,
+        change: if same { change } else { Change::Everywhere },
+    })))
+}
+
 impl Executor for DappleExecutor {
     type Value = GraphValue;
     type Node = DappleNode;
@@ -1136,6 +1322,9 @@ impl Executor for DappleExecutor {
                 *filter,
                 &upstream[0],
             )?,
+            (NodeKind::Sample, Params::Sample) => {
+                run_sample(&mut self.tiles, node.key, &mut node.sample, upstream)?
+            }
             _ => {
                 return Err(NodeError::WrongValue {
                     expected: "params of the node's kind",
@@ -1250,6 +1439,7 @@ impl MaterialGraph {
             key: u32::try_from(self.entries.len()).expect("fewer than 2^32 nodes"),
             field: FieldState::default(),
             tiles: TileState::default(),
+            sample: SampleState::default(),
         };
         let node = self.graph.add_node(body, inputs, vec![OUT.into()])?;
         self.graph.set_node_label(node, label)?;
@@ -1346,6 +1536,18 @@ impl MaterialGraph {
         filter: Filter,
     ) -> Result<NodeId, MaterialError> {
         self.add(NodeKind::Mip, label, Params::Mip(filter), &[raster])
+    }
+
+    /// Adds a node sampling the scalar rasters of `levels` as a field: the
+    /// base raster first, then its mip chain, finest to coarsest (mip nodes
+    /// chained from the base, for example). With one level the field is not
+    /// band-limited; with mips it is filtered by footprint (see
+    /// `dapple_field::SampleImage`).
+    ///
+    /// A wrapping raster, such as a realization over one period, samples as
+    /// a periodic field over that period; a clamping one as a plane field.
+    pub fn sample(&mut self, label: &str, levels: &[NodeId]) -> Result<NodeId, MaterialError> {
+        self.add(NodeKind::Sample, label, Params::Sample, levels)
     }
 
     fn set_params(

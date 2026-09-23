@@ -39,6 +39,10 @@
 //! [`Fingerprint`](program::Fingerprint)s, evaluated bit-identically to the
 //! field types above.
 //!
+//! [`SampleImage`] reads texels back as a field: bilinear, periodic-aware,
+//! and footprint-filtered through its mip chain. Programs sample one with
+//! [`program::Op::Sample`].
+//!
 //! [`raster::Grid`] samples a field onto a small grid for tests and previews.
 //! Tiled, cached, and incremental realization belongs to later dapple crates.
 //!
@@ -63,6 +67,7 @@ mod domain;
 mod field;
 mod fractal;
 pub mod hash;
+pub mod image;
 mod noise;
 pub mod program;
 pub mod raster;
@@ -73,9 +78,12 @@ pub use cellular::{CellOutput, CellSample, Cellular, CellularField};
 pub use domain::{Domain, DomainError, Footprint, MAX_LATTICE_CELLS};
 pub use field::{Affine2, PlaneField, ScalarField, Transformed, central_difference};
 pub use fractal::{Fractal, FractalKind, FractalParams, MAX_OCTAVES};
+pub use image::{Edge, ImageLevel, SampleImage};
 pub use noise::{Basis, Noise};
 pub use shape::Disk;
 pub use types::{NormalBlend, NormalFrame, PortType, Primaries, Value};
 
 #[cfg(test)]
 mod golden_tests;
+#[cfg(test)]
+mod image_tests;

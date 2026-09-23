@@ -9,5 +9,7 @@ Deterministic, band-limited procedural fields for [dapple](../../README.md).
 - `program`: fields as fingerprinted DAG values, evaluated bit-identically,
   with typed ports: scalars, masks, identifiers, vectors, linear colors and
   normals, checked when the program is built.
+- `image`: sampled images, texels read back as a field (`Op::Sample`):
+  bilinear, periodic-aware, footprint-filtered through mip chains.
 
 Results are bit-exact across platforms. `#![no_std]` with `alloc`.

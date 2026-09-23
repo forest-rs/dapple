@@ -6,8 +6,9 @@
 //!
 //! Run with `cargo run -p field_gallery -- [output-dir]`; the default output
 //! directory is the repository's git-ignored `.local/gallery/field-gallery`,
-//! which survives `cargo clean`. Each image is normalized to its own value
-//! range, which is printed.
+//! which survives `cargo clean`. Each grayscale image is normalized to its
+//! own value range, which is printed; color images are linear colors,
+//! written sRGB-encoded.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -15,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use dapple_compress::{CompressSettings, Encoding, compress};
 use dapple_encode::{Filter, Image, MaterialMaps, PackSettings, Profile, ktx2, pack};
-use dapple_field::program::{FieldProgram, Op, ProgramBuilder, ProgramError};
+use dapple_field::program::{FieldProgram, NodeId, Op, ProgramBuilder, ProgramError, ValueProgram};
 use dapple_field::raster::{Grid, Region};
 use dapple_field::{
     Basis, CellOutput, Cellular, Domain, DomainError, Footprint, Fractal, FractalKind,
@@ -186,7 +187,29 @@ fn bark(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let distance = DistanceTransform { threshold: 0.5 }.apply(&fissures)?;
     write_raster(out, "bark-fissure-distance-2x2", &distance)?;
 
-    bark_set(out, &height, &normals, &ao)
+    let color = bark_color(torus, &program)?;
+    let base_color: Vec<[f32; 3]> = {
+        let channels = (0..3)
+            .map(|c| -> Result<Raster, Box<dyn std::error::Error>> {
+                Ok(realize(
+                    &color.channel(c)?,
+                    Realization::period(torus, SIZE, SIZE)?,
+                )?)
+            })
+            .collect::<Result<Vec<Raster>, _>>()?;
+        (0..channels[0].values().len())
+            .map(|i| [0, 1, 2].map(|c| channels[c].values()[i]))
+            .collect()
+    };
+    let tiled: Vec<[f32; 3]> = (0..4 * SIZE * SIZE)
+        .map(|i| {
+            let (x, y) = (i % (2 * SIZE) % SIZE, i / (2 * SIZE) % SIZE);
+            base_color[(y * SIZE + x) as usize]
+        })
+        .collect();
+    write_color(out, "bark-base-color-2x2", 2 * SIZE, 2 * SIZE, &tiled)?;
+
+    bark_set(out, &height, &base_color, &normals, &ao)
 }
 
 /// Writes the first mip levels of the bark height, each scaled back up to the
@@ -272,17 +295,12 @@ fn warped_bark(
 fn bark_set(
     out: &Path,
     height: &Raster,
+    base_color: &[[f32; 3]],
     normals: &Raster<[f32; 3]>,
     ao: &Raster,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Linear bark colors: dark fissures, lighter plate tops.
-    let (dark, light) = ([0.035, 0.026, 0.02], [0.24, 0.19, 0.15]);
-    let mix = |h: f32| {
-        let t = (h / 0.6).clamp(0.0, 1.0);
-        [0, 1, 2].map(|c| dark[c] + (light[c] - dark[c]) * t)
-    };
     let edge = height.edge();
-    let base_color: Vec<f32> = height.values().iter().flat_map(|&h| mix(h)).collect();
+    let base_color: Vec<f32> = base_color.iter().flatten().copied().collect();
     let roughness: Vec<f32> = height
         .values()
         .iter()
@@ -403,6 +421,130 @@ fn bark_program(domain: Domain) -> Result<FieldProgram, ProgramError> {
         b: grain,
     })?;
     b.finish(height)
+}
+
+/// Linear bark color over the bark height: damp dark fissures, brown bark
+/// that weathers grey on exposed plate tops, lichen on some plates, and
+/// large-scale mottling. The base color of `dapple_bake`'s `oak_bark` recipe
+/// is the same graph.
+fn bark_color(domain: Domain, height: &FieldProgram) -> Result<ValueProgram, ProgramError> {
+    let mut b = ProgramBuilder::new();
+    let height = b.import(height)?;
+    let color = |b: &mut ProgramBuilder, rgb: [f32; 3]| {
+        let [r, g, bl] = rgb.map(|value| b.add(Op::Constant { domain, value }));
+        b.add(Op::Color {
+            r: r?,
+            g: g?,
+            b: bl?,
+        })
+    };
+    let noise = |b: &mut ProgramBuilder, frequency, seed, octaves| {
+        b.add(Op::Fractal {
+            basis: Basis::Gradient,
+            domain,
+            frequency,
+            seed,
+            params: FractalParams {
+                octaves,
+                ..FractalParams::default()
+            },
+        })
+    };
+    let fissure = color(&mut b, [0.016, 0.012, 0.01])?;
+    let bark = color(&mut b, [0.11, 0.08, 0.058])?;
+    let weathered = color(&mut b, [0.27, 0.24, 0.2])?;
+    let lichen_color = color(&mut b, [0.2, 0.24, 0.12])?;
+
+    // Damp fissure depths darken toward the bark's brown on the plates.
+    let depth = ramp(&mut b, height, [0.0, 0.5], [0.0, 1.0])?;
+    let color = b.add(Op::Mix {
+        a: fissure,
+        b: bark,
+        t: depth,
+    })?;
+    // Exposed plate tops weather grey, in patches.
+    let top = ramp(&mut b, height, [0.6, 0.95], [0.0, 1.0])?;
+    let patches = noise(&mut b, [4.0, 3.0], SEED + 4, 4)?;
+    let patches = ramp(&mut b, patches, [0.0, 0.5], [0.0, 0.9])?;
+    let weather = b.add(Op::Mul { a: top, b: patches })?;
+    let color = b.add(Op::Mix {
+        a: color,
+        b: weathered,
+        t: weather,
+    })?;
+    // Sparse lichen on the plates, never in the fissures.
+    let plate = ramp(&mut b, height, [0.45, 0.8], [0.0, 1.0])?;
+    let lichen = noise(&mut b, [3.0, 2.0], SEED + 5, 5)?;
+    let lichen = ramp(&mut b, lichen, [0.1, 0.35], [0.0, 0.8])?;
+    let lichen = b.add(Op::Mul {
+        a: plate,
+        b: lichen,
+    })?;
+    let color = b.add(Op::Mix {
+        a: color,
+        b: lichen_color,
+        t: lichen,
+    })?;
+    // Large-scale mottling of the whole tile.
+    let mottle = noise(&mut b, [2.0, 2.0], SEED + 6, 3)?;
+    let mottle = b.add(Op::Remap {
+        input: mottle,
+        from: [-1.0, 1.0],
+        to: [0.7, 1.3],
+    })?;
+    let color = b.add(Op::Mul {
+        a: color,
+        b: mottle,
+    })?;
+    b.finish_value(color)
+}
+
+/// `input` remapped from `from` to `to`, clamped to `to`.
+fn ramp(
+    b: &mut ProgramBuilder,
+    input: NodeId,
+    from: [f32; 2],
+    to: [f32; 2],
+) -> Result<NodeId, ProgramError> {
+    let t = b.add(Op::Remap { input, from, to })?;
+    b.add(Op::Clamp {
+        input: t,
+        min: to[0].min(to[1]),
+        max: to[0].max(to[1]),
+    })
+}
+
+/// Writes linear colors as an sRGB-encoded PNG.
+fn write_color(
+    dir: &Path,
+    name: &str,
+    width: u32,
+    height: u32,
+    colors: &[[f32; 3]],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let encode = |c: f32| {
+        let c = c.clamp(0.0, 1.0);
+        let s = if c <= 0.003_130_8 {
+            12.92 * c
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "s is in [0, 1]"
+        )]
+        let byte = (s * 255.0 + 0.5) as u8;
+        byte
+    };
+    let pixels: Vec<u8> = colors.iter().flatten().map(|&c| encode(c)).collect();
+    let path = dir.join(format!("{name}.png"));
+    let mut encoder = png::Encoder::new(BufWriter::new(File::create(&path)?), width, height);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.write_header()?.write_image_data(&pixels)?;
+    println!("{}", path.display());
+    Ok(())
 }
 
 fn raster_grid(raster: &Raster) -> Grid {

@@ -64,7 +64,7 @@ impl Default for FractalParams {
 const fn ridged_mean(basis: Basis) -> f32 {
     match basis {
         Basis::Value => 0.447,
-        Basis::Gradient => 0.595,
+        Basis::Gradient => 0.686,
     }
 }
 

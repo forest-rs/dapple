@@ -68,8 +68,8 @@ fn corpus() -> [(&'static str, alloc::boxed::Box<dyn ScalarField>, u64); 6] {
 
 const GOLDEN: [u64; 6] = [
     0x9011_4b5e_e286_a6a7,
-    0xa7a3_ba54_d740_1013,
-    0xbec9_2eb7_597f_6e54,
+    0x522c_4256_a923_47c1,
+    0xd25a_366a_1225_00e9,
     0xa7b3_cc81_770e_37a3,
     0xca9e_7616_6349_8cc5,
     0x032a_4f9f_e190_1862,

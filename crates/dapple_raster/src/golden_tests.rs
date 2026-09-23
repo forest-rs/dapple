@@ -77,10 +77,10 @@ fn golden_digests() {
 }
 
 const GOLDEN: [u64; 5] = [
-    0x5774_0a72_8ecf_66f7,
-    0x1e1d_92bc_2c83_5fac,
-    0x272d_0ab3_1c65_1986,
-    0x9b6e_2b32_0811_06fb,
+    0x44d9_d2c1_8e56_8fb4,
+    0x1531_1a9d_b5a1_9170,
+    0xd2ee_1b9c_ec33_0b67,
+    0x635f_567a_7de2_1e17,
     0xbf5b_7e6b_0ecb_d524,
 ];
 

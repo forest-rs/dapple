@@ -258,7 +258,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 [[package]]
 name = "execution_graph"
 version = "0.0.1"
-source = "git+https://github.com/forest-rs/execution?rev=da3dd4cd6998480c26a2f8bbfd5dacf4675c9e7a#da3dd4cd6998480c26a2f8bbfd5dacf4675c9e7a"
+source = "git+https://github.com/forest-rs/execution?rev=ce961177dc05a7d0742b88c46c33cb5b49a8fdc1#ce961177dc05a7d0742b88c46c33cb5b49a8fdc1"
 dependencies = [
  "hashbrown",
  "invalidation",

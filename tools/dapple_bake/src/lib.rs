@@ -36,6 +36,7 @@ use dapple_compress::{CompressSettings, Encoding, Quality, compress};
 use dapple_encode::{Bundle, Filter, Image, MaterialMaps, PackSettings, Profile, ktx2, pack, png};
 use dapple_field::program::Fingerprint;
 use dapple_graph::{RasterData, Recipe};
+use dapple_raster::typed::Storage;
 use serde::Deserialize;
 
 /// Tile size used to realize recipes.
@@ -248,12 +249,19 @@ fn images(id: &str, recipe: &Recipe) -> Result<MaterialMaps, BakeError> {
                 let value = graph
                     .raster_value(nodes[label])
                     .expect("recipe outputs are built raster nodes that ran");
-                match &value.data {
+                Ok(match &value.data {
                     RasterData::Scalar(r) => Image::from(r),
                     RasterData::Vector3(r) => Image::from(r),
-                }
+                    RasterData::Typed(r) => match r.storage() {
+                        Storage::F32(r) => Image::from(r),
+                        Storage::F32x2(r) => Image::from(r),
+                        Storage::F32x3(r) => Image::from(r),
+                        // Identifiers are not texture channels.
+                        Storage::U32(_) => return Err(wrong()),
+                    },
+                })
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
         let first = sources.first().ok_or_else(wrong)?;
         let grid = |i: &Image| (i.width(), i.height(), i.edge());
         if sources.iter().any(|s| grid(s) != grid(first)) {

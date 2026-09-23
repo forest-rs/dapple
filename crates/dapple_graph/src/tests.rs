@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use dapple_field::program::Op;
-use dapple_field::{Basis, Domain, FractalParams};
+use dapple_field::{Basis, Domain, FractalParams, Value};
 
 use super::*;
 
@@ -269,6 +269,7 @@ fn digests(s: &Stamped) -> [u64; 4] {
     let digest = |node| match &s.graph.raster_value(node).unwrap().data {
         RasterData::Scalar(r) => r.digest(),
         RasterData::Vector3(r) => r.digest(),
+        RasterData::Typed(r) => r.digest(),
     };
     [
         digest(s.map),
@@ -438,6 +439,7 @@ fn graphs_export_recipes_that_rebuild_them() {
     rebuilt.run().unwrap();
     let digest = |g: &MaterialGraph, id| match &g.raster_value(id).unwrap().data {
         RasterData::Vector3(r) => r.digest(),
+        RasterData::Typed(r) => r.digest(),
         RasterData::Scalar(r) => r.digest(),
     };
     assert_eq!(
@@ -462,6 +464,7 @@ fn graphs_export_recipes_that_rebuild_them() {
             Step::Realize { input, .. }
             | Step::Raster { input, .. }
             | Step::Mip { input, .. }
+            | Step::Reduce { input, .. }
             | Step::Normals { input, .. } => {
                 input.insert_str(0, "x.");
             }
@@ -541,6 +544,7 @@ fn normals_nodes_recompute_locally_and_match_fresh_graphs() {
     fresh.run().unwrap();
     let digest = |g: &MaterialGraph, id| match &g.raster_value(id).unwrap().data {
         RasterData::Vector3(r) => r.digest(),
+        RasterData::Typed(r) => r.digest(),
         RasterData::Scalar(r) => r.digest(),
     };
     assert_eq!(digest(&g, normals), digest(&fresh, fresh_normals));
@@ -653,6 +657,7 @@ fn derivation_changes_with_equal_texels_rerun_without_recomputing_tiles() {
     let texels = |g: &MaterialGraph| match &g.raster_value(soft).unwrap().data {
         RasterData::Scalar(r) => r.digest(),
         RasterData::Vector3(r) => r.digest(),
+        RasterData::Typed(r) => r.digest(),
     };
     let (before, fingerprint) = (texels(&g), g.raster_value(soft).unwrap().fingerprint);
 
@@ -703,7 +708,7 @@ fn mipped(x: f32) -> (MaterialGraph, NodeId, NodeId, Vec<NodeId>) {
 fn scalar(g: &MaterialGraph, node: NodeId) -> &Raster {
     match &g.raster_value(node).unwrap().data {
         RasterData::Scalar(r) => r,
-        RasterData::Vector3(_) => panic!("mips are scalar"),
+        RasterData::Vector3(_) | RasterData::Typed(_) => panic!("mips are scalar"),
     }
 }
 
@@ -1051,4 +1056,228 @@ fn unbounded_warps_recompute_whole_and_say_so() {
         scalar(&g, again).digest(),
         scalar(&fresh, fresh_again).digest()
     );
+}
+
+/// A noise field with a mask, identifier, direction and normals derived
+/// from it, each realized with its own type.
+struct Typed {
+    graph: MaterialGraph,
+    noise: NodeId,
+    mask: NodeId,
+    ids: NodeId,
+    directions: NodeId,
+    normals: NodeId,
+}
+
+fn typed() -> Typed {
+    let mut g = MaterialGraph::with_tile_size(8);
+    let noise = g.field("noise", noise_op(3), &[]).unwrap();
+    let mask = g
+        .field("mask", Op::AsMask { input: operand(0) }, &[noise])
+        .unwrap();
+    let id = g
+        .field(
+            "id",
+            Op::ToId {
+                input: operand(0),
+                levels: 4,
+            },
+            &[mask],
+        )
+        .unwrap();
+    let angle = g
+        .field("angle", Op::Direction { angle: operand(0) }, &[noise])
+        .unwrap();
+    let mask = g.realize("mask.map", mask, 32, 32).unwrap();
+    let ids = g.realize("id.map", id, 32, 32).unwrap();
+    let directions = g.realize("angle.map", angle, 32, 32).unwrap();
+    let normals = g.normals("normals", noise, (32, 32), 0.05).unwrap();
+    Typed {
+        graph: g,
+        noise,
+        mask,
+        ids,
+        directions,
+        normals,
+    }
+}
+
+fn node_error(error: &MaterialError) -> &NodeError {
+    match error {
+        MaterialError::Graph(GraphError::Node { source, .. }) => source,
+        other => panic!("expected a node error, found {other:?}"),
+    }
+}
+
+#[test]
+fn rasters_keep_their_semantic_type() {
+    let mut t = typed();
+    t.graph.run().unwrap();
+    let port = |node| t.graph.raster_value(node).unwrap().port;
+    assert_eq!(port(t.mask), PortType::Mask);
+    assert_eq!(port(t.ids), PortType::Id);
+    assert_eq!(port(t.directions), PortType::Direction);
+    assert_eq!(port(t.normals), PortType::Normal(NormalFrame::Domain));
+    let RasterData::Typed(ids) = &t.graph.raster_value(t.ids).unwrap().data else {
+        panic!("identifiers are typed rasters")
+    };
+    assert!(matches!(ids.storage(), Storage::U32(_)));
+    // Unchanged programs reuse the whole realization.
+    let before = t.graph.raster_value(t.ids).unwrap().fingerprint;
+    t.graph.set_field_op(t.noise, noise_op(3)).unwrap();
+    t.graph.run().unwrap();
+    assert_eq!(t.graph.raster_value(t.ids).unwrap().fingerprint, before);
+}
+
+#[test]
+fn operations_refuse_types_they_do_not_accept() {
+    // Blurring identifiers is refused, not guessed; blurring a mask is fine.
+    let mut t = typed();
+    t.graph
+        .raster(
+            "bad",
+            RasterParams::Blur(GaussianBlur { sigma: 0.01 }),
+            t.ids,
+        )
+        .unwrap();
+    let error = t.graph.run().unwrap_err();
+    assert!(
+        matches!(
+            node_error(&error),
+            NodeError::TypeRefused {
+                port: PortType::Id,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    let mut t = typed();
+    let soft = t
+        .graph
+        .raster(
+            "soft",
+            RasterParams::Blur(GaussianBlur { sigma: 0.01 }),
+            t.mask,
+        )
+        .unwrap();
+    t.graph.run().unwrap();
+    assert_eq!(t.graph.raster_value(soft).unwrap().port, PortType::Mask);
+    // Averaging identifiers is refused.
+    let mut t = typed();
+    t.graph
+        .reduce("bad", t.ids, ReductionPolicy::Average, 1)
+        .unwrap();
+    let error = t.graph.run().unwrap_err();
+    assert!(
+        matches!(
+            node_error(&error),
+            NodeError::Typed(TypedError::PolicyRefused { .. })
+        ),
+        "{error:?}"
+    );
+    // So is averaging normals, which would drop the length that measures
+    // their spread.
+    let mut t = typed();
+    t.graph
+        .reduce("bad", t.normals, ReductionPolicy::Average, 1)
+        .unwrap();
+    assert!(t.graph.run().is_err());
+}
+
+#[test]
+fn reduction_policies_are_part_of_the_derivation() {
+    let mut t = typed();
+    let mode = t
+        .graph
+        .reduce("id.1", t.ids, ReductionPolicy::IdMode, 2)
+        .unwrap();
+    let axial = t
+        .graph
+        .reduce("angle.1", t.directions, ReductionPolicy::Axial, 1)
+        .unwrap();
+    let coverage = t
+        .graph
+        .reduce("mask.1", t.mask, ReductionPolicy::Average, 1)
+        .unwrap();
+    t.graph.run().unwrap();
+    let fingerprint = |g: &MaterialGraph, node| g.raster_value(node).unwrap().fingerprint;
+    let before = fingerprint(&t.graph, coverage);
+    assert_eq!(
+        t.graph.raster_value(mode).unwrap().port,
+        PortType::Id,
+        "reductions keep the type"
+    );
+    assert_eq!(
+        t.graph.raster_value(axial).unwrap().port,
+        PortType::Direction
+    );
+
+    // The recipe predicts every fingerprint, policies included, and
+    // rebuilds the same graph.
+    let recipe = t.graph.recipe();
+    let predicted = recipe.fingerprints().unwrap();
+    for (label, node) in [("id.1", mode), ("angle.1", axial), ("mask.1", coverage)] {
+        assert_eq!(
+            predicted[label],
+            NodeFingerprint::Raster(fingerprint(&t.graph, node))
+        );
+    }
+
+    // Choosing coverage preservation is a different derivation.
+    t.graph
+        .set_reduction(
+            coverage,
+            ReductionPolicy::ThresholdCoverage { cutoff: 0.5 },
+            1,
+        )
+        .unwrap();
+    t.graph.run().unwrap();
+    assert_ne!(fingerprint(&t.graph, coverage), before);
+    let exported = t.graph.recipe();
+    assert_ne!(
+        exported.fingerprint().unwrap(),
+        recipe.fingerprint().unwrap()
+    );
+}
+
+#[test]
+fn normal_reductions_keep_the_variance_encode_moves_into_roughness() {
+    let mut t = typed();
+    let reduced = t
+        .graph
+        .reduce("normals.1", t.normals, ReductionPolicy::NormalMean, 1)
+        .unwrap();
+    t.graph.run().unwrap();
+    let RasterData::Vector3(base) = &t.graph.raster_value(t.normals).unwrap().data else {
+        panic!("normals are three-channel")
+    };
+    let RasterData::Typed(level) = &t.graph.raster_value(reduced).unwrap().data else {
+        panic!("reductions are typed")
+    };
+    let image = Image::new(
+        base.width(),
+        base.height(),
+        3,
+        base.edge(),
+        base.values().iter().flatten().copied().collect(),
+    )
+    .unwrap();
+    let chain = dapple_encode::normal_mips(&image, None, 0.0, Filter::Box).unwrap();
+    let roughness = &chain.roughness.levels()[1];
+    // With zero base roughness, encode's level-1 roughness is Toksvig's
+    // σ² = (1 − L) / L from the mean length L, as α′² = σ², α = r².
+    for y in 0..level.height() {
+        for x in 0..level.width() {
+            let Value::Vector3(mean) = level.value_at(i64::from(x), i64::from(y)) else {
+                panic!("normals are vectors")
+            };
+            let length = mean.length();
+            let variance = ((1.0 - length) / length).min(1.0);
+            let r = roughness.values()[(y * level.width() + x) as usize];
+            assert!(
+                (r.powi(4) - variance).abs() < 1e-4,
+                "({x}, {y}): {r} vs {variance}"
+            );
+        }
+    }
 }

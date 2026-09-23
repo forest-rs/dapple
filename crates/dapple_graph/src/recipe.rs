@@ -23,8 +23,9 @@ use execution_graph::NodeId;
 use crate::{
     MaterialError, MaterialGraph, NodeKind, Params, RasterParams, fingerprint_words,
     mip_fingerprint, normals_fingerprint, raster_fingerprint, realize_fingerprint,
-    sample_derivation,
+    reduce_fingerprint, sample_derivation,
 };
+use dapple_raster::typed::ReductionPolicy;
 
 /// The recipe format version this crate reads and writes.
 ///
@@ -67,6 +68,15 @@ pub enum Step {
         input: String,
         /// The filter.
         filter: Filter,
+    },
+    /// A reduce node ([`MaterialGraph::reduce`]).
+    Reduce {
+        /// Label of the level-0 raster node.
+        input: String,
+        /// How texels combine.
+        policy: ReductionPolicy,
+        /// The mip level, at least 1.
+        level: u32,
     },
     /// A sample node ([`MaterialGraph::sample`]): rasters read back as a
     /// field.
@@ -216,6 +226,7 @@ impl Step {
             Self::Raster { .. } => NodeKind::Raster,
             Self::Normals { .. } => NodeKind::Normals,
             Self::Mip { .. } => NodeKind::Mip,
+            Self::Reduce { .. } => NodeKind::Reduce,
             Self::Sample { .. } => NodeKind::Sample,
         }
     }
@@ -263,7 +274,9 @@ impl Recipe {
                         return Err(wrong(input));
                     }
                 }
-                Step::Raster { input, .. } | Step::Mip { input, .. } => {
+                Step::Raster { input, .. }
+                | Step::Mip { input, .. }
+                | Step::Reduce { input, .. } => {
                     if is_field(input_kind(input)?) {
                         return Err(wrong(input));
                     }
@@ -378,6 +391,16 @@ impl Recipe {
                     }
                     NodeFingerprint::Field(_) => unreachable!("checked: mips read rasters"),
                 },
+                Step::Reduce {
+                    input,
+                    policy,
+                    level,
+                } => match out[input] {
+                    NodeFingerprint::Raster(fp) => {
+                        NodeFingerprint::Raster(reduce_fingerprint(*policy, *level, fp))
+                    }
+                    NodeFingerprint::Field(_) => unreachable!("checked: reductions read rasters"),
+                },
                 Step::Sample { inputs } => {
                     let rasters: Vec<u64> = inputs
                         .iter()
@@ -466,6 +489,11 @@ impl Recipe {
                 } => graph.realize(&node.label, ids[input], *width, *height)?,
                 Step::Raster { input, params } => graph.raster(&node.label, *params, ids[input])?,
                 Step::Mip { input, filter } => graph.mip(&node.label, ids[input], *filter)?,
+                Step::Reduce {
+                    input,
+                    policy,
+                    level,
+                } => graph.reduce(&node.label, ids[input], *policy, *level)?,
                 Step::Sample { inputs } => {
                     let levels: Vec<NodeId> = inputs.iter().map(|l| ids[l]).collect();
                     graph.sample(&node.label, &levels)?
@@ -511,6 +539,11 @@ impl MaterialGraph {
                     Params::Mip(filter) => Step::Mip {
                         input: label(&entry.upstream[0]),
                         filter: *filter,
+                    },
+                    Params::Reduce { policy, level } => Step::Reduce {
+                        input: label(&entry.upstream[0]),
+                        policy: *policy,
+                        level: *level,
                     },
                     Params::Sample => Step::Sample {
                         inputs: entry.upstream.iter().map(label).collect(),

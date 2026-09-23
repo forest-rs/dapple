@@ -52,6 +52,7 @@ mod ao;
 mod blur;
 mod distance;
 mod normal;
+pub mod typed;
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -381,6 +382,12 @@ pub trait DigestValue: Copy {
 impl DigestValue for f32 {
     fn words(self, out: &mut impl FnMut(u64)) {
         out(u64::from(self.to_bits()));
+    }
+}
+
+impl DigestValue for u32 {
+    fn words(self, out: &mut impl FnMut(u64)) {
+        out(u64::from(self));
     }
 }
 

@@ -10,13 +10,17 @@
 //!   placeholders ([`operand`]) for the node's upstream field inputs. Running
 //!   the node imports the input programs and adds the op, so its output is
 //!   the whole program so far, with shared subgraphs imported once.
-//! - **Realize nodes** turn a scalar field into a raster over one period of
-//!   its periodic domain.
+//! - **Realize nodes** turn a field into a raster over one period of its
+//!   periodic domain: scalars and masks tile by tile, other types
+//!   (identifiers, directions, vectors, colors, normals) whole.
 //! - **Raster nodes** apply a `dapple_raster` operation.
 //! - **Normals nodes** realize a scalar field's normals from its gradient,
 //!   analytic where the field's ops allow.
 //! - **Mip nodes** filter a scalar raster down one mip level, as each level
 //!   of `dapple_encode::data_mips`; chain them for a whole mip chain.
+//! - **Reduce nodes** reduce a raster of any type to one mip level under an
+//!   explicit, type-checked `ReductionPolicy`, computed from the level-0
+//!   texels the level's texels cover.
 //! - **Sample nodes** read scalar rasters back as a field
 //!   ([`Op::Sample`]): a base raster, optionally with its mip chain, sampled
 //!   bilinearly and filtered by footprint. Field nodes build on them like on
@@ -29,6 +33,12 @@
 //! that input, so the next [`MaterialGraph::run`] re-runs exactly the edited
 //! node and its dependents. `execution_graph` schedules, records dependencies
 //! and reports.
+//!
+//! Every raster carries its semantic type ([`RasterValue::port`]): a mask
+//! stays a mask, a normal a normal, an identifier an identifier. Operations
+//! check it and refuse types they do not accept: a blur, mip or sample of
+//! identifiers, directions or normals is [`NodeError::TypeRefused`], and an
+//! average of identifiers is a refused reduction policy.
 //!
 //! Values on edges are cheap handles: field programs and rasters are
 //! reference-counted, with fingerprints for caching and comparison.
@@ -117,7 +127,8 @@ use dapple_field::program::{
     Change, Fingerprint, NodeId as FieldNode, Op, ProgramBuilder, ProgramError, ValueProgram,
 };
 use dapple_field::raster::Region;
-use dapple_field::{Domain, DomainError, ImageLevel, PortType, SampleImage};
+use dapple_field::{Domain, DomainError, ImageLevel, NormalFrame, PortType, SampleImage};
+use dapple_raster::typed::{ReductionPolicy, Storage, TypedError, TypedRaster, realize_value};
 use dapple_raster::{
     AmbientOcclusion, DistanceTransform, Edge, GaussianBlur, HeightToNormal, Raster, RasterError,
     RasterOp, Realization, TexelRect, realize, realize_into, realize_normals, realize_normals_into,
@@ -173,6 +184,13 @@ pub enum Params {
     Raster(RasterParams),
     /// A mip node's filter.
     Mip(Filter),
+    /// A reduce node's policy and level.
+    Reduce {
+        /// How texels combine.
+        policy: ReductionPolicy,
+        /// The mip level, at least 1.
+        level: u32,
+    },
     /// A sample node, which has no parameters of its own.
     Sample,
     /// A normals node's resolution and height scale.
@@ -186,13 +204,20 @@ pub enum Params {
     },
 }
 
-/// A realized raster: scalar, or three-channel (normals).
+/// A realized raster's texels.
+///
+/// Scalar and three-channel rasters are computed tile by tile; other typed
+/// rasters (identifiers, 2D vectors and directions, colors and vectors
+/// realized from programs, reduced levels) are computed whole. Every raster's
+/// meaning is its [`RasterValue::port`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum RasterData {
-    /// One channel.
+    /// One channel, computed tile-wise.
     Scalar(Raster),
-    /// Three channels.
+    /// Three channels (normals), computed tile-wise.
     Vector3(Raster<[f32; 3]>),
+    /// Any type, computed whole.
+    Typed(TypedRaster),
 }
 
 impl RasterData {
@@ -200,6 +225,13 @@ impl RasterData {
         match (self, other) {
             (Self::Scalar(a), Self::Scalar(b)) => a.same_grid(b),
             (Self::Vector3(a), Self::Vector3(b)) => a.same_grid(b),
+            (Self::Typed(a), Self::Typed(b)) => match (a.storage(), b.storage()) {
+                (Storage::F32(a), Storage::F32(b)) => a.same_grid(b),
+                (Storage::U32(a), Storage::U32(b)) => a.same_grid(b),
+                (Storage::F32x2(a), Storage::F32x2(b)) => a.same_grid(b),
+                (Storage::F32x3(a), Storage::F32x3(b)) => a.same_grid(b),
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -208,6 +240,13 @@ impl RasterData {
         match (self, other) {
             (Self::Scalar(a), Self::Scalar(b)) => a.rect_bits_eq(b, rect),
             (Self::Vector3(a), Self::Vector3(b)) => a.rect_bits_eq(b, rect),
+            (Self::Typed(a), Self::Typed(b)) => match (a.storage(), b.storage()) {
+                (Storage::F32(a), Storage::F32(b)) => a.rect_bits_eq(b, rect),
+                (Storage::U32(a), Storage::U32(b)) => a.rect_bits_eq(b, rect),
+                (Storage::F32x2(a), Storage::F32x2(b)) => a.rect_bits_eq(b, rect),
+                (Storage::F32x3(a), Storage::F32x3(b)) => a.rect_bits_eq(b, rect),
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -216,8 +255,19 @@ impl RasterData {
         let (w, h, edge) = match self {
             Self::Scalar(r) => (r.width(), r.height(), r.edge()),
             Self::Vector3(r) => (r.width(), r.height(), r.edge()),
+            Self::Typed(r) => (r.width(), r.height(), r.edge()),
         };
         Grid::new(w, h, tile_size, edge)
+    }
+
+    /// The texels as a [`TypedRaster`] of type `port`.
+    fn to_typed(&self, port: PortType) -> Result<TypedRaster, NodeError> {
+        let storage = match self {
+            Self::Scalar(r) => Storage::F32(r.clone()),
+            Self::Vector3(r) => Storage::F32x3(r.clone()),
+            Self::Typed(r) => return Ok(r.clone()),
+        };
+        TypedRaster::new(port, storage).map_err(NodeError::Typed)
     }
 }
 
@@ -226,6 +276,9 @@ impl RasterData {
 pub struct RasterValue {
     /// The texels.
     pub data: RasterData,
+    /// What the texels mean: a mask stays a mask and a normal a normal
+    /// through the graph, so every consumer can check what it reads.
+    pub port: PortType,
     /// Hash of the producing operation, its parameters, and its input's
     /// fingerprint.
     pub fingerprint: u64,
@@ -271,6 +324,8 @@ pub enum NodeKind {
     Normals,
     /// Filters a scalar raster down one mip level.
     Mip,
+    /// Reduces a typed raster to one mip level under an explicit policy.
+    Reduce,
     /// Samples scalar rasters, with their mips, as a field.
     Sample,
 }
@@ -316,6 +371,10 @@ enum Source {
     Mip {
         filter: Filter,
         input: u32,
+    },
+    /// A raster computed whole, from a derivation fingerprint.
+    Whole {
+        derivation: u64,
     },
 }
 
@@ -373,6 +432,17 @@ pub enum NodeError {
     },
     /// Filtering a mip level failed; see [`EncodeError`].
     Mip(EncodeError),
+    /// A typed raster could not be built or reduced, for example a policy
+    /// that is not meaningful for the raster's type; see [`TypedError`].
+    Typed(TypedError),
+    /// An operation does not accept rasters of this type, for example a
+    /// Gaussian blur of identifiers.
+    TypeRefused {
+        /// The operation.
+        operation: &'static str,
+        /// The raster's type.
+        port: PortType,
+    },
 }
 
 impl fmt::Display for NodeError {
@@ -386,6 +456,10 @@ impl fmt::Display for NodeError {
             Self::WrongValue { expected } => write!(f, "expected a {expected} input"),
             Self::MissingOperand { index } => write!(f, "operand {index} has no input"),
             Self::Mip(error) => error.fmt(f),
+            Self::Typed(error) => error.fmt(f),
+            Self::TypeRefused { operation, port } => {
+                write!(f, "{operation} does not accept {port} rasters")
+            }
         }
     }
 }
@@ -822,12 +896,18 @@ fn run_realize(
     let field_value = field_input(input)?;
     let program = &field_value.program;
     let (port, domain) = (program.output_type(), program.domain());
-    if !port.is_scalar() || !matches!(domain, Domain::Periodic { .. }) {
+    if !matches!(domain, Domain::Periodic { .. }) {
         return Err(NodeError::NotRealizable { port, domain });
     }
-    let field = program.channel(0).map_err(NodeError::Program)?;
     let realization = Realization::period(domain, width, height).map_err(NodeError::Raster)?;
     let fingerprint = program.fingerprint();
+    if !port.is_scalar() {
+        let derivation = realize_fingerprint(fingerprint, width, height);
+        return run_whole(tiles, node, state, derivation, port, true, || {
+            realize_value(program, realization).map_err(NodeError::Typed)
+        });
+    }
+    let field = program.channel(0).map_err(NodeError::Program)?;
     let grid = Grid::new(width, height, tiles.size(), Edge::Wrap);
     let previous = match (&state.source, state.output.as_ref().map(|v| &v.data)) {
         (
@@ -860,6 +940,7 @@ fn run_realize(
     let changed = settle(tiles, node, state, &data, &recomputed, dirty.is_none());
     let value = RasterValue {
         data,
+        port,
         fingerprint: realize_fingerprint(fingerprint, width, height),
         changed,
         tile_space: node,
@@ -924,6 +1005,7 @@ fn run_normals(
     let changed = settle(tiles, node, state, &data, &recomputed, dirty.is_none());
     let value = RasterValue {
         data,
+        port: PortType::Normal(NormalFrame::Domain),
         fingerprint: normals_fingerprint(fingerprint, width, height, scale),
         changed,
         tile_space: node,
@@ -969,11 +1051,14 @@ fn run_raster(
     input: &GraphValue,
 ) -> Result<GraphValue, NodeError> {
     let value = raster_input(input)?;
-    let RasterData::Scalar(raster) = &value.data else {
-        return Err(NodeError::WrongValue {
-            expected: "scalar raster",
+    let (RasterData::Scalar(raster), PortType::Scalar | PortType::Mask) = (&value.data, value.port)
+    else {
+        return Err(NodeError::TypeRefused {
+            operation: raster_name(params),
+            port: value.port,
         });
     };
+    let port = raster_output(params, value.port);
     let grid = Grid::new(raster.width(), raster.height(), tiles.size(), raster.edge());
     let footprint = match params {
         RasterParams::Blur(op) => op.footprint(raster.texel()),
@@ -1061,6 +1146,7 @@ fn run_raster(
     let changed = settle(tiles, node, state, &data, &recomputed, dirty.is_none());
     let out = RasterValue {
         data,
+        port,
         fingerprint: raster_fingerprint(params, value.fingerprint),
         changed,
         tile_space: node,
@@ -1082,9 +1168,11 @@ fn run_mip(
     input: &GraphValue,
 ) -> Result<GraphValue, NodeError> {
     let value = raster_input(input)?;
-    let RasterData::Scalar(raster) = &value.data else {
-        return Err(NodeError::WrongValue {
-            expected: "scalar raster",
+    let (RasterData::Scalar(raster), PortType::Scalar | PortType::Mask) = (&value.data, value.port)
+    else {
+        return Err(NodeError::TypeRefused {
+            operation: "mip filtering",
+            port: value.port,
         });
     };
     let (sw, sh, edge) = (raster.width(), raster.height(), raster.edge());
@@ -1157,12 +1245,114 @@ fn run_mip(
     let changed = settle(tiles, node, state, &data, &recomputed, dirty.is_none());
     let out = RasterValue {
         data,
+        port: value.port,
         fingerprint: mip_fingerprint(filter, value.fingerprint),
         changed,
         tile_space: node,
     };
     state.source = Some(source);
     Ok(keep(tiles, node, state, out))
+}
+
+/// The type of a raster operation's output for an input of type `port`.
+///
+/// Every operation reads one scalar channel, so each accepts scalars and
+/// masks (a mask's coverage is a valid height or distance feature) and
+/// refuses every other type.
+const fn raster_output(params: RasterParams, port: PortType) -> PortType {
+    match params {
+        // Blurring a mask gives a mask: the mean of values in [0, 1].
+        RasterParams::Blur(_) => port,
+        RasterParams::HeightToNormal(_) => PortType::Normal(NormalFrame::Domain),
+        RasterParams::AmbientOcclusion(_) | RasterParams::DistanceTransform(_) => PortType::Scalar,
+    }
+}
+
+const fn raster_name(params: RasterParams) -> &'static str {
+    match params {
+        RasterParams::Blur(_) => "Gaussian blur",
+        RasterParams::HeightToNormal(_) => "height to normal",
+        RasterParams::AmbientOcclusion(_) => "ambient occlusion",
+        RasterParams::DistanceTransform(_) => "distance transform",
+    }
+}
+
+/// Content fingerprint of level `level` of a raster fingerprinted `input`
+/// under `policy`.
+fn reduce_fingerprint(policy: ReductionPolicy, level: u32, input: u64) -> u64 {
+    let [tag, word] = policy.fingerprint();
+    hash(0x7265_6475_6365, &[tag, word, u64::from(level), input]) // "reduce"
+}
+
+/// Runs a node whose raster is computed whole: reuses the previous output
+/// when `derivation` is unchanged and `stale` is false, and otherwise
+/// recomputes every tile, comparing bits so unchanged tiles stop
+/// propagating.
+fn run_whole(
+    tiles: &mut Tiles,
+    node: u32,
+    state: &mut TileState,
+    derivation: u64,
+    port: PortType,
+    stale: bool,
+    compute: impl FnOnce() -> Result<TypedRaster, NodeError>,
+) -> Result<GraphValue, NodeError> {
+    let source = Source::Whole { derivation };
+    if !stale
+        && state.source.as_ref() == Some(&source)
+        && let Some(previous) = &state.output
+    {
+        let grid = previous.data.grid(tiles.size());
+        tiles.report.tiles_reused += u64::from(grid.count());
+        let value = RasterValue {
+            changed: false,
+            ..RasterValue::clone(previous)
+        };
+        return Ok(keep(tiles, node, state, value));
+    }
+    let raster = compute()?;
+    debug_assert_eq!(raster.port(), port, "a whole raster keeps its node's type");
+    let data = RasterData::Typed(raster);
+    let all: Vec<u32> = (0..data.grid(tiles.size()).count()).collect();
+    let changed = settle(tiles, node, state, &data, &all, true);
+    let value = RasterValue {
+        data,
+        port,
+        fingerprint: derivation,
+        changed,
+        tile_space: node,
+    };
+    state.source = Some(source);
+    Ok(keep(tiles, node, state, value))
+}
+
+fn run_reduce(
+    tiles: &mut Tiles,
+    node: u32,
+    state: &mut TileState,
+    (policy, level): (ReductionPolicy, u32),
+    input: &GraphValue,
+) -> Result<GraphValue, NodeError> {
+    let value = raster_input(input)?;
+    policy.check(value.port).map_err(NodeError::Typed)?;
+    if level == 0 {
+        return Err(NodeError::WrongValue {
+            expected: "a mip level of at least 1",
+        });
+    }
+    let derivation = reduce_fingerprint(policy, level, value.fingerprint);
+    run_whole(
+        tiles,
+        node,
+        state,
+        derivation,
+        value.port,
+        value.changed,
+        || {
+            let base = value.data.to_typed(value.port)?;
+            dapple_raster::typed::reduce(&base, policy, level).map_err(NodeError::Typed)
+        },
+    )
 }
 
 /// The domain an image of `raster` samples over: the period a wrapping
@@ -1206,9 +1396,12 @@ fn run_sample(
     let mut rasters = Vec::with_capacity(inputs.len());
     for input in inputs {
         let value = raster_input(input)?;
-        let RasterData::Scalar(raster) = &value.data else {
-            return Err(NodeError::WrongValue {
-                expected: "scalar raster",
+        let (RasterData::Scalar(raster), PortType::Scalar | PortType::Mask) =
+            (&value.data, value.port)
+        else {
+            return Err(NodeError::TypeRefused {
+                operation: "sampling",
+                port: value.port,
             });
         };
         rasters.push((value, raster));
@@ -1370,6 +1563,13 @@ impl Executor for DappleExecutor {
                 node.key,
                 &mut node.tiles,
                 *filter,
+                &upstream[0],
+            )?,
+            (NodeKind::Reduce, Params::Reduce { policy, level }) => run_reduce(
+                &mut self.tiles,
+                node.key,
+                &mut node.tiles,
+                (*policy, *level),
                 &upstream[0],
             )?,
             (NodeKind::Sample, Params::Sample) => {
@@ -1586,6 +1786,43 @@ impl MaterialGraph {
         filter: Filter,
     ) -> Result<NodeId, MaterialError> {
         self.add(NodeKind::Mip, label, Params::Mip(filter), &[raster])
+    }
+
+    /// Adds a node reducing the raster of `raster` to mip level `level` (at
+    /// least 1) under `policy`, computed from the level-0 texels each output
+    /// texel covers (`dapple_raster::typed::reduce`).
+    ///
+    /// The policy is explicit: the node fails when it is not meaningful for
+    /// the raster's type ([`NodeError::Typed`]), and it is part of the
+    /// output's fingerprint. `ReductionPolicy::default_for` names the usual
+    /// choice for a type. Reduce nodes compute whole.
+    ///
+    /// # Errors
+    ///
+    /// [`MaterialError::DuplicateLabel`] or [`MaterialError::UnknownNode`].
+    pub fn reduce(
+        &mut self,
+        label: &str,
+        raster: NodeId,
+        policy: ReductionPolicy,
+        level: u32,
+    ) -> Result<NodeId, MaterialError> {
+        self.add(
+            NodeKind::Reduce,
+            label,
+            Params::Reduce { policy, level },
+            &[raster],
+        )
+    }
+
+    /// Changes a reduce node's policy and level.
+    pub fn set_reduction(
+        &mut self,
+        node: NodeId,
+        policy: ReductionPolicy,
+        level: u32,
+    ) -> Result<(), MaterialError> {
+        self.set_params(node, NodeKind::Reduce, Params::Reduce { policy, level })
     }
 
     /// Adds a node sampling the scalar rasters of `levels` as a field: the

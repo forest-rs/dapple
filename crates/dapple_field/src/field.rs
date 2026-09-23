@@ -38,6 +38,37 @@ pub trait ScalarField {
             *value = self.eval(p, footprint);
         }
     }
+
+    /// The value at `p` and its gradient `(∂f/∂x, ∂f/∂y)` in domain units,
+    /// both band-limited to `footprint`.
+    ///
+    /// The value must equal [`Self::eval`]'s, bit for bit. The default
+    /// estimates the gradient numerically, by [`central_difference`]; fields
+    /// with closed-form derivatives override it.
+    fn eval_gradient(&self, p: Vec2, footprint: Footprint) -> (f32, Vec2) {
+        (
+            self.eval(p, footprint),
+            central_difference(self, p, footprint),
+        )
+    }
+}
+
+/// The gradient of `field` at `p` by central differences.
+///
+/// The step is half the footprint, and at least `1e-4` times the larger of 1
+/// and the point's largest coordinate, so a point footprint still steps far
+/// enough for `f32` positions to resolve it.
+pub fn central_difference<F: ScalarField + ?Sized>(
+    field: &F,
+    p: Vec2,
+    footprint: Footprint,
+) -> Vec2 {
+    let h = (footprint.width() * 0.5).max(1e-4 * p.abs().max_element().max(1.0));
+    let at = |q: Vec2| field.eval(q, footprint);
+    Vec2::new(
+        (at(p + Vec2::new(h, 0.0)) - at(p - Vec2::new(h, 0.0))) / (2.0 * h),
+        (at(p + Vec2::new(0.0, h)) - at(p - Vec2::new(0.0, h))) / (2.0 * h),
+    )
 }
 
 impl<F: ScalarField + ?Sized> ScalarField for &F {
@@ -52,6 +83,10 @@ impl<F: ScalarField + ?Sized> ScalarField for &F {
     fn eval_batch(&self, points: &[Vec2], footprint: Footprint, out: &mut [f32]) {
         (**self).eval_batch(points, footprint, out);
     }
+
+    fn eval_gradient(&self, p: Vec2, footprint: Footprint) -> (f32, Vec2) {
+        (**self).eval_gradient(p, footprint)
+    }
 }
 
 impl<F: ScalarField + ?Sized> ScalarField for Box<F> {
@@ -65,6 +100,10 @@ impl<F: ScalarField + ?Sized> ScalarField for Box<F> {
 
     fn eval_batch(&self, points: &[Vec2], footprint: Footprint, out: &mut [f32]) {
         (**self).eval_batch(points, footprint, out);
+    }
+
+    fn eval_gradient(&self, p: Vec2, footprint: Footprint) -> (f32, Vec2) {
+        (**self).eval_gradient(p, footprint)
     }
 }
 
@@ -163,6 +202,14 @@ impl<F: ScalarField> ScalarField for Transformed<F> {
         self.inner
             .eval(self.transform.apply(p), footprint.scaled(self.stretch))
     }
+
+    fn eval_gradient(&self, p: Vec2, footprint: Footprint) -> (f32, Vec2) {
+        let (value, gradient) = self
+            .inner
+            .eval_gradient(self.transform.apply(p), footprint.scaled(self.stretch));
+        // The chain rule: the transform's Jacobian is its matrix.
+        (value, self.transform.matrix.transpose() * gradient)
+    }
 }
 
 /// Checks `transform` for use on `domain` and returns its stretch factor.
@@ -205,6 +252,10 @@ impl<F: ScalarField> ScalarField for PlaneField<F> {
 
     fn eval(&self, p: Vec2, footprint: Footprint) -> f32 {
         self.0.eval(p, footprint)
+    }
+
+    fn eval_gradient(&self, p: Vec2, footprint: Footprint) -> (f32, Vec2) {
+        self.0.eval_gradient(p, footprint)
     }
 }
 

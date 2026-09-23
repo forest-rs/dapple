@@ -630,6 +630,63 @@ pub fn realize_into(
     Ok(())
 }
 
+/// Unit normals of the height field `scale * field` at every texel center of
+/// `realization`, from the field's gradient.
+///
+/// The frame is [`HeightToNormal`]'s: `+X` along the domain x axis, `+Y`
+/// along the domain y axis, `+Z` out of the surface, and
+/// `n = normalize(-scale ∂f/∂x, -scale ∂f/∂y, 1)`. Where the field's
+/// derivatives are analytic ([`ScalarField::eval_gradient`]), the normals
+/// carry no finite-difference error and no blur from a two-texel stencil,
+/// and they do not depend on neighboring texels, so tiles and whole passes
+/// agree trivially. The footprint is the realization's, as in [`realize`].
+///
+/// # Errors
+///
+/// As [`realize`], plus [`RasterError::InvalidParameter`] for a non-finite
+/// `scale`.
+pub fn realize_normals(
+    field: &impl ScalarField,
+    realization: Realization,
+    scale: f32,
+) -> Result<Raster<[f32; 3]>, RasterError> {
+    if !scale.is_finite() {
+        return Err(RasterError::InvalidParameter { name: "scale" });
+    }
+    if realization.edge == Edge::Wrap && field.domain() != realization.domain {
+        return Err(RasterError::DomainMismatch {
+            expected: realization.domain,
+            found: field.domain(),
+        });
+    }
+    let texel = realization.texel();
+    if !(texel.is_finite() && texel.x > 0.0 && texel.y > 0.0) {
+        return Err(RasterError::InvalidRegion);
+    }
+    let footprint = Footprint::new(texel.max_element()).ok_or(RasterError::InvalidRegion)?;
+    let count = check_size(realization.width, realization.height)?;
+    let mut values = Vec::with_capacity(count);
+    for y in 0..realization.height {
+        for x in 0..realization.width {
+            let center = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+            let (_, g) = field.eval_gradient(realization.region.origin + center * texel, footprint);
+            values.push(
+                glam::Vec3::new(-g.x * scale, -g.y * scale, 1.0)
+                    .normalize()
+                    .to_array(),
+            );
+        }
+    }
+    Raster::from_values(
+        realization.width,
+        realization.height,
+        realization.region.origin,
+        texel,
+        realization.edge,
+        values,
+    )
+}
+
 /// An operation on a scalar raster.
 pub trait RasterOp {
     /// The output value type.

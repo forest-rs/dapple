@@ -10,7 +10,7 @@ use glam::Vec2;
 use crate::domain::{Domain, DomainError, Footprint, Lattice};
 use crate::field::ScalarField;
 use crate::hash::{hash, unit_f32};
-use crate::noise::{Basis, lattice_noise};
+use crate::noise::{Basis, lattice_noise, lattice_noise_gradient};
 
 /// Purpose tag for per-octave seeds.
 const OCTAVE_TAG: u64 = 0x6f63_7461_7665; // "octave"
@@ -188,6 +188,40 @@ impl ScalarField for Fractal {
             sum += value * octave.amplitude;
         }
         sum / self.total_amplitude
+    }
+    fn eval_gradient(&self, p: Vec2, footprint: Footprint) -> (f32, Vec2) {
+        let mean = match self.kind {
+            FractalKind::Fbm => 0.0,
+            FractalKind::Ridged => ridged_mean(self.basis),
+        };
+        let mut sum = 0.0;
+        let mut gradient = Vec2::ZERO;
+        for octave in &self.octaves {
+            let weight = footprint.band_weight(octave.lattice.max_frequency());
+            let value = if weight == 0.0 {
+                mean
+            } else {
+                let (n, dn) = lattice_noise_gradient(
+                    self.basis,
+                    octave.lattice,
+                    octave.seed,
+                    octave.offset,
+                    p,
+                );
+                let (detail, d_detail) = match self.kind {
+                    FractalKind::Fbm => (n, dn),
+                    FractalKind::Ridged => {
+                        let r = 1.0 - n.abs();
+                        // d(r²) = 2r · −sign(n) · dn.
+                        (r * r, dn * (-2.0 * r * n.signum()))
+                    }
+                };
+                gradient += d_detail * (weight * octave.amplitude);
+                mean + (detail - mean) * weight
+            };
+            sum += value * octave.amplitude;
+        }
+        (sum / self.total_amplitude, gradient / self.total_amplitude)
     }
 }
 

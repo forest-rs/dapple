@@ -218,6 +218,9 @@ fn select(output: CellOutput, s: &CellSample) -> f32 {
 /// while cells span at least four footprints, only the mean below two. At full
 /// weight the value is returned exactly, and at zero weight the noise is not
 /// sampled. Detail within a cell (its edges) is not filtered separately.
+///
+/// Its gradient ([`ScalarField::eval_gradient`]) is numerical, by
+/// [`central_difference`](crate::central_difference).
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct CellularField {
     cellular: Cellular,

@@ -336,6 +336,38 @@ pub(crate) fn lattice_noise(
     offset: Vec2,
     p: Vec2,
 ) -> f32 {
+    lattice_eval::<false>(basis, lattice, seed, offset, p).0
+}
+
+/// [`lattice_noise`] and its gradient with respect to `p`.
+///
+/// The value is computed exactly as [`lattice_noise`] computes it.
+pub(crate) fn lattice_noise_gradient(
+    basis: Basis,
+    lattice: Lattice,
+    seed: u64,
+    offset: Vec2,
+    p: Vec2,
+) -> (f32, Vec2) {
+    lattice_eval::<true>(basis, lattice, seed, offset, p)
+}
+
+/// Derivative of [`fade`]: `30t⁴ − 60t³ + 30t²`.
+#[inline]
+fn fade_derivative(t: f32) -> f32 {
+    let s = t * (1.0 - t);
+    30.0 * s * s
+}
+
+/// One octave, with its gradient in domain units when `GRADIENT`. The value's
+/// arithmetic does not depend on `GRADIENT`.
+fn lattice_eval<const GRADIENT: bool>(
+    basis: Basis,
+    lattice: Lattice,
+    seed: u64,
+    offset: Vec2,
+    p: Vec2,
+) -> (f32, Vec2) {
     let at = lattice.locate(p);
     let mut cell = at.cell;
     let mut f = at.frac + offset;
@@ -352,19 +384,27 @@ pub(crate) fn lattice_noise(
         let [x, y] = lattice.wrap_cell([cell[0] + dx, cell[1] + dy]);
         hash(seed, &[LATTICE_TAG, key(x), key(y)])
     };
+    // Gradients below are per cell; the in-cell position moves `frequency`
+    // cells per domain unit.
     match basis {
         Basis::Value => {
             let [h00, h10, h01, h11] = [corner(0, 0), corner(1, 0), corner(0, 1), corner(1, 1)];
             let (u, v) = (fade(f.x), fade(f.y));
             let value = |h: u64| unit_f32(h) * 2.0 - 1.0;
-            lerp(
-                lerp(value(h00), value(h10), u),
-                lerp(value(h01), value(h11), u),
-                v,
-            )
+            let (a, b, c, d) = (value(h00), value(h10), value(h01), value(h11));
+            let bottom = lerp(a, b, u);
+            let top = lerp(c, d, u);
+            let result = lerp(bottom, top, v);
+            if !GRADIENT {
+                return (result, Vec2::ZERO);
+            }
+            let dfx = ((b - a) + ((d - c) - (b - a)) * v) * fade_derivative(f.x);
+            let dfy = (top - bottom) * fade_derivative(f.y);
+            (result, Vec2::new(dfx, dfy) * lattice.frequency)
         }
         Basis::Gradient => {
             let mut sum = 0.0;
+            let mut gradient = Vec2::ZERO;
             for dy in -1..=2_i64 {
                 for dx in -1..=2_i64 {
                     #[expect(clippy::cast_precision_loss, reason = "offsets are small integers")]
@@ -384,10 +424,19 @@ pub(crate) fn lattice_noise(
                     let value = ((h >> 32) & 0xFF_FFFF) as f32 * (1.0 / 16_777_216.0) * 2.0 - 1.0;
                     let t = 1.0 - r2 / KERNEL_RADIUS_SQ;
                     let t2 = t * t;
-                    sum += t2 * t2 * (gx * d.x + gy * d.y + VALUE_WEIGHT * value);
+                    let term = gx * d.x + gy * d.y + VALUE_WEIGHT * value;
+                    sum += t2 * t2 * term;
+                    if GRADIENT {
+                        // d/dd of t⁴·term: 4t³·(−2d/R²)·term + t⁴·g.
+                        let dk = -8.0 * t2 * t / KERNEL_RADIUS_SQ;
+                        gradient += d * (dk * term) + Vec2::new(gx, gy) * (t2 * t2);
+                    }
                 }
             }
-            sum * GRADIENT_SCALE
+            (
+                sum * GRADIENT_SCALE,
+                gradient * GRADIENT_SCALE * lattice.frequency,
+            )
         }
     }
 }
@@ -451,6 +500,16 @@ impl ScalarField for Noise {
             return 0.0;
         }
         lattice_noise(self.basis, self.lattice, self.seed, Vec2::ZERO, p) * weight
+    }
+
+    fn eval_gradient(&self, p: Vec2, footprint: Footprint) -> (f32, Vec2) {
+        let weight = footprint.band_weight(self.lattice.max_frequency());
+        if weight == 0.0 {
+            return (0.0, Vec2::ZERO);
+        }
+        let (n, gradient) =
+            lattice_noise_gradient(self.basis, self.lattice, self.seed, Vec2::ZERO, p);
+        (n * weight, gradient * weight)
     }
 }
 

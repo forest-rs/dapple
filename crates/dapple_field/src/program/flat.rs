@@ -6,9 +6,9 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use glam::Vec2;
+use glam::{Mat2, Vec2};
 
-use super::{FieldProgram, Kernel, Node, NodeId, probe_point, warp_move};
+use super::{FieldProgram, Kernel, Node, NodeId, warp_chain, warp_move};
 use crate::domain::Footprint;
 use crate::field::Affine2;
 use crate::types::Value;
@@ -20,29 +20,40 @@ enum Move {
         transform: Affine2,
         stretch: f32,
     },
-    /// Probe `k` of a warp: the parent's point one footprint away.
-    Probe(usize),
-    /// A warp: registers of `dx` and `dy` at the parent's point, then at each
-    /// probe in [`super::PROBES`] order.
+    /// A warp: registers of `dx` and `dy` at the parent's point, with their
+    /// gradients, the rows of the displacement's Jacobian.
     Warp {
         center: [usize; 2],
-        probes: [[usize; 2]; 4],
         amount: f32,
     },
+}
+
+/// How a chain step turns a moved context's gradient into its parent's.
+#[derive(Clone, Debug, PartialEq)]
+enum Chain {
+    /// Through a transform: the transposed matrix.
+    Linear(Mat2),
+    /// Through a warp: `(I + a·J)ᵀ`, with the Jacobian rows in registers.
+    Warp { rows: [usize; 2], amount: f32 },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 enum Step {
     /// Computes context `ctx` from `parent`.
     Context { ctx: usize, parent: usize, by: Move },
-    /// Evaluates a pure node in `ctx` into register `reg`.
+    /// Evaluates a pure node in `ctx` into register `reg`, with its gradient
+    /// when `gradient`.
     Eval {
         reg: usize,
         node: NodeId,
         ctx: usize,
         args: [usize; 3],
         count: usize,
+        gradient: bool,
     },
+    /// Copies register `from`'s value into `reg`, carrying its gradient back
+    /// through a transform or warp.
+    Chain { reg: usize, from: usize, by: Chain },
 }
 
 /// A program flattened into a linear list of steps.
@@ -50,7 +61,9 @@ enum Step {
 /// A *context* is the point and footprint a subgraph is evaluated at: the
 /// output's, or one derived through transforms and warps. An *instance* is a
 /// pure node in one context; each gets one register, so a subgraph shared by
-/// several consumers in the same context is evaluated once.
+/// several consumers in the same context is evaluated once. Instances whose
+/// gradient a warp needs (its displacements and everything they read) carry
+/// a gradient register too.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Plan {
     steps: Vec<Step>,
@@ -66,8 +79,7 @@ pub struct EvaluationStats {
     /// Node evaluations per point with the flat plan: one per instance.
     pub instances: u64,
     /// Node evaluations per point when every consumer evaluates its inputs
-    /// again, as recursive evaluation does with a nonzero footprint (a warp
-    /// then also evaluates its displacements at four probes).
+    /// again, as recursive evaluation does.
     pub tree_evaluations: u64,
     /// Distinct evaluation points per point: the output's, plus one per
     /// distinct transform or warp path.
@@ -78,29 +90,36 @@ struct Compiler<'a> {
     nodes: &'a [Node],
     steps: Vec<Step>,
     registers: usize,
-    instances: BTreeMap<(NodeId, usize), usize>,
-    /// Contexts by parent, node, and role: 0 for a transform or warp, 1 to
-    /// 4 for a warp's probes.
-    contexts: BTreeMap<(usize, NodeId, usize), usize>,
+    /// Registers by node, context, and whether they carry a gradient.
+    instances: BTreeMap<(NodeId, usize, bool), usize>,
+    /// Contexts by parent and the transform or warp node that moves them.
+    contexts: BTreeMap<(usize, NodeId), usize>,
     context_count: usize,
     counts: BTreeMap<(NodeId, usize), u64>,
 }
 
 impl Compiler<'_> {
-    fn context(&mut self, parent: usize, node: NodeId, role: usize, by: Move) -> usize {
-        if let Some(&ctx) = self.contexts.get(&(parent, node, role)) {
+    fn context(&mut self, parent: usize, node: NodeId, by: Move) -> usize {
+        if let Some(&ctx) = self.contexts.get(&(parent, node)) {
             return ctx;
         }
         let ctx = self.context_count;
         self.context_count += 1;
-        self.contexts.insert((parent, node, role), ctx);
+        self.contexts.insert((parent, node), ctx);
         self.steps.push(Step::Context { ctx, parent, by });
         ctx
     }
 
-    /// The register holding `node`'s value in `ctx`, compiling it if needed.
-    fn compile(&mut self, node: NodeId, ctx: usize) -> usize {
-        if let Some(&reg) = self.instances.get(&(node, ctx)) {
+    fn register(&mut self) -> usize {
+        let reg = self.registers;
+        self.registers += 1;
+        reg
+    }
+
+    /// The register holding `node`'s value in `ctx`, with its gradient when
+    /// `gradient`, compiling it if needed.
+    fn compile(&mut self, node: NodeId, ctx: usize, gradient: bool) -> usize {
+        if let Some(&reg) = self.instances.get(&(node, ctx, gradient)) {
             return reg;
         }
         let entry = &self.nodes[node.0 as usize];
@@ -110,54 +129,66 @@ impl Compiler<'_> {
                 transform,
                 stretch,
             } => {
-                let child = self.context(ctx, node, 0, Move::Transform { transform, stretch });
-                self.compile(input, child)
+                let child = self.context(ctx, node, Move::Transform { transform, stretch });
+                let from = self.compile(input, child, gradient);
+                if gradient {
+                    let reg = self.register();
+                    self.steps.push(Step::Chain {
+                        reg,
+                        from,
+                        by: Chain::Linear(transform.matrix.transpose()),
+                    });
+                    reg
+                } else {
+                    from
+                }
             }
-            Kernel::Pass(input) => self.compile(input, ctx),
+            Kernel::Pass(input) => self.compile(input, ctx, gradient),
             Kernel::Warp {
                 input,
                 dx,
                 dy,
                 amount,
             } => {
-                let center = [self.compile(dx, ctx), self.compile(dy, ctx)];
-                let mut probes = [[0; 2]; 4];
-                for (k, probe) in probes.iter_mut().enumerate() {
-                    let at = self.context(ctx, node, k + 1, Move::Probe(k));
-                    *probe = [self.compile(dx, at), self.compile(dy, at)];
+                // The footprint's stretch needs the displacements' gradients.
+                let center = [self.compile(dx, ctx, true), self.compile(dy, ctx, true)];
+                let child = self.context(ctx, node, Move::Warp { center, amount });
+                let from = self.compile(input, child, gradient);
+                if gradient {
+                    let reg = self.register();
+                    self.steps.push(Step::Chain {
+                        reg,
+                        from,
+                        by: Chain::Warp {
+                            rows: center,
+                            amount,
+                        },
+                    });
+                    reg
+                } else {
+                    from
                 }
-                let child = self.context(
-                    ctx,
-                    node,
-                    0,
-                    Move::Warp {
-                        center,
-                        probes,
-                        amount,
-                    },
-                );
-                self.compile(input, child)
             }
             _ => {
                 let mut args = [0; 3];
                 let mut count = 0;
                 for input in entry.op.inputs().iter() {
-                    args[count] = self.compile(input, ctx);
+                    args[count] = self.compile(input, ctx, gradient);
                     count += 1;
                 }
-                let reg = self.registers;
-                self.registers += 1;
+                let reg = self.register();
                 self.steps.push(Step::Eval {
                     reg,
                     node,
                     ctx,
                     args,
                     count,
+                    gradient,
                 });
                 reg
             }
         };
-        self.instances.insert((node, ctx), reg);
+        self.instances.insert((node, ctx, gradient), reg);
         reg
     }
 
@@ -168,27 +199,16 @@ impl Compiler<'_> {
         }
         let entry = &self.nodes[node.0 as usize];
         let count = match entry.kernel {
-            Kernel::Transform { input, .. } | Kernel::Warp { input, .. } => {
-                let child = self.contexts[&(ctx, node, 0)];
-                let moved = self.tree_count(input, child);
-                match entry.kernel {
-                    Kernel::Warp { dx, dy, .. } => {
-                        // The displacements at the point and at four probes.
-                        let mut total = moved;
-                        for role in 0..5 {
-                            let at = if role == 0 {
-                                ctx
-                            } else {
-                                self.contexts[&(ctx, node, role)]
-                            };
-                            total = total
-                                .saturating_add(self.tree_count(dx, at))
-                                .saturating_add(self.tree_count(dy, at));
-                        }
-                        total
-                    }
-                    _ => moved,
-                }
+            Kernel::Transform { input, .. } => {
+                let child = self.contexts[&(ctx, node)];
+                self.tree_count(input, child)
+            }
+            Kernel::Warp { input, dx, dy, .. } => {
+                // The input where the warp moves, and the displacements here.
+                let child = self.contexts[&(ctx, node)];
+                self.tree_count(input, child)
+                    .saturating_add(self.tree_count(dx, ctx))
+                    .saturating_add(self.tree_count(dy, ctx))
             }
             Kernel::Pass(input) => self.tree_count(input, ctx),
             _ => entry.op.inputs().iter().fold(1_u64, |sum, input| {
@@ -211,7 +231,7 @@ impl Plan {
             context_count: 1,
             counts: BTreeMap::new(),
         };
-        let register = compiler.compile(output, 0);
+        let register = compiler.compile(output, 0, false);
         let tree_evaluations = compiler.tree_count(output, 0);
         Self {
             steps: compiler.steps,
@@ -242,6 +262,7 @@ impl Plan {
 pub struct Evaluator<'a> {
     program: &'a FieldProgram,
     registers: Vec<Value>,
+    gradients: Vec<Vec2>,
     points: Vec<(Vec2, Footprint)>,
 }
 
@@ -250,6 +271,7 @@ impl<'a> Evaluator<'a> {
         Self {
             program,
             registers: alloc::vec![Value::Scalar(0.0); program.plan.registers],
+            gradients: alloc::vec![Vec2::ZERO; program.plan.registers],
             points: alloc::vec![(Vec2::ZERO, Footprint::POINT); program.plan.contexts],
         }
     }
@@ -270,21 +292,13 @@ impl<'a> Evaluator<'a> {
                         Move::Transform { transform, stretch } => {
                             (transform.apply(p), footprint.scaled(stretch))
                         }
-                        Move::Probe(k) => (probe_point(p, footprint, k), footprint),
-                        Move::Warp {
-                            center,
-                            probes,
+                        Move::Warp { center, amount } => warp_move(
+                            p,
+                            footprint,
                             amount,
-                        } => {
-                            let r = |reg: usize| self.registers[reg];
-                            warp_move(
-                                p,
-                                footprint,
-                                amount,
-                                center.map(r),
-                                probes.map(|pair| pair.map(r)),
-                            )
-                        }
+                            center.map(|reg| self.registers[reg]),
+                            center.map(|reg| self.gradients[reg]),
+                        ),
                     };
                 }
                 Step::Eval {
@@ -293,17 +307,35 @@ impl<'a> Evaluator<'a> {
                     ctx,
                     args,
                     count,
+                    gradient,
                 } => {
                     let (p, footprint) = self.points[ctx];
                     let mut values = [Value::Scalar(0.0); 3];
-                    for (value, &arg) in values.iter_mut().zip(&args[..count]) {
-                        *value = self.registers[arg];
+                    let mut gradients = [Vec2::ZERO; 3];
+                    for (i, &arg) in args[..count].iter().enumerate() {
+                        values[i] = self.registers[arg];
+                        gradients[i] = self.gradients[arg];
                     }
-                    self.registers[reg] = self.program.nodes[node.0 as usize].kernel.combine(
-                        p,
-                        footprint,
-                        &values[..count],
-                    );
+                    let kernel = &self.program.nodes[node.0 as usize].kernel;
+                    let value = kernel.combine(p, footprint, &values[..count]);
+                    self.registers[reg] = value;
+                    if gradient {
+                        self.gradients[reg] = kernel
+                            .gradient(p, footprint, &values[..count], &gradients[..count])
+                            .unwrap_or_else(|| {
+                                self.program.numeric_gradient(node, value, p, footprint)
+                            });
+                    }
+                }
+                Step::Chain { reg, from, ref by } => {
+                    self.registers[reg] = self.registers[from];
+                    let g = self.gradients[from];
+                    self.gradients[reg] = match *by {
+                        Chain::Linear(transpose) => transpose * g,
+                        Chain::Warp { rows, amount } => {
+                            warp_chain(g, rows.map(|r| self.gradients[r]), amount)
+                        }
+                    };
                 }
             }
         }

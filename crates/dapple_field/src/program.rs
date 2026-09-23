@@ -247,9 +247,10 @@ pub enum Op {
     /// **Footprint.** Where the warp stretches or compresses space, one
     /// footprint of `p` covers more of `input`. The input's footprint is
     /// scaled by `1 + |amount| · max_i Σ_j |∂d_i/∂p_j|`, a bound on the warp's
-    /// local stretch, with the derivatives of `dx` and `dy` estimated by
-    /// central differences one footprint away on each axis. That costs four
-    /// more evaluations of `dx` and `dy`; a point footprint skips the scaling.
+    /// local stretch, with the derivatives of `dx` and `dy` from their
+    /// gradients ([`FieldProgram::eval_node_gradient`]): analytic through
+    /// every op with a closed form, band-limited like the displacements. A
+    /// point footprint skips the scaling.
     Warp {
         /// The warped field.
         input: NodeId,
@@ -1501,21 +1502,7 @@ impl FieldProgram {
                 dy,
                 amount,
             } => {
-                let center = [
-                    self.eval_value(dx, p, footprint),
-                    self.eval_value(dy, p, footprint),
-                ];
-                let mut probes = [[Value::Scalar(0.0); 2]; 4];
-                if footprint.width() > 0.0 {
-                    for (k, probe) in probes.iter_mut().enumerate() {
-                        let q = probe_point(p, footprint, k);
-                        *probe = [
-                            self.eval_value(dx, q, footprint),
-                            self.eval_value(dy, q, footprint),
-                        ];
-                    }
-                }
-                let (q, footprint) = warp_move(p, footprint, amount, center, probes);
+                let (q, footprint) = self.warp_point(dx, dy, amount, p, footprint).0;
                 self.eval_value(input, q, footprint)
             }
             ref kernel => {
@@ -1529,44 +1516,229 @@ impl FieldProgram {
             }
         }
     }
-}
 
-/// Directions of the warp's finite-difference probes: +x, −x, +y, −y.
-const PROBES: [Vec2; 4] = [Vec2::X, Vec2::NEG_X, Vec2::Y, Vec2::NEG_Y];
+    /// Node `id`'s scalar value at `p` and its gradient, both band-limited
+    /// to `footprint`.
+    ///
+    /// The value equals [`Self::eval_node`]'s, bit for bit. Gradients follow
+    /// the chain rule through every op with a closed-form derivative, and
+    /// through transforms and warps; any other node's gradient, such as a
+    /// vector component's, is taken by central differences of that node
+    /// (see [`central_difference`](crate::central_difference)), as are
+    /// cellular noise's.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` is not a scalar or mask node of this program.
+    #[must_use]
+    pub fn eval_node_gradient(&self, id: NodeId, p: Vec2, footprint: Footprint) -> (f32, Vec2) {
+        let (value, gradient) = self.gradient_value(id, p, footprint);
+        (
+            value
+                .scalar()
+                .expect("eval_node_gradient needs a scalar or mask node"),
+            gradient,
+        )
+    }
 
-/// Probe `k` of a warp at `p`: one footprint away along [`PROBES`]`[k]`.
-fn probe_point(p: Vec2, footprint: Footprint, k: usize) -> Vec2 {
-    p + PROBES[k] * footprint.width()
+    /// The warp's point and footprint, and its Jacobian's rows, at `p`.
+    fn warp_point(
+        &self,
+        dx: NodeId,
+        dy: NodeId,
+        amount: f32,
+        p: Vec2,
+        footprint: Footprint,
+    ) -> ((Vec2, Footprint), [Vec2; 2]) {
+        if footprint.width() <= 0.0 {
+            // A point footprint does not scale, so no derivatives are needed.
+            let center = [
+                self.eval_value(dx, p, footprint),
+                self.eval_value(dy, p, footprint),
+            ];
+            return (
+                warp_move(p, footprint, amount, center, [Vec2::ZERO; 2]),
+                [Vec2::ZERO; 2],
+            );
+        }
+        let (cx, gx) = self.gradient_value(dx, p, footprint);
+        let (cy, gy) = self.gradient_value(dy, p, footprint);
+        (
+            warp_move(p, footprint, amount, [cx, cy], [gx, gy]),
+            [gx, gy],
+        )
+    }
+
+    /// A node's value and the gradient of its scalar value (zero for vector
+    /// values, whose consumers differentiate their own scalars).
+    fn gradient_value(&self, id: NodeId, p: Vec2, footprint: Footprint) -> (Value, Vec2) {
+        let node = &self.nodes[id.0 as usize];
+        match node.kernel {
+            Kernel::Transform {
+                input,
+                transform,
+                stretch,
+            } => {
+                let (value, gradient) =
+                    self.gradient_value(input, transform.apply(p), footprint.scaled(stretch));
+                (value, transform.matrix.transpose() * gradient)
+            }
+            Kernel::Pass(input) => self.gradient_value(input, p, footprint),
+            Kernel::Warp {
+                input,
+                dx,
+                dy,
+                amount,
+            } => {
+                let (cx, gx) = self.gradient_value(dx, p, footprint);
+                let (cy, gy) = self.gradient_value(dy, p, footprint);
+                let (q, moved) = warp_move(p, footprint, amount, [cx, cy], [gx, gy]);
+                let (value, gradient) = self.gradient_value(input, q, moved);
+                (value, warp_chain(gradient, [gx, gy], amount))
+            }
+            ref kernel => {
+                let mut values = [Value::Scalar(0.0); 3];
+                let mut gradients = [Vec2::ZERO; 3];
+                let mut count = 0;
+                for input in node.op.inputs().iter() {
+                    (values[count], gradients[count]) = self.gradient_value(input, p, footprint);
+                    count += 1;
+                }
+                let value = kernel.combine(p, footprint, &values[..count]);
+                let gradient = kernel
+                    .gradient(p, footprint, &values[..count], &gradients[..count])
+                    .unwrap_or_else(|| self.numeric_gradient(id, value, p, footprint));
+                (value, gradient)
+            }
+        }
+    }
+
+    /// Central differences of node `id` around `p`, zero for vector values.
+    pub(super) fn numeric_gradient(
+        &self,
+        id: NodeId,
+        value: Value,
+        p: Vec2,
+        footprint: Footprint,
+    ) -> Vec2 {
+        if value.scalar().is_none() {
+            return Vec2::ZERO;
+        }
+        let h = (footprint.width() * 0.5).max(1e-4 * p.abs().max_element().max(1.0));
+        let at = |q: Vec2| {
+            self.eval_value(id, q, footprint)
+                .scalar()
+                .expect("a node's type does not depend on the point")
+        };
+        Vec2::new(
+            (at(p + Vec2::new(h, 0.0)) - at(p - Vec2::new(h, 0.0))) / (2.0 * h),
+            (at(p + Vec2::new(0.0, h)) - at(p - Vec2::new(0.0, h))) / (2.0 * h),
+        )
+    }
 }
 
 /// The point and footprint a warp's input is evaluated at, from the
-/// displacements at `p` (`center`) and at its four probes.
+/// displacements `center` at `p` and their gradients `rows`, the rows of the
+/// displacement's Jacobian.
+///
+/// The footprint grows by `1 + |amount| · max_i Σ_j |∂d_i/∂p_j|`, a bound on
+/// the warp's local stretch; a point footprint stays a point.
 fn warp_move(
     p: Vec2,
     footprint: Footprint,
     amount: f32,
     center: [Value; 2],
-    probes: [[Value; 2]; 4],
+    rows: [Vec2; 2],
 ) -> (Vec2, Footprint) {
     let scalar = |v: Value| v.scalar().expect("warp displacements are scalars");
     let q = p + Vec2::new(scalar(center[0]), scalar(center[1])) * amount;
-    let h = footprint.width();
-    if h <= 0.0 {
+    if footprint.width() <= 0.0 {
         return (q, footprint);
     }
-    let inv = 1.0 / (2.0 * h);
-    // Row i of the displacement's Jacobian: (∂d_i/∂x, ∂d_i/∂y).
-    let row = |i: usize| {
-        let ddx = (scalar(probes[0][i]) - scalar(probes[1][i])) * inv;
-        let ddy = (scalar(probes[2][i]) - scalar(probes[3][i])) * inv;
-        ddx.abs() + ddy.abs()
-    };
+    let row = |i: usize| rows[i].x.abs() + rows[i].y.abs();
     let stretch = 1.0 + amount.abs() * row(0).max(row(1));
     let stretch = if stretch.is_finite() { stretch } else { 1.0 };
     (q, footprint.scaled(stretch))
 }
 
+/// A warp's gradient chain rule: `input(q(p))` with `q = p + a·d(p)` has
+/// gradient `(I + a·J)ᵀ ∇input`, where `rows` are the rows of `J`.
+fn warp_chain(gradient: Vec2, rows: [Vec2; 2], amount: f32) -> Vec2 {
+    gradient + (rows[0] * gradient.x + rows[1] * gradient.y) * amount
+}
+
 impl Kernel {
+    /// The gradient of a pure scalar kernel's value from its operands'
+    /// values and gradients, or `None` when it has no closed-form rule here.
+    fn gradient(
+        &self,
+        p: Vec2,
+        footprint: Footprint,
+        values: &[Value],
+        gradients: &[Vec2],
+    ) -> Option<Vec2> {
+        let s = |i: usize| values[i].scalar();
+        Some(match *self {
+            Self::Constant(_) => Vec2::ZERO,
+            Self::Noise(ref noise) => noise.eval_gradient(p, footprint).1,
+            Self::Fractal(ref fractal) => fractal.eval_gradient(p, footprint).1,
+            Self::Disk(ref disk) => disk.eval_gradient(p, footprint).1,
+            Self::Binary(op, ..) => {
+                let (a, b) = (s(0)?, s(1)?);
+                let (ga, gb) = (gradients[0], gradients[1]);
+                match op {
+                    BinaryOp::Add => ga + gb,
+                    BinaryOp::Sub => ga - gb,
+                    BinaryOp::Mul => ga * b + gb * a,
+                    BinaryOp::Min => {
+                        if a <= b {
+                            ga
+                        } else {
+                            gb
+                        }
+                    }
+                    BinaryOp::Max => {
+                        if a >= b {
+                            ga
+                        } else {
+                            gb
+                        }
+                    }
+                }
+            }
+            Self::Abs(_) => {
+                let a = s(0)?;
+                if a == 0.0 {
+                    Vec2::ZERO
+                } else {
+                    gradients[0] * a.signum()
+                }
+            }
+            Self::Clamp(_, min, max) => {
+                let a = s(0)?;
+                if a > min && a < max {
+                    gradients[0]
+                } else {
+                    Vec2::ZERO
+                }
+            }
+            Self::AsMask(_) => {
+                let a = s(0)?;
+                if a > 0.0 && a < 1.0 {
+                    gradients[0]
+                } else {
+                    Vec2::ZERO
+                }
+            }
+            Self::Remap { scale, .. } => gradients[0] * scale,
+            Self::Mix(..) => {
+                let (a, b, t) = (s(0)?, s(1)?, s(2)?);
+                gradients[0] + (gradients[1] - gradients[0]) * t + gradients[2] * (b - a)
+            }
+            _ => return None,
+        })
+    }
+
     /// Evaluates a pure kernel from its operands' values, in operand order.
     fn combine(&self, p: Vec2, footprint: Footprint, args: &[Value]) -> Value {
         let scalar = |i: usize| args[i].scalar().expect("operand types were checked");
@@ -1716,6 +1888,11 @@ impl ScalarField for FieldProgram {
             }
         }
     }
+    /// Analytic where the program's ops allow; see
+    /// [`FieldProgram::eval_node_gradient`].
+    fn eval_gradient(&self, p: Vec2, footprint: Footprint) -> (f32, Vec2) {
+        self.eval_node_gradient(self.output, p, footprint)
+    }
 }
 
 /// A finished program whose output may have any [`PortType`].
@@ -1788,8 +1965,8 @@ impl ValueProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Transformed;
     use crate::raster::{Grid, Region};
+    use crate::{Transformed, central_difference};
     use glam::Mat2;
 
     fn torus() -> Domain {
@@ -2577,15 +2754,14 @@ mod tests {
         };
         let (fin, fdx, fdy) = (field(1, 16.0), field(2, 4.0), field(3, 4.0));
         let footprint = Footprint::new(1.0 / 128.0).unwrap();
-        let h = footprint.width();
         let mut widened = 0;
         for i in 0..32 {
             let p = Vec2::new(i as f32 * 0.061, 0.37);
             let at = |f: &Fractal, q: Vec2| f.eval(q, footprint);
+            // The analytic Jacobian's rows bound the stretch.
             let slope = |f: &Fractal| {
-                let gx = (at(f, p + Vec2::X * h) - at(f, p - Vec2::X * h)) * (1.0 / (2.0 * h));
-                let gy = (at(f, p + Vec2::Y * h) - at(f, p - Vec2::Y * h)) * (1.0 / (2.0 * h));
-                gx.abs() + gy.abs()
+                let g = f.eval_gradient(p, footprint).1;
+                g.x.abs() + g.y.abs()
             };
             let stretch = 1.0 + amount * slope(&fdx).max(slope(&fdy));
             widened += usize::from(stretch > 1.5);
@@ -2729,5 +2905,133 @@ mod tests {
                 .any(|r| p.cmpge(r.origin).all() && p.cmple(r.origin + r.size).all())
         };
         assert!((0..20).all(|i| covers(Vec2::splat(i as f32 + 0.5))));
+    }
+
+    /// A scalar program using every op with a closed-form gradient.
+    fn smooth(b: &mut ProgramBuilder) -> NodeId {
+        let d = torus();
+        let fractal = |b: &mut ProgramBuilder, kind, seed| {
+            b.add(Op::Fractal {
+                basis: Basis::Gradient,
+                domain: d,
+                frequency: [2.0, 3.0],
+                seed,
+                params: FractalParams {
+                    kind,
+                    octaves: 3,
+                    ..FractalParams::default()
+                },
+            })
+            .unwrap()
+        };
+        let fbm = fractal(b, FractalKind::Fbm, 1);
+        let ridged = fractal(b, FractalKind::Ridged, 2);
+        let value = b
+            .add(Op::Noise {
+                basis: Basis::Value,
+                domain: d,
+                frequency: [4.0, 2.0],
+                seed: 3,
+            })
+            .unwrap();
+        let disk = b
+            .add(Op::Disk {
+                domain: d,
+                center: [1.0, 0.5],
+                radius: 0.3,
+                softness: 0.2,
+            })
+            .unwrap();
+        let sum = b.add(Op::Add { a: fbm, b: ridged }).unwrap();
+        let product = b.add(Op::Mul { a: sum, b: value }).unwrap();
+        let mixed = b
+            .add(Op::Mix {
+                a: product,
+                b: fbm,
+                t: disk,
+            })
+            .unwrap();
+        let remapped = b
+            .add(Op::Remap {
+                input: mixed,
+                from: [-1.0, 1.0],
+                to: [0.0, 2.0],
+            })
+            .unwrap();
+        let shifted = b
+            .add(Op::Transform {
+                input: remapped,
+                transform: Affine2 {
+                    matrix: Mat2::from_cols(Vec2::new(0.0, 1.0), Vec2::new(-2.0, 0.0)),
+                    translation: Vec2::new(0.3, 0.1),
+                },
+            })
+            .unwrap_or(remapped);
+        b.add(Op::Warp {
+            input: shifted,
+            dx: fbm,
+            dy: value,
+            amount: 0.05,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn analytic_gradients_match_central_differences() {
+        let mut b = ProgramBuilder::new();
+        let output = smooth(&mut b);
+        let program = b.finish(output).unwrap();
+        // A small footprint, so band limits barely move between probes.
+        let footprint = Footprint::new(1e-3).unwrap();
+        let mut evaluator = program.evaluator();
+        for i in 0..40 {
+            let p = Vec2::new(0.05 + i as f32 * 0.047, 0.11 + i as f32 * 0.019);
+            let (value, gradient) = program.eval_gradient(p, footprint);
+            assert_eq!(value.to_bits(), program.eval(p, footprint).to_bits());
+            assert_eq!(value.to_bits(), evaluator.eval(p, footprint).to_bits());
+            let numeric = central_difference(&program, p, footprint);
+            let error = (gradient - numeric).length();
+            let scale = numeric.length().max(1.0);
+            assert!(
+                error < 0.05 * scale,
+                "at {p}: analytic {gradient}, numeric {numeric}"
+            );
+        }
+    }
+
+    #[test]
+    fn primitive_gradients_keep_their_values() {
+        let d = torus();
+        let footprint = Footprint::new(0.01).unwrap();
+        let fields: [&dyn ScalarField; 4] = [
+            &Noise::new(Basis::Gradient, d, Vec2::new(4.0, 6.0), 9).unwrap(),
+            &Noise::new(Basis::Value, d, Vec2::new(4.0, 6.0), 9).unwrap(),
+            &Fractal::new(
+                Basis::Gradient,
+                d,
+                Vec2::splat(2.0),
+                4,
+                FractalParams {
+                    kind: FractalKind::Ridged,
+                    ..FractalParams::default()
+                },
+            )
+            .unwrap(),
+            &Disk::new(d, Vec2::new(1.0, 0.5), 0.25, 0.1).unwrap(),
+        ];
+        for field in fields {
+            for i in 0..50 {
+                let p = Vec2::new(i as f32 * 0.043, i as f32 * 0.017);
+                let (value, gradient) = field.eval_gradient(p, footprint);
+                assert_eq!(value.to_bits(), field.eval(p, footprint).to_bits());
+                let numeric = central_difference(field, p, Footprint::new(1e-4).unwrap());
+                let analytic = field.eval_gradient(p, Footprint::new(1e-4).unwrap()).1;
+                assert!(
+                    (analytic - numeric).length() < 0.02 * numeric.length().max(1.0),
+                    "at {p}: {analytic} vs {numeric}"
+                );
+                assert!(gradient.is_finite());
+            }
+        }
     }
 }

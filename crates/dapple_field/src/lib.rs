@@ -13,8 +13,12 @@
 //!   demotes a periodic field explicitly.
 //! - **Footprints band-limit.** A field evaluated for a region drops detail
 //!   above that region's Nyquist limit, fading it to its mean, so realized
-//!   textures and their mips do not alias. Cellular noise ignores footprints
-//!   for now.
+//!   textures and their mips do not alias. Cellular noise fades to its mean
+//!   as cells shrink below a few footprints.
+//! - **Gradients.** [`ScalarField::eval_gradient`] returns a field's value and
+//!   its gradient, analytic for noise, fractals, disks, transforms and
+//!   programs built from them, numerical ([`central_difference`]) otherwise.
+//!   Warps size their footprints from it.
 //! - **Results are bit-exact.** All randomness is keyed hashing ([`hash`]), with
 //!   no sequential streams. The math is plain IEEE `f32` add, multiply, and
 //!   divide, `floor` and `sqrt` from the pure-Rust `libm`, and no fused
@@ -27,6 +31,7 @@
 //!   periodic fractals tile.
 //! - [`Cellular`]: Worley F1, F2, exact cell-border distance, and per-cell IDs
 //!   and values, selected as a field with [`Cellular::output`].
+//! - [`Disk`]: a filled, antialiased disk mask, zero outside its support.
 //! - [`Transformed`]: domain-checked affine coordinate maps.
 //!
 //! [`program`] describes fields as values: a DAG of operations with content
@@ -65,7 +70,7 @@ mod types;
 
 pub use cellular::{CellOutput, CellSample, Cellular, CellularField};
 pub use domain::{Domain, DomainError, Footprint, MAX_LATTICE_CELLS};
-pub use field::{Affine2, PlaneField, ScalarField, Transformed};
+pub use field::{Affine2, PlaneField, ScalarField, Transformed, central_difference};
 pub use fractal::{Fractal, FractalKind, FractalParams, MAX_OCTAVES};
 pub use noise::{Basis, Noise};
 pub use shape::Disk;

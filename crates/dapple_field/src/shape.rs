@@ -126,6 +126,27 @@ impl ScalarField for Disk {
         let t = ((self.radius + width * 0.5 - d) / width).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     }
+    fn eval_gradient(&self, p: Vec2, footprint: Footprint) -> (f32, Vec2) {
+        let value = self.eval(p, footprint);
+        let width = self.softness.max(footprint.width());
+        let d = self.distance(p);
+        if width <= 0.0 || d == 0.0 {
+            return (value, Vec2::ZERO);
+        }
+        let t = (self.radius + width * 0.5 - d) / width;
+        if !(0.0..=1.0).contains(&t) {
+            return (value, Vec2::ZERO);
+        }
+        // d/dp of the smoothstep of t, with dt/dd = −1/w and dd/dp the unit
+        // direction away from the (nearest) center.
+        let mut offset = p - self.center;
+        if let Some([px, py]) = self.domain.period() {
+            let period = Vec2::new(px as f32, py as f32);
+            offset -= period * (offset / period).round();
+        }
+        let slope = 6.0 * t * (1.0 - t) / width;
+        (value, offset / d * -slope)
+    }
 }
 
 #[cfg(test)]

@@ -129,3 +129,35 @@ fn operations_in_rectangles_equal_whole_passes() {
         check(&DistanceTransform { threshold: 0.1 }, &input, zeros);
     }
 }
+
+#[test]
+fn analytic_normals_agree_with_the_stencil() {
+    // A smooth, low-frequency height, where the two-texel stencil is
+    // accurate: the two normal maps agree closely.
+    let height = Fractal::new(
+        Basis::Gradient,
+        torus(),
+        Vec2::new(1.0, 2.0),
+        3,
+        FractalParams {
+            octaves: 2,
+            ..FractalParams::default()
+        },
+    )
+    .unwrap();
+    let realization = Realization::period(torus(), 128, 64).unwrap();
+    let analytic = crate::realize_normals(&height, realization, 0.2).unwrap();
+    let stencil = HeightToNormal { scale: 0.2 }
+        .apply(&realize(&height, realization).unwrap())
+        .unwrap();
+    let mut worst = 0.0_f32;
+    for (a, b) in analytic.values().iter().zip(stencil.values()) {
+        let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        worst = worst.max(1.0 - dot);
+    }
+    assert!(
+        worst < 1e-3,
+        "largest normal disagreement 1 - cos = {worst}"
+    );
+    assert!(crate::realize_normals(&height, realization, f32::NAN).is_err());
+}

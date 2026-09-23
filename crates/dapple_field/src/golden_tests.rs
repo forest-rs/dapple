@@ -51,11 +51,7 @@ fn corpus() -> [(&'static str, alloc::boxed::Box<dyn ScalarField>, u64); 6] {
         ),
         (
             "cellular-f1",
-            alloc::boxed::Box::new(
-                Cellular::new(d, f, 1.0, 5)
-                    .unwrap()
-                    .output(CellOutput::F1),
-            ),
+            alloc::boxed::Box::new(Cellular::new(d, f, 1.0, 5).unwrap().output(CellOutput::F1)),
             GOLDEN[4],
         ),
         (
@@ -137,6 +133,9 @@ fn periodic_grids_are_continuous_across_the_seam() {
                 }
             }
         }
-        assert!(seam <= interior, "{name}: seam jump {seam} > interior {interior}");
+        assert!(
+            seam <= interior,
+            "{name}: seam jump {seam} > interior {interior}"
+        );
     }
 }

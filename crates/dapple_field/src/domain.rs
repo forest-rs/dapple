@@ -147,7 +147,10 @@ impl fmt::Display for DomainError {
                 "axis {axis}: {cells} lattice cells per period does not tile"
             ),
             Self::LatticeTooFine { axis, cells } => {
-                write!(f, "axis {axis}: {cells} lattice cells per period is too many")
+                write!(
+                    f,
+                    "axis {axis}: {cells} lattice cells per period is too many"
+                )
             }
             Self::NotLatticePreserving => {
                 f.write_str("transform does not preserve the periodic lattice")

@@ -29,6 +29,10 @@
 //!   and values, selected as a field with [`Cellular::output`].
 //! - [`Transformed`]: domain-checked affine coordinate maps.
 //!
+//! [`program`] describes fields as values: a DAG of operations with content
+//! [`Fingerprint`](program::Fingerprint)s, evaluated bit-identically to the
+//! field types above.
+//!
 //! [`raster::Grid`] samples a field onto a small grid for tests and previews.
 //! Tiled, cached, and incremental realization belongs to later dapple crates.
 //!
@@ -54,6 +58,7 @@ mod field;
 mod fractal;
 pub mod hash;
 mod noise;
+pub mod program;
 pub mod raster;
 
 pub use cellular::{CellOutput, CellSample, Cellular, CellularField};

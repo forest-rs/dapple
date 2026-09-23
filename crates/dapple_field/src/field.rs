@@ -112,18 +112,11 @@ pub struct Transformed<F> {
 impl<F: ScalarField> Transformed<F> {
     /// Checks and builds the transformed field.
     pub fn new(inner: F, transform: Affine2) -> Result<Self, DomainError> {
-        if !(transform.matrix.is_finite() && transform.translation.is_finite()) {
-            return Err(DomainError::InvalidParameter { name: "transform" });
-        }
-        if let Domain::Periodic { period } = inner.domain()
-            && !preserves_lattice(transform.matrix, period)
-        {
-            return Err(DomainError::NotLatticePreserving);
-        }
+        let stretch = check_transform(inner.domain(), transform)?;
         Ok(Self {
             inner,
             transform,
-            stretch: transform.max_stretch(),
+            stretch,
         })
     }
 
@@ -143,6 +136,19 @@ impl<F: ScalarField> ScalarField for Transformed<F> {
         self.inner
             .eval(self.transform.apply(p), footprint.scaled(self.stretch))
     }
+}
+
+/// Checks `transform` for use on `domain` and returns its stretch factor.
+pub(crate) fn check_transform(domain: Domain, transform: Affine2) -> Result<f32, DomainError> {
+    if !(transform.matrix.is_finite() && transform.translation.is_finite()) {
+        return Err(DomainError::InvalidParameter { name: "transform" });
+    }
+    if let Domain::Periodic { period } = domain
+        && !preserves_lattice(transform.matrix, period)
+    {
+        return Err(DomainError::NotLatticePreserving);
+    }
+    Ok(transform.max_stretch())
 }
 
 /// Column `j` of `matrix` times `period[j]` must be a whole multiple of the

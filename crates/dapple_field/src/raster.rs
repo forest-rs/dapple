@@ -75,7 +75,10 @@ impl Grid {
     /// A 64-bit digest of the exact value bits, for golden tests.
     #[must_use]
     pub fn digest(&self) -> u64 {
-        let mut h = hash(0x6772_6964, &[u64::from(self.width), u64::from(self.height)]);
+        let mut h = hash(
+            0x6772_6964,
+            &[u64::from(self.width), u64::from(self.height)],
+        );
         for value in &self.values {
             h = hash(h, &[key(i64::from(value.to_bits()))]);
         }

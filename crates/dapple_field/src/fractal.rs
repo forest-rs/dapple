@@ -244,11 +244,13 @@ mod tests {
         let bad = |params| Fractal::new(Basis::Value, Domain::Plane, Vec2::ONE, 0, params);
         let base = FractalParams::default();
         assert!(bad(FractalParams { octaves: 0, ..base }).is_err());
-        assert!(bad(FractalParams {
-            lacunarity: 1,
-            ..base
-        })
-        .is_err());
+        assert!(
+            bad(FractalParams {
+                lacunarity: 1,
+                ..base
+            })
+            .is_err()
+        );
         assert!(bad(FractalParams { gain: 0.0, ..base }).is_err());
         assert!(bad(base).is_ok());
     }

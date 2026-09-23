@@ -75,6 +75,15 @@ pub const FINGERPRINT_VERSION: u64 = 1;
 pub struct NodeId(u32);
 
 impl NodeId {
+    /// The node at position `index` in creation order.
+    ///
+    /// Useful for writing an [`Op`] whose operands are placeholders, such as
+    /// operand positions that [`Op::map_inputs`] later rewrites.
+    #[must_use]
+    pub const fn from_index(index: u32) -> Self {
+        Self(index)
+    }
+
     /// The node's position in creation order.
     #[must_use]
     pub const fn index(self) -> u32 {
@@ -369,6 +378,59 @@ impl Op {
         inputs
     }
 
+    /// The same operation and parameters with every operand replaced by
+    /// `f(operand)`.
+    #[must_use]
+    pub fn map_inputs(&self, mut f: impl FnMut(NodeId) -> NodeId) -> Self {
+        let mut op = self.clone();
+        match &mut op {
+            Self::Constant { .. }
+            | Self::Noise { .. }
+            | Self::Fractal { .. }
+            | Self::Cellular { .. } => {}
+            Self::Transform { input, .. }
+            | Self::Demote { input }
+            | Self::Abs { input }
+            | Self::Clamp { input, .. }
+            | Self::Remap { input, .. }
+            | Self::Component { input, .. }
+            | Self::AsMask { input }
+            | Self::ToId { input, .. }
+            | Self::Normalize { input }
+            | Self::Direction { angle: input }
+            | Self::Angle { input }
+            | Self::Coherence { input } => *input = f(*input),
+            Self::Add { a, b }
+            | Self::Sub { a, b }
+            | Self::Mul { a, b }
+            | Self::Min { a, b }
+            | Self::Max { a, b }
+            | Self::Vector2 { x: a, y: b }
+            | Self::BlendNormals {
+                base: a, detail: b, ..
+            } => {
+                *a = f(*a);
+                *b = f(*b);
+            }
+            Self::Vector3 { x, y, z } | Self::Color { r: x, g: y, b: z } => {
+                *x = f(*x);
+                *y = f(*y);
+                *z = f(*z);
+            }
+            Self::Mix { a, b, t } => {
+                *a = f(*a);
+                *b = f(*b);
+                *t = f(*t);
+            }
+            Self::Warp { input, dx, dy, .. } => {
+                *input = f(*input);
+                *dx = f(*dx);
+                *dy = f(*dy);
+            }
+        }
+        op
+    }
+
     /// A short operation name, for listings and reports.
     #[must_use]
     pub const fn name(&self) -> &'static str {
@@ -611,6 +673,44 @@ impl ProgramBuilder {
             kernel,
         });
         Ok(id)
+    }
+
+    /// Copies the nodes `program`'s output depends on into this builder and
+    /// returns the output's node here.
+    ///
+    /// A node whose fingerprint equals one already in the builder is not
+    /// copied again: shared subgraphs of several imported programs become one
+    /// subgraph, which the flat plan then evaluates once.
+    pub fn import(&mut self, program: &FieldProgram) -> Result<NodeId, ProgramError> {
+        // Nodes the output depends on; operands always precede their users.
+        let mut needed = alloc::vec![false; program.nodes.len()];
+        needed[program.output.0 as usize] = true;
+        for index in (0..program.nodes.len()).rev() {
+            if needed[index] {
+                for input in program.nodes[index].op.inputs().iter() {
+                    needed[input.0 as usize] = true;
+                }
+            }
+        }
+        let mut mapped = alloc::vec![None::<NodeId>; program.nodes.len()];
+        for (index, node) in program.nodes.iter().enumerate() {
+            if !needed[index] {
+                continue;
+            }
+            let existing = self
+                .nodes
+                .iter()
+                .position(|n| n.fingerprint == node.fingerprint);
+            let id = match existing {
+                Some(existing) => NodeId(u32::try_from(existing).expect("fewer than 2^32 nodes")),
+                None => self
+                    .add(node.op.map_inputs(|input| {
+                        mapped[input.0 as usize].expect("operands come first")
+                    }))?,
+            };
+            mapped[index] = Some(id);
+        }
+        Ok(mapped[program.output.0 as usize].expect("the output is needed"))
     }
 
     /// The domain of an existing node.
@@ -2346,5 +2446,42 @@ mod tests {
             );
         }
         assert!(widened > 0, "the fixture should stretch somewhere");
+    }
+
+    #[test]
+    fn imports_share_equal_subgraphs() {
+        let build = |seed| {
+            let mut b = ProgramBuilder::new();
+            let shared = noise(&mut b, 1);
+            let own = noise(&mut b, seed);
+            let sum = b.add(Op::Add { a: shared, b: own }).unwrap();
+            b.finish(sum).unwrap()
+        };
+        let (p, q) = (build(2), build(3));
+        let mut b = ProgramBuilder::new();
+        let a = b.import(&p).unwrap();
+        let c = b.import(&q).unwrap();
+        let product = b.add(Op::Mul { a, b: c }).unwrap();
+        let combined = b.finish(product).unwrap();
+        // The shared noise is imported once: 1 shared + 2 own + 2 sums + 1.
+        assert_eq!(combined.len(), 6);
+        assert_eq!(combined.node_fingerprint(a), Some(p.fingerprint()));
+        let at = Vec2::new(0.3, 0.9);
+        assert_eq!(
+            combined.eval(at, Footprint::POINT).to_bits(),
+            (p.eval(at, Footprint::POINT) * q.eval(at, Footprint::POINT)).to_bits()
+        );
+        // Operand placeholders map through `map_inputs`.
+        let op = Op::Add {
+            a: NodeId::from_index(0),
+            b: NodeId::from_index(1),
+        };
+        assert_eq!(
+            op.map_inputs(|n| NodeId(n.0 + 5)),
+            Op::Add {
+                a: NodeId(5),
+                b: NodeId(6)
+            }
+        );
     }
 }

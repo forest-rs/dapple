@@ -1,0 +1,4 @@
+# Clippy configuration for Dapple.
+
+# Identifiers that `doc_markdown` should accept without backticks.
+doc-valid-idents = ["SplitMix64", "OpenPBR", ".."]

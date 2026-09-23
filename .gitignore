@@ -1,0 +1,17 @@
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+
+# Rust
+target/
+
+# Editors and operating systems
+.DS_Store
+*.swp
+.idea/
+.vscode/
+.beads.gate.lock
+.beads/hooks/

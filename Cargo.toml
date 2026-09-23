@@ -78,8 +78,9 @@ dapple_encode = { path = "crates/dapple_encode" }
 dapple_field = { path = "crates/dapple_field" }
 dapple_graph = { path = "crates/dapple_graph" }
 dapple_raster = { path = "crates/dapple_raster" }
-# Pinned to forest-rs/execution main at the merge of #98 (early cutoff, on
-# top of the executor seam from #97), which no crates.io release contains yet.
+# Pinned to forest-rs/execution main at the merge of #99 (scoped drains under
+# early cutoff, on top of #97 and #98), which no crates.io release contains
+# yet.
 execution_graph = { default-features = false, git = "https://github.com/forest-rs/execution", rev = "ce961177dc05a7d0742b88c46c33cb5b49a8fdc1" }
 # Pinned to forest-rs/exedra main at the merge of #91, which added the keyed
 # hash contract; no crates.io release contains it yet.

@@ -469,6 +469,16 @@ a fork. Arbitrary closures are allowed only as explicitly opaque nodes
 - Later, an exact analytic-coverage evaluator of the windfoil kind, which
   answers a coverage query for any footprint without a raster.
 
+**As built** (`dapple_imaging`): scenes are drawn in domain units and
+rasterized over a `dapple_raster::Realization` by `imaging_vello_cpu`'s 8-bit
+pipeline, at a pinned `forest-rs/imaging` revision. Coverage is the
+composited alpha in steps of 1/255; curves become chords within a quarter
+texel, the renderer's fixed tolerance. A wrapping realization draws the scene
+one period away in every direction, so shapes wrap. `coverage_image` builds
+the mip chain from exact area means of level 0, not by re-rasterizing each
+level, whose chords would be a quarter of a much larger texel. A golden
+digest pins the output.
+
 **Patterns:**
 - tile and brick samplers (running, stack, herringbone later), with per-tile
   IDs, random offsets and bevel profiles;
@@ -579,7 +589,7 @@ starts.
 | `dapple_graph` | Material graph value, typed ports, validation, compilation onto `execution_graph`, tile invalidation, caches, budgets, reports | yes |
 | `dapple_material` | OpenPBR bindings, auxiliary outputs, material-level layering | yes |
 | `dapple_encode` | Per-type mip builders, specular AA, packing profiles; PNG/EXR/KTX2 writing and the `ctt` compressor behind `std` | core yes |
-| `dapple_imaging` | Imaging scenes → coverage fields | std at first |
+| `dapple_imaging` | Imaging scenes → coverage fields | yes |
 | `dapple_exedra` | `Chart` domain: rasterized chart layouts, seam gutters | yes |
 | `dapple` | Leaf-only facade | yes |
 | `examples/*` | Material gallery (plane, sphere and draped-cloth previews through lightweald and Blender), wood/stone/brick/bark studies | std |
@@ -690,9 +700,10 @@ stubbed.
 3. **Upstream early cutoff in `execution_graph`:** decided: an
    executor-supplied `values_equal` (execution #98); dapple compares by
    fingerprint and, for rasters, unchanged tiles.
-4. **How far shapes go through `imaging`:** raster coverage through a CPU
-   backend first; whether an exact analytic coverage evaluator belongs in
-   imaging, windfoil or dapple.
+4. **How far shapes go through `imaging`:** decided for now: raster
+   coverage through `imaging_vello_cpu`, pinned by git revision. Still open:
+   whether an exact analytic coverage evaluator belongs in imaging, windfoil
+   or dapple.
 5. **Lightweald slots:** which of the parameters that vary spatially and lack a
    slot today (`subsurface_color`, `transmission_color`, `emission_luminance`,
    geometry tangent) lightweald adds. Leaves want `subsurface_color` first.

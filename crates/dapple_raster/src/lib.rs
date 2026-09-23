@@ -517,6 +517,19 @@ impl Realization {
         self.region.origin
     }
 
+    /// The edge policy: wrapping over one period, clamping otherwise.
+    #[must_use]
+    pub const fn edge(&self) -> Edge {
+        self.edge
+    }
+
+    /// The domain realized: the periodic domain of a wrapping realization,
+    /// [`Domain::Plane`] otherwise.
+    #[must_use]
+    pub const fn domain(&self) -> Domain {
+        self.domain
+    }
+
     /// Texel size in domain units.
     #[must_use]
     pub fn texel(&self) -> Vec2 {

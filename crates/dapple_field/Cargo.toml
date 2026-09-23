@@ -1,0 +1,26 @@
+[package]
+name = "dapple_field"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic, band-limited procedural fields: domains, keyed hashing, noise, and cellular patterns"
+readme = "README.md"
+keywords = ["procedural", "noise", "texture", "no_std"]
+categories = ["graphics", "no-std"]
+
+[dependencies]
+glam.workspace = true
+libm.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[package.metadata.docs.rs]
+all-features = true
+default-target = "x86_64-unknown-linux-gnu"
+targets = []

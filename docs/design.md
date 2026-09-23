@@ -557,6 +557,10 @@ needs evaluation contexts per splat and is left for later.
 
 ### Later
 
+The [milestones](#milestones) now order this list: weathering, the
+by-example blend and material layering wait for structured surfaces and
+reusable materials, and come back as modules.
+
 - **Erosion and weathering:** hydraulic/thermal erosion on height, edge wear
   from curvature, dirt from AO, moss and lichen growth by
   exposure/up-facing.
@@ -713,36 +717,138 @@ Every realization returns a report with:
 Each milestone is a vertical slice, finished to the quality bar rather than
 stubbed.
 
-1. **Foundations.**
-   - `openpbr` extracted from lightweald: agree it with lightweald, and
-     lightweald switches to it.
-   - `dapple_field`: plane and periodic domains, value/gradient noise, fBm,
-     cellular, footprints.
-   - Deterministic hashing and golden hashes across platforms.
-2. **The graph and incremental realization.**
-   - `dapple_graph` on `execution_graph` (the executor branch, once landed),
-     tile invalidation, fingerprints, the cache and reports.
-   - Early cutoff: `values_equal`, upstream in execution #98.
-3. **Sylva's first sets (unblocks sylva milestone 2).**
-   - Rasters: blur, height → normal, AO, distance transform.
-   - `dapple_imaging` coverage for leaf contours.
-   - `dapple_encode` with coverage-preserving and normal/roughness mips, PNG
-     and KTX2, and the `lightweald` and `gltf` profiles.
-   - Deliverables: an oak bark material (tileable, periodic) and an oak leaf
-     set (plane domain: opacity, base color, normal, translucency, i.e.
-     `subsurface_color` with thin-walled).
-4. **Solid and chart domains.**
-   - Solid wood grain and stone.
-   - `dapple_exedra` chart baking on exedra's construction charts.
-   - Timbers from the pavilion as the first consumer.
-5. **Library breadth.**
-   - Brick/tile/herringbone, scatter, material layering, weathering (edge
-     wear, dirt, moss).
-   - The Heitz–Neyret by-example blend.
-   - A material gallery rendered in lightweald.
-6. **Runtime procedural detail.**
-   - Field IR → Slang for lightweald shaders (micro-detail, anti-repetition),
-     plus a GPU preview backend.
+### Done
+
+1. **Foundations:** `openpbr` extracted from lightweald; `dapple_field`
+   with plane and periodic domains, value/gradient noise, fBm, cellular
+   noise and footprints; keyed hashing with golden values across platforms.
+2. **The graph and incremental realization:** `dapple_graph` on
+   `execution_graph`, tile invalidation, fingerprints, the cache, reports,
+   and early cutoff through `values_equal` (execution #98).
+3. **Sylva's first sets:** blur, height → normal, AO and distance
+   transforms; `dapple_imaging` coverage; `dapple_encode` with per-type
+   mips, PNG and KTX2, and the `lightweald` and `gltf` profiles; oak bark and
+   an oak leaf set.
+4. **Solid and chart domains:** solid wood grain, `dapple_exedra` chart
+   baking, and the pavilion timbers (`examples/timber_bake`) as the first
+   consumer.
+
+Milestone 5 began as library breadth. Tile layouts (bonds, herringbone)
+and scatter landed with brick, parquet and gravel, and then it stopped on
+purpose, for the reason below.
+
+### Structured content before breadth
+
+An external review (September 2026) found that dapple's gap is not more
+noises or effects but **data models for structured material content**. Brick,
+parquet and gravel each work, but each is a scalar field that forgets what
+it is drawing: a brick's identity exists only as a hash inside
+`Op::Tiling`, so the bevel, the glaze, the chips and the exposed body
+cannot agree about which brick they belong to except by rebuilding the same
+layout in every program. New material families then mean kernel edits
+(another op, another output enum) instead of library content.
+
+The next slices therefore build the data models first, and library breadth
+resumes afterwards as content on top of them. Weathering, the Heitz–Neyret
+by-example blend and material layering become modules of slice 2, not
+nodes.
+
+**Slice 0: typed values through the whole graph.** Field programs already
+type their ports (`Scalar`, `Mask`, `Id`, `Vector2`, `Vector3`,
+`Color(primaries)`, `Normal(frame)`, `Direction`); realization forgets
+them. `RasterData` is a scalar or three-channel raster, `Sample` reads
+scalars, and mips, caches and recipes know nothing of meaning.
+- A realized raster carries its `PortType`, with storage to match: `u32`
+  for IDs, two and three channels for vectors, colors, normals and
+  directions.
+- Realize, sample, filter, cache and serialize preserve the type. IDs and
+  other integers are never filtered (nearest only, no blur, majority mips);
+  colors keep their primaries; normals keep their frame and renormalize;
+  directions stay axial (doubled-angle averaging); masks keep
+  coverage-preserving mips; vectors filter per component.
+- Raster ops declare the types they accept, so blurring an ID is a graph
+  build error, not a wrong image. `dapple_encode`'s per-type mip rules
+  become the one definition the graph also uses.
+- Done when every port type survives realize → mip → sample with its own
+  rule, and cache keys and recipes carry the type.
+
+**Slice 1: structured surfaces.**
+- **Element sets:** a set of elements, each with a stable key, a transform,
+  bounds, a variant and typed attributes (a column table). The layout
+  (which elements exist and where) is separate from realization (how they
+  are drawn). Operations: *layout* (bonds, herringbone, grids, from today's
+  `Tiling`), *scatter* (from today's `Scatter`), *filter*, *transform*
+  (per-element jitter from attributes), *instance* (a shape or sub-material
+  per variant) and *composite* (realize into fields and rasters). Keys
+  derive from the layout's own coordinates, so an edit keeps unaffected
+  elements' keys and their randomness.
+- **Region map and region table:** an integer label raster (an `Id` from
+  slice 0) and a table per label: key, centroid, bounds, area, orientation,
+  neighbors and provenance. Compositing an element set preserves identity
+  (label → element key). Regions reconstructed from rasters (flood fill of a
+  mask) are matched to the previous regions by overlap, and splits and
+  merges are recorded as explicit correspondences, never silently
+  renumbered.
+- **Curve networks:** polylines and curves with arc length, width profiles,
+  tangents and intersections, exposed as fields (distance, along and across
+  coordinates): joints, cracks, veins, grooves.
+- **Morphology and shape processing:** dilate, erode, open and close on
+  masks and per region; insets from distance fields; per-region statistics.
+- **Demo: glazed brickwork**, where one brick's identity drives its shape,
+  bevel, glaze variation (tone, thickness, pooling toward the lower edge),
+  chips, and the substrate the chips expose, all coherently, rendered to
+  the gallery.
+
+**Slice 2: reusable materials.**
+- **Typed multichannel material values:** a material is its OpenPBR
+  parameters, each bound to a constant or a typed output, with auxiliary
+  channels (height, region) kept separate. Distinct operations for
+  *spatial selection* (where material A gives way to B), *detail
+  application* (normal/height detail onto a base) and *coating* (a layer
+  over a base: glaze, varnish, water, moss), each with per-parameter rules
+  (colors linear, roughness in α space, normals by RNM), instead of one
+  vague universal blend. Lowering to a packing profile reports every
+  approximation it makes.
+- **Parameterized modules:** a public interface of typed parameters with
+  units, ranges and defaults, resource inputs and named outputs, with a
+  versioned identity. Instantiation binds parameters explicitly and derives
+  seeds from the instance path; diagnostics and reports keep the module
+  boundary.
+- **Execution frequencies:** each value is computed per material, per
+  element, per region, per sample or per raster pass, declared rather than
+  inferred, so per-brick values are computed once per brick.
+- **Host-resolved resource inputs:** images and exemplars a host supplies,
+  with content identity, semantic type, color information, physical scale
+  and mip policy. The Heitz–Neyret blend and weathering (edge wear from
+  curvature, dirt from AO, moss by orientation) are modules built here.
+
+**Slice 3: materials on objects.**
+- **Surface evaluation context** through a host interface: world, part and
+  stock-local coordinates kept distinct; tangent frames and derivatives;
+  region identity; host-supplied fields such as thickness, curvature and
+  exposure.
+- **A chart-aware baking adapter** generalizing `dapple_exedra`: coverage
+  per chart, seam padding, normal-frame conversion between the chart and
+  the material, and atlas packing.
+
+**Cross-cutting.**
+- **Sampling correctness:** every op classified as exactly band-limited,
+  approximately (fading to a mean), or point-sampled, with a reference
+  integration path (supersampled over the footprint) that measures each
+  op's error. Footprints become anisotropic: a 2 × 2 covariance carried
+  through transforms, warps, slices and charts as `Σ' = J Σ Jᵀ`.
+- **Execution scale:** demand-driven outputs (realize only what a consumer
+  asks for); tile storage with an eviction policy; multi-output
+  compilation, so a color's channels share one program instead of three;
+  deterministic parallel CPU evaluation; backend policies in cache keys;
+  richer metrics.
+- **A headless material lab:** parameter sweeps, contact-sheet previews,
+  and relationship tests (the mortar is darker than every brick; chips only
+  expose substrate) as executable assertions.
+
+**Afterwards:** library breadth as modules; runtime procedural detail (field
+IR → Slang for lightweald shaders, micro-detail and anti-repetition, and a
+GPU preview backend).
 
 ## Open decisions
 
@@ -761,6 +867,17 @@ stubbed.
 5. **Lightweald slots:** which of the parameters that vary spatially and lack a
    slot today (`subsurface_color`, `transmission_color`, `emission_luminance`,
    geometry tangent) lightweald adds. Leaves want `subsurface_color` first.
+6. **Where structured surfaces live:** proposed: a new `no_std` crate,
+   `dapple_elements`, for element sets, region maps and tables, and curve
+   networks, depending on `dapple_field` and `dapple_raster`; `Op::Tiling`
+   and `Op::Scatter` stay as the field-level lowering of layouts without
+   attributes.
+7. **Element keys:** proposed: 64-bit keys from the keyed hash of the
+   layout's identity and the element's lattice anchor, stable under edits
+   that do not move the element; collisions are checked per set.
+8. **The module format:** Rust builders first, as today; whether modules
+   also get a data form beside `dapple_graph::Recipe` is decided in
+   slice 2.
 
 ## References
 

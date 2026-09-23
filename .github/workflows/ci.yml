@@ -11,7 +11,7 @@ env:
   RUST_MIN_VER: "1.88"
   # List of packages that will be checked with the minimum supported Rust version.
   # This should be limited to packages that are intended for publishing.
-  RUST_MIN_VER_PKGS: "-p dapple_field -p dapple_raster -p dapple_encode"
+  RUST_MIN_VER_PKGS: "-p dapple_field -p dapple_raster -p dapple_encode -p dapple_graph"
   # List of packages that don't support `no_std`.
   RUST_STD_ONLY_PKGS: "--exclude field_gallery --exclude dapple_compress"
   # List of packages that don't support wasip1

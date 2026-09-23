@@ -178,6 +178,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dapple_graph"
+version = "0.0.1"
+dependencies = [
+ "dapple_field",
+ "dapple_raster",
+ "execution_graph",
+]
+
+[[package]]
 name = "dapple_raster"
 version = "0.0.1"
 dependencies = [
@@ -216,6 +225,15 @@ dependencies = [
  "num-traits",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "execution_graph"
+version = "0.0.1"
+source = "git+https://github.com/forest-rs/execution?rev=b5d3d6e08a509d0a0b23c8081d932b71b193e908#b5d3d6e08a509d0a0b23c8081d932b71b193e908"
+dependencies = [
+ "hashbrown",
+ "invalidation",
 ]
 
 [[package]]
@@ -269,6 +287,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "getrandom"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -298,6 +322,24 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "zerocopy",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash",
+]
+
+[[package]]
+name = "invalidation"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2217040acf2f123ec9ed6c37c368ba66d1e5a9f2048478c1fdd861bb5cfdecd"
+dependencies = [
+ "hashbrown",
 ]
 
 [[package]]

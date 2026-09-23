@@ -1,0 +1,24 @@
+[package]
+name = "dapple_graph"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Incremental material graphs for dapple on execution_graph: field and raster nodes, parameter edits that re-run only their dependents"
+readme = "README.md"
+keywords = ["procedural", "texture", "incremental", "no_std"]
+categories = ["graphics", "no-std"]
+
+[dependencies]
+dapple_field.workspace = true
+dapple_raster.workspace = true
+execution_graph.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+default-target = "x86_64-unknown-linux-gnu"
+targets = []

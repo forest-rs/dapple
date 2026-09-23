@@ -600,17 +600,7 @@ pub fn realize_into(
         return Err(RasterError::InvalidRegion);
     }
     let footprint = Footprint::new(texel.max_element()).ok_or(RasterError::InvalidRegion)?;
-    if output.width != realization.width
-        || output.height != realization.height
-        || output.origin != realization.region.origin
-        || output.texel != texel
-        || output.edge != realization.edge
-    {
-        return Err(RasterError::LengthMismatch {
-            expected: check_size(realization.width, realization.height)?,
-            found: output.values.len(),
-        });
-    }
+    check_realization_grid(&realization, output)?;
     output.check_rect(rect)?;
     if rect.is_empty() {
         return Ok(());
@@ -650,6 +640,59 @@ pub fn realize_normals(
     realization: Realization,
     scale: f32,
 ) -> Result<Raster<[f32; 3]>, RasterError> {
+    let footprint = normals_setup(field, &realization, scale)?;
+    let count = check_size(realization.width, realization.height)?;
+    let mut values = Vec::with_capacity(count);
+    for y in 0..realization.height {
+        for x in 0..realization.width {
+            values.push(normal_at(field, &realization, footprint, scale, x, y));
+        }
+    }
+    Raster::from_values(
+        realization.width,
+        realization.height,
+        realization.region.origin,
+        realization.texel(),
+        realization.edge,
+        values,
+    )
+}
+
+/// [`realize_normals`] for the texels of `rect` only, written into
+/// `output` on the realization's grid; each texel equals the whole pass's.
+///
+/// # Errors
+///
+/// As [`realize_normals`], plus [`RasterError::LengthMismatch`] when
+/// `output` is not on the realization's grid and
+/// [`RasterError::InvalidSize`] when `rect` leaves it.
+pub fn realize_normals_into(
+    field: &impl ScalarField,
+    realization: Realization,
+    scale: f32,
+    rect: TexelRect,
+    output: &mut Raster<[f32; 3]>,
+) -> Result<(), RasterError> {
+    let footprint = normals_setup(field, &realization, scale)?;
+    check_realization_grid(&realization, output)?;
+    output.check_rect(rect)?;
+    output.map_rect(rect, |x, y| {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "map_rect passes texel indices of the grid"
+        )]
+        let (x, y) = (x as u32, y as u32);
+        normal_at(field, &realization, footprint, scale, x, y)
+    });
+    Ok(())
+}
+
+fn normals_setup(
+    field: &impl ScalarField,
+    realization: &Realization,
+    scale: f32,
+) -> Result<Footprint, RasterError> {
     if !scale.is_finite() {
         return Err(RasterError::InvalidParameter { name: "scale" });
     }
@@ -663,28 +706,43 @@ pub fn realize_normals(
     if !(texel.is_finite() && texel.x > 0.0 && texel.y > 0.0) {
         return Err(RasterError::InvalidRegion);
     }
-    let footprint = Footprint::new(texel.max_element()).ok_or(RasterError::InvalidRegion)?;
-    let count = check_size(realization.width, realization.height)?;
-    let mut values = Vec::with_capacity(count);
-    for y in 0..realization.height {
-        for x in 0..realization.width {
-            let center = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
-            let (_, g) = field.eval_gradient(realization.region.origin + center * texel, footprint);
-            values.push(
-                glam::Vec3::new(-g.x * scale, -g.y * scale, 1.0)
-                    .normalize()
-                    .to_array(),
-            );
-        }
+    Footprint::new(texel.max_element()).ok_or(RasterError::InvalidRegion)
+}
+
+fn normal_at(
+    field: &impl ScalarField,
+    realization: &Realization,
+    footprint: Footprint,
+    scale: f32,
+    x: u32,
+    y: u32,
+) -> [f32; 3] {
+    let center = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+    let p = realization.region.origin + center * realization.texel();
+    let (_, g) = field.eval_gradient(p, footprint);
+    glam::Vec3::new(-g.x * scale, -g.y * scale, 1.0)
+        .normalize()
+        .to_array()
+}
+
+/// Checks that `output` lies on `realization`'s grid.
+fn check_realization_grid<T: Copy>(
+    realization: &Realization,
+    output: &Raster<T>,
+) -> Result<(), RasterError> {
+    let texel = realization.texel();
+    if output.width != realization.width
+        || output.height != realization.height
+        || output.origin != realization.region.origin
+        || output.texel != texel
+        || output.edge != realization.edge
+    {
+        return Err(RasterError::LengthMismatch {
+            expected: check_size(realization.width, realization.height)?,
+            found: output.values.len(),
+        });
     }
-    Raster::from_values(
-        realization.width,
-        realization.height,
-        realization.region.origin,
-        texel,
-        realization.edge,
-        values,
-    )
+    Ok(())
 }
 
 /// An operation on a scalar raster.

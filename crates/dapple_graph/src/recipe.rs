@@ -21,7 +21,7 @@ use execution_graph::NodeId;
 
 use crate::{
     MaterialError, MaterialGraph, NodeKind, Params, RasterParams, fingerprint_words,
-    raster_fingerprint, realize_fingerprint,
+    normals_fingerprint, raster_fingerprint, realize_fingerprint,
 };
 
 /// The recipe format version this crate reads and writes.
@@ -54,10 +54,22 @@ pub enum Step {
     },
     /// A raster node.
     Raster {
-        /// Label of the realize or raster node.
+        /// Label of the realize, normals or raster node.
         input: String,
         /// The operation.
         params: RasterParams,
+    },
+    /// A normals node over one period of its field
+    /// ([`MaterialGraph::normals`]).
+    Normals {
+        /// Label of the field node.
+        input: String,
+        /// Texels per row.
+        width: u32,
+        /// Rows.
+        height: u32,
+        /// Domain units of height per field value unit.
+        scale: f32,
     },
 }
 
@@ -180,6 +192,7 @@ impl Step {
             Self::Field { .. } => NodeKind::Field,
             Self::Realize { .. } => NodeKind::Realize,
             Self::Raster { .. } => NodeKind::Raster,
+            Self::Normals { .. } => NodeKind::Normals,
         }
     }
 }
@@ -213,7 +226,7 @@ impl Recipe {
                         }
                     }
                 }
-                Step::Realize { input, .. } => {
+                Step::Realize { input, .. } | Step::Normals { input, .. } => {
                     if input_kind(input)? != NodeKind::Field {
                         return Err(wrong(input));
                     }
@@ -297,6 +310,17 @@ impl Recipe {
                     }
                     NodeFingerprint::Raster(_) => unreachable!("checked: realize reads a field"),
                 },
+                Step::Normals {
+                    input,
+                    width,
+                    height,
+                    scale,
+                } => match out[input] {
+                    NodeFingerprint::Field(fp) => {
+                        NodeFingerprint::Raster(normals_fingerprint(fp, *width, *height, *scale))
+                    }
+                    NodeFingerprint::Raster(_) => unreachable!("checked: normals read a field"),
+                },
                 Step::Raster { input, params } => match out[input] {
                     NodeFingerprint::Raster(fp) => {
                         NodeFingerprint::Raster(raster_fingerprint(*params, fp))
@@ -378,6 +402,12 @@ impl Recipe {
                     height,
                 } => graph.realize(&node.label, ids[input], *width, *height)?,
                 Step::Raster { input, params } => graph.raster(&node.label, *params, ids[input])?,
+                Step::Normals {
+                    input,
+                    width,
+                    height,
+                    scale,
+                } => graph.normals(&node.label, ids[input], (*width, *height), *scale)?,
             };
             ids.insert(node.label.clone(), id);
         }
@@ -409,6 +439,16 @@ impl MaterialGraph {
                     Params::Raster(params) => Step::Raster {
                         input: label(&entry.upstream[0]),
                         params: *params,
+                    },
+                    Params::Normals {
+                        width,
+                        height,
+                        scale,
+                    } => Step::Normals {
+                        input: label(&entry.upstream[0]),
+                        width: *width,
+                        height: *height,
+                        scale: *scale,
                     },
                 };
                 RecipeNode {

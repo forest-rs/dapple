@@ -459,7 +459,9 @@ fn graphs_export_recipes_that_rebuild_them() {
                     i.insert_str(0, "x.");
                 }
             }
-            Step::Realize { input, .. } | Step::Raster { input, .. } => {
+            Step::Realize { input, .. }
+            | Step::Raster { input, .. }
+            | Step::Normals { input, .. } => {
                 input.insert_str(0, "x.");
             }
         }
@@ -499,4 +501,53 @@ fn malformed_recipes_are_refused() {
         with(&|r| r.nodes.swap(2, 3)),
         RecipeError::UnknownLabel(_)
     ));
+}
+
+#[test]
+fn normals_nodes_recompute_locally_and_match_fresh_graphs() {
+    let build = |x: f32| {
+        let mut g = MaterialGraph::with_tile_size(16);
+        let noise = g.field("noise", noise_op(1), &[]).unwrap();
+        let disk = g.field("disk", disk_op(x), &[]).unwrap();
+        let height = g
+            .field(
+                "height",
+                Op::Max {
+                    a: operand(0),
+                    b: operand(1),
+                },
+                &[noise, disk],
+            )
+            .unwrap();
+        let normals = g.normals("normals", height, (128, 128), 0.05).unwrap();
+        (g, disk, normals)
+    };
+    let (mut g, disk, normals) = build(0.2);
+    g.run().unwrap();
+    assert!(matches!(
+        g.raster_value(normals).unwrap().data,
+        RasterData::Vector3(_)
+    ));
+    g.set_field_op(disk, disk_op(0.25)).unwrap();
+    g.run().unwrap();
+    let edit = g.tile_report();
+    assert!(
+        edit.tiles_recomputed > 0 && edit.tiles_recomputed < 64 / 2,
+        "{edit:?}"
+    );
+    assert_eq!(edit.unbounded_changes, 0);
+    let (mut fresh, _, fresh_normals) = build(0.25);
+    fresh.run().unwrap();
+    let digest = |g: &MaterialGraph, id| match &g.raster_value(id).unwrap().data {
+        RasterData::Vector3(r) => r.digest(),
+        RasterData::Scalar(r) => r.digest(),
+    };
+    assert_eq!(digest(&g, normals), digest(&fresh, fresh_normals));
+    // The recipe round trip keeps normals nodes.
+    let recipe = g.recipe();
+    assert!(matches!(recipe.nodes[3].step, Step::Normals { .. }));
+    assert_eq!(
+        recipe.fingerprints().unwrap()["normals"],
+        NodeFingerprint::Raster(g.raster_value(normals).unwrap().fingerprint)
+    );
 }

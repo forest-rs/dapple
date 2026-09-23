@@ -13,6 +13,8 @@
 //! - **Realize nodes** turn a scalar field into a raster over one period of
 //!   its periodic domain.
 //! - **Raster nodes** apply a `dapple_raster` operation.
+//! - **Normals nodes** realize a scalar field's normals from its gradient,
+//!   analytic where the field's ops allow.
 //!
 //! Each node's parameters (the op, the resolution, the raster operation) are
 //! an input of that node, named `<label>.params`. Editing them with
@@ -90,7 +92,7 @@ use dapple_field::raster::Region;
 use dapple_field::{Domain, PortType};
 use dapple_raster::{
     AmbientOcclusion, DistanceTransform, Edge, GaussianBlur, HeightToNormal, Raster, RasterError,
-    RasterOp, Realization, TexelRect, realize, realize_into,
+    RasterOp, Realization, TexelRect, realize, realize_into, realize_normals, realize_normals_into,
 };
 use execution_graph::{ExecutionGraph, Executor, GraphError, NodeAccess, NodeId, RunSummary};
 use glam::Vec2;
@@ -141,6 +143,15 @@ pub enum Params {
     },
     /// A raster node's operation.
     Raster(RasterParams),
+    /// A normals node's resolution and height scale.
+    Normals {
+        /// Texels per row.
+        width: u32,
+        /// Rows.
+        height: u32,
+        /// Domain units of height per field value unit.
+        scale: f32,
+    },
 }
 
 /// A realized raster: scalar, or three-channel (normals).
@@ -224,6 +235,8 @@ pub enum NodeKind {
     Realize,
     /// Applies a raster operation.
     Raster,
+    /// Realizes a scalar field's normals from its gradient.
+    Normals,
 }
 
 /// State a field node keeps between runs.
@@ -250,6 +263,12 @@ enum Source {
         program: Fingerprint,
         width: u32,
         height: u32,
+    },
+    Normals {
+        program: Fingerprint,
+        width: u32,
+        height: u32,
+        scale: u32,
     },
     Raster {
         params: RasterParams,
@@ -471,6 +490,21 @@ fn realize_fingerprint(program: Fingerprint, width: u32, height: u32) -> u64 {
     )
 }
 
+/// Content fingerprint of the normals of the program `program`.
+fn normals_fingerprint(program: Fingerprint, width: u32, height: u32, scale: f32) -> u64 {
+    let [lo, hi] = fingerprint_words(program);
+    hash(
+        0x006e_6f72_6d61_6c73, // "normals"
+        &[
+            lo,
+            hi,
+            u64::from(width),
+            u64::from(height),
+            u64::from(scale.to_bits()),
+        ],
+    )
+}
+
 /// Content fingerprint of `params` applied to a raster fingerprinted `input`.
 fn raster_fingerprint(params: RasterParams, input: u64) -> u64 {
     let f = |v: f32| u64::from(v.to_bits());
@@ -534,6 +568,52 @@ fn region_tiles(
 
 /// Which tiles of a node's grid to recompute: `None` for all of them.
 type Dirty = Option<Vec<u32>>;
+
+/// The tiles of a realization of `field` to recompute, given the program
+/// fingerprint the previous output was realized from (`None` when there is
+/// no reusable output). Counts a recomputation an unbounded change forces
+/// over a previous output.
+///
+/// A texel's value, or its gradient, reads the field within half a footprint
+/// of its center, so the change regions grow by that much.
+fn field_dirty(
+    tiles: &mut Tiles,
+    grid: Grid,
+    realization: &Realization,
+    field: &FieldValue,
+    previous: Option<Fingerprint>,
+    fingerprint: Fingerprint,
+) -> Dirty {
+    let last = previous?;
+    let dirty = if last == fingerprint {
+        Some(Vec::new())
+    } else if field.previous == Some(last) {
+        match &field.change {
+            Change::Nowhere => Some(Vec::new()),
+            Change::Within(regions) => {
+                let pad = realization.texel().max_element() * 0.5;
+                let mut dirty = Vec::new();
+                let mut bounded = true;
+                for region in regions {
+                    match region_tiles(grid, realization, region, pad) {
+                        Some(t) => dirty.extend(t),
+                        None => bounded = false,
+                    }
+                }
+                dirty.sort_unstable();
+                dirty.dedup();
+                bounded.then_some(dirty)
+            }
+            Change::Everywhere => None,
+        }
+    } else {
+        None
+    };
+    if dirty.is_none() {
+        tiles.report.unbounded_changes += 1;
+    }
+    dirty
+}
 
 /// Rewrites the tiles of `dirty` in a copy of `previous` (or computes
 /// everything), then reports which tiles' bits changed.
@@ -619,32 +699,14 @@ fn run_realize(
         ) if (*w, *h) == (width, height) => Some((*last, raster)),
         _ => None,
     };
-    let dirty: Dirty = match previous {
-        None => None,
-        Some((last, _)) if last == fingerprint => Some(Vec::new()),
-        Some((last, _)) if field_value.previous == Some(last) => match &field_value.change {
-            Change::Nowhere => Some(Vec::new()),
-            Change::Within(regions) => {
-                let pad = realization.texel().max_element() * 0.5;
-                let mut dirty = Vec::new();
-                let mut bounded = true;
-                for region in regions {
-                    match region_tiles(grid, &realization, region, pad) {
-                        Some(t) => dirty.extend(t),
-                        None => bounded = false,
-                    }
-                }
-                dirty.sort_unstable();
-                dirty.dedup();
-                bounded.then_some(dirty)
-            }
-            Change::Everywhere => None,
-        },
-        Some(_) => None,
-    };
-    if previous.is_some() && dirty.is_none() {
-        tiles.report.unbounded_changes += 1;
-    }
+    let dirty = field_dirty(
+        tiles,
+        grid,
+        &realization,
+        field_value,
+        previous.map(|(last, _)| last),
+        fingerprint,
+    );
     let (raster, recomputed) = refresh(
         grid,
         &dirty,
@@ -664,6 +726,71 @@ fn run_realize(
         program: fingerprint,
         width,
         height,
+    });
+    state.output = Some(value.data.clone());
+    Ok(GraphValue::Raster(Arc::new(value)))
+}
+
+fn run_normals(
+    tiles: &mut Tiles,
+    node: u32,
+    state: &mut TileState,
+    (width, height, scale): (u32, u32, f32),
+    input: &GraphValue,
+) -> Result<GraphValue, NodeError> {
+    let field_value = field_input(input)?;
+    let program = &field_value.program;
+    let (port, domain) = (program.output_type(), program.domain());
+    if !port.is_scalar() || !matches!(domain, Domain::Periodic { .. }) {
+        return Err(NodeError::NotRealizable { port, domain });
+    }
+    let field = program.channel(0).map_err(NodeError::Program)?;
+    let realization = Realization::period(domain, width, height).map_err(NodeError::Raster)?;
+    let fingerprint = program.fingerprint();
+    let grid = Grid::new(width, height, tiles.size(), Edge::Wrap);
+    let previous = match (&state.source, &state.output) {
+        (
+            Some(Source::Normals {
+                program: last,
+                width: w,
+                height: h,
+                scale: k,
+            }),
+            Some(RasterData::Vector3(raster)),
+        ) if (*w, *h, *k) == (width, height, scale.to_bits()) => Some((*last, raster)),
+        _ => None,
+    };
+    let dirty = field_dirty(
+        tiles,
+        grid,
+        &realization,
+        field_value,
+        previous.map(|(last, _)| last),
+        fingerprint,
+    );
+    let (raster, recomputed) = refresh(
+        grid,
+        &dirty,
+        previous.map(|(_, raster)| raster),
+        || realize_normals(&field, realization, scale).map_err(NodeError::Raster),
+        |rect, raster| {
+            realize_normals_into(&field, realization, scale, rect, raster)
+                .map_err(NodeError::Raster)
+        },
+    )?;
+    let data = RasterData::Vector3(raster);
+    let changed = settle(tiles, node, state, &data, &recomputed, dirty.is_none());
+    let value = RasterValue {
+        data,
+        fingerprint: normals_fingerprint(fingerprint, width, height, scale),
+        changed,
+        tile_space: node,
+    };
+    state.source = Some(Source::Normals {
+        program: fingerprint,
+        width,
+        height,
+        scale: scale.to_bits(),
     });
     state.output = Some(value.data.clone());
     Ok(GraphValue::Raster(Arc::new(value)))
@@ -832,6 +959,20 @@ impl Executor for DappleExecutor {
                 *params,
                 &upstream[0],
             )?,
+            (
+                NodeKind::Normals,
+                Params::Normals {
+                    width,
+                    height,
+                    scale,
+                },
+            ) => run_normals(
+                &mut self.tiles,
+                node.key,
+                &mut node.tiles,
+                (*width, *height, *scale),
+                &upstream[0],
+            )?,
             _ => {
                 return Err(NodeError::WrongValue {
                     expected: "params of the node's kind",
@@ -968,6 +1109,28 @@ impl MaterialGraph {
         )
     }
 
+    /// Adds a node realizing the normals of the height field `scale * field`
+    /// over one period at `width` × `height` texels, from the field's
+    /// gradient (`dapple_raster::realize_normals`).
+    pub fn normals(
+        &mut self,
+        label: &str,
+        field: NodeId,
+        (width, height): (u32, u32),
+        scale: f32,
+    ) -> Result<NodeId, MaterialError> {
+        self.add(
+            NodeKind::Normals,
+            label,
+            Params::Normals {
+                width,
+                height,
+                scale,
+            },
+            &[field],
+        )
+    }
+
     /// Adds a node applying `params` to the scalar raster of `raster`.
     pub fn raster(
         &mut self,
@@ -1013,6 +1176,24 @@ impl MaterialGraph {
         height: u32,
     ) -> Result<(), MaterialError> {
         self.set_params(node, NodeKind::Realize, Params::Realize { width, height })
+    }
+
+    /// Changes a normals node's resolution and height scale.
+    pub fn set_normals(
+        &mut self,
+        node: NodeId,
+        (width, height): (u32, u32),
+        scale: f32,
+    ) -> Result<(), MaterialError> {
+        self.set_params(
+            node,
+            NodeKind::Normals,
+            Params::Normals {
+                width,
+                height,
+                scale,
+            },
+        )
     }
 
     /// Replaces a raster node's operation.

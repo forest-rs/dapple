@@ -7,7 +7,8 @@ counterpart to Lightweald's `texture_bake`, for procedural sources.
 cargo run -p dapple_bake --release -- --manifest tools/dapple_bake/materials/materials.toml
 ```
 
-Options: `--out <dir>` (default `target/dapple-bake`), `--encoding
+Options: `--out <dir>` (default the repository's git-ignored
+`.local/gallery/dapple-bake`, which survives `cargo clean`), `--encoding
 uncompressed,bc,astc` (Lightweald pool encodings besides the uncompressed KTX2;
 default `bc`), `--quality fast|balanced|best`, and `--force`.
 

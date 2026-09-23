@@ -9,7 +9,7 @@
 //!             [--force]
 //! ```
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use dapple_bake::{Outcome, WriteSettings, bake_manifest};
@@ -30,7 +30,7 @@ fn main() -> ExitCode {
 
 fn run(args: Vec<String>) -> Result<(), String> {
     let mut manifest = None;
-    let mut out = PathBuf::from("target/dapple-bake");
+    let mut out = repository().join(".local/gallery/dapple-bake");
     let mut settings = WriteSettings {
         encodings: vec![Encoding::Bc],
         quality: Quality::Balanced,
@@ -88,4 +88,12 @@ fn run(args: Vec<String>) -> Result<(), String> {
     }
     println!("output in {}", out.display());
     Ok(())
+}
+
+/// The repository root: this crate's manifest sits two levels below it.
+fn repository() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("the crate lives two levels below the repository root")
 }

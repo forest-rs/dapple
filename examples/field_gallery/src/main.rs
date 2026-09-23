@@ -5,8 +5,9 @@
 //! operations as PNG files.
 //!
 //! Run with `cargo run -p field_gallery -- [output-dir]`; the default output
-//! directory is `target/field-gallery`. Each image is normalized to its own
-//! value range, which is printed.
+//! directory is the repository's git-ignored `.local/gallery/field-gallery`,
+//! which survives `cargo clean`. Each image is normalized to its own value
+//! range, which is printed.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -18,7 +19,7 @@ use dapple_field::program::{FieldProgram, Op, ProgramBuilder, ProgramError};
 use dapple_field::raster::{Grid, Region};
 use dapple_field::{
     Basis, CellOutput, Cellular, Domain, DomainError, Footprint, Fractal, FractalKind,
-    FractalParams, Noise, ScalarField,
+    FractalParams, ImageLevel, Noise, SampleImage, ScalarField,
 };
 use dapple_raster::{
     AmbientOcclusion, DistanceTransform, Edge, GaussianBlur, HeightToNormal, Raster, RasterOp,
@@ -30,9 +31,10 @@ const SIZE: u32 = 256;
 const SEED: u64 = 7;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let out = std::env::args_os()
-        .nth(1)
-        .map_or_else(|| PathBuf::from("target/field-gallery"), PathBuf::from);
+    let out = std::env::args_os().nth(1).map_or_else(
+        || repository().join(".local/gallery/field-gallery"),
+        PathBuf::from,
+    );
     std::fs::create_dir_all(&out)?;
 
     let plane = Domain::Plane;
@@ -147,6 +149,8 @@ fn bark(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
         stats.contexts
     );
     write_raster(out, "bark-height-2x2", &height)?;
+    mip_previews(out, &height)?;
+    warped_bark(out, torus, &program, &height)?;
 
     // Heights are in [0, 1]; 1 means 15 mm of relief on a 1 m tile.
     let relief = 0.015;
@@ -183,6 +187,84 @@ fn bark(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
     write_raster(out, "bark-fissure-distance-2x2", &distance)?;
 
     bark_set(out, &height, &normals, &ao)
+}
+
+/// Writes the first mip levels of the bark height, each scaled back up to the
+/// base size with nearest texels, as `bark-height-mip<n>.png`.
+fn mip_previews(out: &Path, height: &Raster) -> Result<(), Box<dyn std::error::Error>> {
+    let image = Image::new(
+        height.width(),
+        height.height(),
+        1,
+        Edge::Wrap,
+        height.values().to_vec(),
+    )?;
+    let chain = dapple_encode::data_mips(&image, Filter::Kaiser);
+    for (n, level) in chain.levels().iter().enumerate().skip(1).take(4) {
+        let (w, h) = (level.width(), level.height());
+        let values = (0..SIZE * SIZE)
+            .map(|i| {
+                let (x, y) = (i % SIZE * w / SIZE, i / SIZE * h / SIZE);
+                level.texel(x, y)[0]
+            })
+            .collect();
+        write_grid(
+            out,
+            &format!("bark-height-mip{n}"),
+            &Grid {
+                width: SIZE,
+                height: SIZE,
+                values,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// Samples the realized bark height back as a field, warps it by noise, and
+/// realizes it again: `bark-warped-2x2.png`. Prints the warp's static reach.
+fn warped_bark(
+    out: &Path,
+    torus: Domain,
+    program: &FieldProgram,
+    height: &Raster,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let level = ImageLevel::new(
+        height.width(),
+        height.height(),
+        height.texel(),
+        height.values().to_vec(),
+    )?;
+    let image = SampleImage::new(torus, Vec2::ZERO, vec![level], program.fingerprint())?;
+    let mut b = ProgramBuilder::new();
+    let sampled = b.add(Op::Sample { image })?;
+    let displacement = |b: &mut ProgramBuilder, seed| {
+        b.add(Op::Noise {
+            basis: Basis::Gradient,
+            domain: torus,
+            frequency: [3.0, 3.0],
+            seed,
+        })
+    };
+    let dx = displacement(&mut b, 21)?;
+    let dy = displacement(&mut b, 22)?;
+    let amount = 0.02;
+    let warp = b.add(Op::Warp {
+        input: sampled,
+        dx,
+        dy,
+        amount,
+    })?;
+    let warped = b.finish(warp)?;
+    let bounds = warped.node_bounds(dx);
+    println!(
+        "warped bark: displacement range {:?}, slope bound {:?}, so a change reaches {:.3} units",
+        bounds.range,
+        bounds.slope,
+        bounds.max_abs().unwrap_or(f32::INFINITY) * amount
+    );
+    let again = realize(&warped, Realization::period(torus, SIZE, SIZE)?)?;
+    write_raster(out, "bark-warped-2x2", &again)
 }
 
 /// Packs the bark study as a material and writes its textures, with full mip
@@ -448,4 +530,12 @@ fn write_grid(dir: &Path, name: &str, grid: &Grid) -> Result<(), Box<dyn std::er
     encoder.write_header()?.write_image_data(&pixels)?;
     println!("{} [{lo:.4}, {hi:.4}]", path.display());
     Ok(())
+}
+
+/// The repository root: this crate's manifest sits two levels below it.
+fn repository() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("the crate lives two levels below the repository root")
 }

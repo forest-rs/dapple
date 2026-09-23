@@ -8,6 +8,9 @@
 # Rust
 target/
 
+# Local review output (galleries, bakes); survives cargo clean
+.local/
+
 # Editors and operating systems
 .DS_Store
 *.swp

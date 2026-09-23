@@ -3,12 +3,15 @@ resolver = "2"
 members = [
     "crates/dapple_compress",
     "crates/dapple_encode",
+    "crates/dapple_exedra",
     "crates/dapple_field",
     "crates/dapple_graph",
     "crates/dapple_imaging",
+    "crates/dapple_library",
     "crates/dapple_raster",
     "examples/field_gallery",
     "examples/imaging_gallery",
+    "examples/timber_bake",
     "tools/dapple_bake",
 ]
 
@@ -77,17 +80,25 @@ clippy.allow_attributes = "warn"
 [workspace.dependencies]
 dapple_compress = { path = "crates/dapple_compress" }
 dapple_encode = { path = "crates/dapple_encode" }
+dapple_exedra = { path = "crates/dapple_exedra" }
 dapple_field = { path = "crates/dapple_field" }
 dapple_graph = { path = "crates/dapple_graph" }
 dapple_imaging = { path = "crates/dapple_imaging" }
+dapple_library = { path = "crates/dapple_library" }
 dapple_raster = { path = "crates/dapple_raster" }
 # Pinned to forest-rs/execution main at the merge of #99 (scoped drains under
 # early cutoff, on top of #97 and #98), which no crates.io release contains
 # yet.
 execution_graph = { default-features = false, git = "https://github.com/forest-rs/execution", rev = "ce961177dc05a7d0742b88c46c33cb5b49a8fdc1" }
-# Pinned to forest-rs/exedra main at the merge of #91, which added the keyed
-# hash contract; no crates.io release contains it yet.
-exedra_math = { default-features = false, features = ["libm"], git = "https://github.com/forest-rs/exedra", rev = "d959d3dab36ccc50f77817f1a37e2ae4ff73cc23" }
+# Pinned to one forest-rs/exedra main commit (after the merge of #98, with the
+# keyed hash contract, tangents, attribute streams and layer propagation);
+# no crates.io release contains them yet. Keep every exedra crate on the same
+# revision.
+exedra_assembly = { git = "https://github.com/forest-rs/exedra", rev = "b233b2c9608dcc424cf667b35299c4ddb1966112" }
+exedra_constructive = { git = "https://github.com/forest-rs/exedra", rev = "b233b2c9608dcc424cf667b35299c4ddb1966112" }
+exedra_gltf = { git = "https://github.com/forest-rs/exedra", rev = "b233b2c9608dcc424cf667b35299c4ddb1966112" }
+exedra_math = { default-features = false, features = ["libm"], git = "https://github.com/forest-rs/exedra", rev = "b233b2c9608dcc424cf667b35299c4ddb1966112" }
+exedra_mesh = { default-features = false, features = ["libm"], git = "https://github.com/forest-rs/exedra", rev = "b233b2c9608dcc424cf667b35299c4ddb1966112" }
 glam = { default-features = false, features = ["libm"], version = "0.33.8" }
 # Pinned to forest-rs/imaging main; its CPU backends are not on crates.io.
 imaging = { default-features = false, features = ["libm"], git = "https://github.com/forest-rs/imaging", rev = "89b364b253bd4a07732e0fb1de95ae1b313cf588" }
@@ -96,4 +107,5 @@ invalidation = { default-features = false, version = "0.2.0" }
 libm = "0.2.16"
 png = "0.18.1"
 serde = { default-features = false, features = ["alloc", "derive"], version = "1.0.228" }
+serde_json = "1.0.145"
 toml = "1.1.6"

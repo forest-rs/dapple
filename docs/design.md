@@ -271,6 +271,33 @@ simply demoted.
 - **Static bounds** extend to solid nodes, with the slope bounding
   `|∂x| + |∂y| + |∂z|`.
 
+**Chart baking as built.** `dapple_exedra::SurfaceBake` takes one region of
+an extracted `exedra_mesh::TriMesh` (an extrusion face, say, which exedra
+charts as a single UV island in recipe units) and rasterizes it at a texel
+density.
+
+- **Samples:** every covered texel records its surface point, mapped through
+  a placement into the material's solid space (a timber inside its log), the
+  interpolated normal, and a footprint of `sqrt(surface area / chart area)`
+  texels. The first triangle to cover a texel wins; later overlaps are
+  counted in the bake's stats rather than hidden.
+- **Gutters:** padding texels copy their nearest covered texel (breadth
+  first, a fixed number of steps), so bilinear and mip filtering near the
+  island's edge never reach the background.
+- **Placement on the mesh:** the bake reports a `KHR_texture_transform`
+  offset and scale that map the mesh's own UVs onto the image, so the mesh
+  is exported unchanged. Each region binds its own material slot through
+  `exedra_assembly::Assembly::bind_region_slot`.
+- **Evaluator-agnostic:** the bake only produces sample points; a solid
+  program evaluates them through `eval_chart`, and its values are scattered
+  back into the texel grid.
+
+`examples/timber_bake` is the first consumer: a post, a beam and a pitched
+rafter with plumb cuts, cut from different places in one oak log, exported
+through `exedra_gltf` and rendered in Blender. Atlas packing of several
+regions into one image, and raster ops that cross chart seams, are still to
+come.
+
 ## Incremental evaluation
 
 ### On `execution_graph`
@@ -591,6 +618,7 @@ starts.
 | `dapple_encode` | Per-type mip builders, specular AA, packing profiles; PNG/EXR/KTX2 writing and the `ctt` compressor behind `std` | core yes |
 | `dapple_imaging` | Imaging scenes → coverage fields | yes |
 | `dapple_exedra` | `Chart` domain: rasterized chart layouts, seam gutters | yes |
+| `dapple_library` | Ready-made materials (oak bark, solid oak) as field programs | yes |
 | `dapple` | Leaf-only facade | yes |
 | `examples/*` | Material gallery (plane, sphere and draped-cloth previews through lightweald and Blender), wood/stone/brick/bark studies | std |
 | `benchmarks/*` | Wind tunnels: samples per second per op, tile realize and cache, incremental edit latency | std |

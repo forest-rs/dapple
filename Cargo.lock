@@ -209,6 +209,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dapple_exedra"
+version = "0.0.1"
+dependencies = [
+ "dapple_field",
+ "exedra_mesh",
+ "glam",
+ "libm",
+]
+
+[[package]]
 name = "dapple_field"
 version = "0.0.1"
 dependencies = [
@@ -242,6 +252,13 @@ dependencies = [
  "imaging",
  "imaging_vello_cpu",
  "libm",
+]
+
+[[package]]
+name = "dapple_library"
+version = "0.0.1"
+dependencies = [
+ "dapple_field",
 ]
 
 [[package]]
@@ -311,12 +328,89 @@ dependencies = [
 ]
 
 [[package]]
+name = "exedra_assembly"
+version = "0.1.0"
+source = "git+https://github.com/forest-rs/exedra?rev=b233b2c9608dcc424cf667b35299c4ddb1966112#b233b2c9608dcc424cf667b35299c4ddb1966112"
+dependencies = [
+ "exedra_constructive",
+ "exedra_mesh",
+ "exedra_mesh_ops",
+ "hashbrown",
+ "invalidation",
+]
+
+[[package]]
+name = "exedra_constructive"
+version = "0.1.0"
+source = "git+https://github.com/forest-rs/exedra?rev=b233b2c9608dcc424cf667b35299c4ddb1966112#b233b2c9608dcc424cf667b35299c4ddb1966112"
+dependencies = [
+ "exedra_math",
+ "exedra_mesh",
+ "exedra_mesh_ops",
+ "exedra_primitives",
+ "exedra_triangulate",
+ "hashbrown",
+ "kurbo",
+ "libm",
+]
+
+[[package]]
+name = "exedra_gltf"
+version = "0.1.0"
+source = "git+https://github.com/forest-rs/exedra?rev=b233b2c9608dcc424cf667b35299c4ddb1966112#b233b2c9608dcc424cf667b35299c4ddb1966112"
+dependencies = [
+ "exedra_assembly",
+ "exedra_constructive",
+ "exedra_math",
+ "exedra_mesh",
+ "serde_json",
+]
+
+[[package]]
 name = "exedra_math"
 version = "0.1.0"
-source = "git+https://github.com/forest-rs/exedra?rev=d959d3dab36ccc50f77817f1a37e2ae4ff73cc23#d959d3dab36ccc50f77817f1a37e2ae4ff73cc23"
+source = "git+https://github.com/forest-rs/exedra?rev=b233b2c9608dcc424cf667b35299c4ddb1966112#b233b2c9608dcc424cf667b35299c4ddb1966112"
 dependencies = [
  "libm",
 ]
+
+[[package]]
+name = "exedra_mesh"
+version = "0.1.0"
+source = "git+https://github.com/forest-rs/exedra?rev=b233b2c9608dcc424cf667b35299c4ddb1966112#b233b2c9608dcc424cf667b35299c4ddb1966112"
+dependencies = [
+ "exedra_math",
+ "exedra_triangulate",
+ "hashbrown",
+ "invalidation",
+ "libm",
+]
+
+[[package]]
+name = "exedra_mesh_ops"
+version = "0.1.0"
+source = "git+https://github.com/forest-rs/exedra?rev=b233b2c9608dcc424cf667b35299c4ddb1966112#b233b2c9608dcc424cf667b35299c4ddb1966112"
+dependencies = [
+ "exedra_math",
+ "exedra_mesh",
+ "exedra_triangulate",
+ "hashbrown",
+ "libm",
+]
+
+[[package]]
+name = "exedra_primitives"
+version = "0.1.0"
+source = "git+https://github.com/forest-rs/exedra?rev=b233b2c9608dcc424cf667b35299c4ddb1966112#b233b2c9608dcc424cf667b35299c4ddb1966112"
+dependencies = [
+ "exedra_mesh",
+ "libm",
+]
+
+[[package]]
+name = "exedra_triangulate"
+version = "0.1.0"
+source = "git+https://github.com/forest-rs/exedra?rev=b233b2c9608dcc424cf667b35299c4ddb1966112#b233b2c9608dcc424cf667b35299c4ddb1966112"
 
 [[package]]
 name = "fast_image_resize"
@@ -355,6 +449,7 @@ dependencies = [
  "dapple_compress",
  "dapple_encode",
  "dapple_field",
+ "dapple_library",
  "dapple_raster",
  "glam",
  "png",
@@ -521,6 +616,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
 name = "jobserver"
 version = "0.1.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -581,6 +682,12 @@ name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+
+[[package]]
+name = "memchr"
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "miniz_oxide"
@@ -745,6 +852,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_json"
+version = "1.0.151"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
+]
+
+[[package]]
 name = "serde_spanned"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -822,6 +942,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "timber_bake"
+version = "0.0.0"
+dependencies = [
+ "dapple_exedra",
+ "dapple_library",
+ "exedra_assembly",
+ "exedra_constructive",
+ "exedra_gltf",
+ "glam",
+ "png",
+ "serde_json",
 ]
 
 [[package]]
@@ -929,6 +1063,12 @@ name = "zlib-rs"
 version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zstd"

@@ -13,6 +13,7 @@ publish = false
 dapple_compress.workspace = true
 dapple_encode = { features = ["std"], workspace = true }
 dapple_field.workspace = true
+dapple_library.workspace = true
 dapple_raster.workspace = true
 glam.workspace = true
 png.workspace = true

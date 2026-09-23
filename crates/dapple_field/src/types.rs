@@ -65,6 +65,11 @@ pub enum PortType {
     Color(Primaries),
     /// A unit shading normal in a declared frame.
     Normal(NormalFrame),
+    /// An undirected tangent direction, such as an anisotropy axis: `θ` and
+    /// `θ + π` are the same direction. Stored as the doubled-angle vector
+    /// `(cos 2θ, sin 2θ)`, so averaging and blending are sign-free; the
+    /// average's length measures how much the directions agree.
+    Direction,
 }
 
 impl PortType {
@@ -80,7 +85,7 @@ impl PortType {
     pub const fn components(self) -> usize {
         match self {
             Self::Scalar | Self::Mask | Self::Id => 1,
-            Self::Vector2 => 2,
+            Self::Vector2 | Self::Direction => 2,
             Self::Vector3 | Self::Color(_) | Self::Normal(_) => 3,
         }
     }
@@ -96,6 +101,7 @@ impl fmt::Display for PortType {
             Self::Vector3 => "vector3",
             Self::Color(Primaries::Rec709) => "color (Rec. 709, linear)",
             Self::Normal(NormalFrame::Domain) => "normal (domain frame)",
+            Self::Direction => "direction",
         };
         f.write_str(name)
     }
@@ -108,7 +114,8 @@ pub enum Value {
     Scalar(f32),
     /// A [`PortType::Id`] value.
     Id(u32),
-    /// A [`PortType::Vector2`] value.
+    /// A [`PortType::Vector2`] value, or a [`PortType::Direction`] as its
+    /// doubled-angle vector.
     Vector2(Vec2),
     /// A [`PortType::Vector3`], [`PortType::Color`] or [`PortType::Normal`]
     /// value.

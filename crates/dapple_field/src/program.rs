@@ -12,9 +12,10 @@
 //!
 //! **Typed ports.** Every node has a [`PortType`], derived when it is added:
 //! scalars, masks, identifiers, vectors, linear colors with declared
-//! primaries, and normals in a declared frame. Type rules reject misuse at
-//! build time: normals combine only through [`Op::BlendNormals`], never by
-//! lerping; identifiers never blend; masks stay masks only through operations
+//! primaries, normals in a declared frame, and undirected directions. Type
+//! rules reject misuse at build time: normals combine only through
+//! [`Op::BlendNormals`], never by lerping; directions only blend, sign-free,
+//! through their doubled-angle vectors; identifiers never blend; masks stay masks only through operations
 //! that keep them in `[0, 1]`; and a transform that rotates or scales cannot
 //! move a vector-valued field, whose values it would leave unrotated.
 //! [`ProgramBuilder::finish`] makes a scalar [`FieldProgram`], which is a
@@ -279,6 +280,25 @@ pub enum Op {
         /// The vector.
         input: NodeId,
     },
+    /// A [`PortType::Direction`] at angle `θ` (radians, from the domain's x
+    /// axis toward its y axis), stored as `(cos 2θ, sin 2θ)`.
+    Direction {
+        /// The angle; any real value, taken modulo π.
+        angle: NodeId,
+    },
+    /// The angle of a direction in `[0, π)`, from its doubled-angle vector;
+    /// 0 where the vector vanishes.
+    Angle {
+        /// The direction.
+        input: NodeId,
+    },
+    /// How much a direction's samples agree: the length of its doubled-angle
+    /// vector, 1 for a single direction and 0 where opposite axes cancel. A
+    /// [`PortType::Mask`].
+    Coherence {
+        /// The direction.
+        input: NodeId,
+    },
     /// A detail normal applied to a base normal, both in the same frame.
     BlendNormals {
         /// The base normal.
@@ -308,7 +328,10 @@ impl Op {
             | Self::Component { input, .. }
             | Self::AsMask { input }
             | Self::ToId { input, .. }
-            | Self::Normalize { input } => inputs.push(input),
+            | Self::Normalize { input }
+            | Self::Direction { angle: input }
+            | Self::Angle { input }
+            | Self::Coherence { input } => inputs.push(input),
             Self::Add { a, b }
             | Self::Sub { a, b }
             | Self::Mul { a, b }
@@ -367,6 +390,9 @@ impl Op {
             Self::AsMask { .. } => "as-mask",
             Self::ToId { .. } => "to-id",
             Self::Normalize { .. } => "normalize",
+            Self::Direction { .. } => "direction",
+            Self::Angle { .. } => "angle",
+            Self::Coherence { .. } => "coherence",
             Self::BlendNormals { .. } => "blend-normals",
         }
     }
@@ -522,6 +548,9 @@ enum Kernel {
     ToId(NodeId, u32),
     Normalize(NodeId),
     BlendNormals(NodeId, NodeId, NormalBlend),
+    Direction(NodeId),
+    Angle(NodeId),
+    Coherence(NodeId),
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -659,6 +688,9 @@ impl ProgramBuilder {
                 found,
                 "normals combine only through blend-normals",
             )),
+            PortType::Direction if !matches!(op, Op::Mix { .. }) => {
+                Err(mismatch(found, "directions only blend, with mix"))
+            }
             PortType::Id => Err(mismatch(found, "identifiers are never combined")),
             _ => Ok(found),
         };
@@ -677,7 +709,10 @@ impl ProgramBuilder {
                 let found = port(input);
                 let directional = matches!(
                     found,
-                    PortType::Vector2 | PortType::Vector3 | PortType::Normal(_)
+                    PortType::Vector2
+                        | PortType::Vector3
+                        | PortType::Normal(_)
+                        | PortType::Direction
                 );
                 if directional && transform.matrix != Mat2::IDENTITY {
                     return Err(mismatch(
@@ -777,6 +812,21 @@ impl ProgramBuilder {
                     return Err(mismatch(found, "needs a vector3"));
                 }
                 PortType::Normal(NormalFrame::Domain)
+            }
+            Op::Direction { angle } => {
+                scalar(angle)?;
+                PortType::Direction
+            }
+            Op::Angle { input } | Op::Coherence { input } => {
+                let found = port(input);
+                if found != PortType::Direction {
+                    return Err(mismatch(found, "needs a direction"));
+                }
+                if matches!(op, Op::Angle { .. }) {
+                    PortType::Scalar
+                } else {
+                    PortType::Mask
+                }
             }
             Op::BlendNormals { base, detail, .. } => {
                 let (tb, td) = (port(base), port(detail));
@@ -894,6 +944,9 @@ impl ProgramBuilder {
                 Kernel::ToId(input, levels)
             }
             Op::Normalize { input } => Kernel::Normalize(input),
+            Op::Direction { angle } => Kernel::Direction(angle),
+            Op::Angle { input } => Kernel::Angle(input),
+            Op::Coherence { input } => Kernel::Coherence(input),
             Op::BlendNormals {
                 base,
                 detail,
@@ -983,6 +1036,9 @@ impl ProgramBuilder {
             | Op::Color { .. }
             | Op::AsMask { .. }
             | Op::Normalize { .. }
+            | Op::Direction { .. }
+            | Op::Angle { .. }
+            | Op::Coherence { .. }
             | Op::Demote { .. }
             | Op::Add { .. }
             | Op::Sub { .. }
@@ -1030,6 +1086,9 @@ fn op_tag(op: &Op) -> u64 {
         Op::ToId { .. } => 21,
         Op::Normalize { .. } => 22,
         Op::BlendNormals { .. } => 23,
+        Op::Direction { .. } => 24,
+        Op::Angle { .. } => 25,
+        Op::Coherence { .. } => 26,
     }
 }
 
@@ -1253,6 +1312,26 @@ impl Kernel {
                     unreachable!("normalize input was type-checked");
                 };
                 Value::Vector3(v.try_normalize().unwrap_or(Vec3::Z))
+            }
+            Self::Direction(_) => {
+                let twice = 2.0 * scalar(0);
+                Value::Vector2(Vec2::new(libm::cosf(twice), libm::sinf(twice)))
+            }
+            Self::Angle(_) => {
+                let Value::Vector2(v) = args[0] else {
+                    unreachable!("angle input was type-checked");
+                };
+                let mut angle = 0.5 * libm::atan2f(v.y, v.x);
+                if angle < 0.0 {
+                    angle += core::f32::consts::PI;
+                }
+                Value::Scalar(if v == Vec2::ZERO { 0.0 } else { angle })
+            }
+            Self::Coherence(_) => {
+                let Value::Vector2(v) = args[0] else {
+                    unreachable!("coherence input was type-checked");
+                };
+                Value::Scalar(v.length().min(1.0))
             }
             Self::BlendNormals(_, _, method) => {
                 let (Value::Vector3(base), Value::Vector3(detail)) = (args[0], args[1]) else {
@@ -2104,5 +2183,56 @@ mod tests {
         for (&p, v) in points.iter().zip(&out) {
             assert_eq!(v.to_bits(), program.eval(p, footprint).to_bits());
         }
+    }
+
+    #[test]
+    fn directions_are_undirected_and_blend_sign_free() {
+        use core::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+        let d = torus();
+        let mut b = ProgramBuilder::new();
+        let constant =
+            |b: &mut ProgramBuilder, value| b.add(Op::Constant { domain: d, value }).unwrap();
+        let direction = |b: &mut ProgramBuilder, angle| {
+            let a = constant(b, angle);
+            b.add(Op::Direction { angle: a }).unwrap()
+        };
+        let east = direction(&mut b, 0.0);
+        let west = direction(&mut b, PI);
+        let north = direction(&mut b, FRAC_PI_2);
+        let half = constant(&mut b, 0.5);
+        // East and west are one axis: blending keeps it, fully coherent.
+        let same = b
+            .add(Op::Mix {
+                a: east,
+                b: west,
+                t: half,
+            })
+            .unwrap();
+        // East and north are perpendicular: the blend cancels.
+        let crossed = b
+            .add(Op::Mix {
+                a: east,
+                b: north,
+                t: half,
+            })
+            .unwrap();
+        let diagonal = direction(&mut b, FRAC_PI_4 + PI);
+        let eval = |b: &ProgramBuilder, id, op: fn(NodeId) -> Op| {
+            let mut b = b.clone();
+            let out = b.add(op(id)).unwrap();
+            b.finish(out).unwrap().eval(Vec2::ZERO, Footprint::POINT)
+        };
+        let angle = |input| Op::Angle { input };
+        let coherence = |input| Op::Coherence { input };
+        assert!(eval(&b, same, angle).abs() < 1e-6);
+        assert!((eval(&b, same, coherence) - 1.0).abs() < 1e-6);
+        assert!(eval(&b, crossed, coherence) < 1e-6);
+        assert!((eval(&b, diagonal, angle) - FRAC_PI_4).abs() < 1e-6);
+        assert_eq!(b.port_type(same), Ok(PortType::Direction));
+        assert!(matches!(
+            b.add(Op::Add { a: east, b: north }),
+            Err(ProgramError::TypeMismatch { op: "add", .. })
+        ));
+        assert!(b.add(Op::Angle { input: half }).is_err());
     }
 }

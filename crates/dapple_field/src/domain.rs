@@ -5,7 +5,7 @@
 
 use core::fmt;
 
-use glam::Vec2;
+use glam::{Vec2, Vec3};
 
 /// Where a field is defined.
 ///
@@ -42,6 +42,45 @@ impl Domain {
         match self {
             Self::Plane => None,
             Self::Periodic { period } => Some(period),
+        }
+    }
+}
+
+/// Where a solid (3D) field is defined.
+///
+/// The 3D counterpart of [`Domain`], with the same contract: `Periodic3`
+/// fields tile by construction on every axis, so a lattice must fit a whole
+/// number of cells into each period.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum Domain3 {
+    /// Unbounded, non-repeating space.
+    Space,
+    /// A 3-torus: the field repeats every `period` domain units on each axis.
+    Periodic3 {
+        /// Repeat length per axis, in domain units. Each component is at least 1.
+        period: [u32; 3],
+    },
+}
+
+impl Domain3 {
+    /// A periodic domain, or `None` when a period component is zero.
+    #[must_use]
+    pub const fn periodic(x: u32, y: u32, z: u32) -> Option<Self> {
+        if x == 0 || y == 0 || z == 0 {
+            None
+        } else {
+            Some(Self::Periodic3 { period: [x, y, z] })
+        }
+    }
+
+    /// The repeat length, when periodic.
+    #[must_use]
+    pub const fn period(self) -> Option<[u32; 3]> {
+        match self {
+            Self::Space => None,
+            Self::Periodic3 { period } => Some(period),
         }
     }
 }
@@ -112,17 +151,22 @@ pub enum DomainError {
         /// The offending frequency, per axis.
         frequency: [f32; 2],
     },
+    /// A solid field's frequency is non-finite or not positive.
+    InvalidFrequency3 {
+        /// The offending frequency, per axis.
+        frequency: [f32; 3],
+    },
     /// On a periodic domain, `frequency * period` must be a whole number of
     /// lattice cells, or the field would not tile.
     NonIntegerLattice {
-        /// Axis index, 0 for x and 1 for y.
+        /// Axis index: 0 for x, 1 for y, 2 for z.
         axis: usize,
         /// The requested cell count across one period.
         cells: f32,
     },
     /// The lattice would exceed [`MAX_LATTICE_CELLS`] cells across one period.
     LatticeTooFine {
-        /// Axis index, 0 for x and 1 for y.
+        /// Axis index: 0 for x, 1 for y, 2 for z.
         axis: usize,
         /// The requested cell count across one period.
         cells: u64,
@@ -142,6 +186,9 @@ impl fmt::Display for DomainError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidFrequency { frequency } => {
+                write!(f, "frequency {frequency:?} must be finite and positive")
+            }
+            Self::InvalidFrequency3 { frequency } => {
                 write!(f, "frequency {frequency:?} must be finite and positive")
             }
             Self::NonIntegerLattice { axis, cells } => write!(
@@ -248,6 +295,94 @@ impl Lattice {
         match self.wrap {
             None => cell,
             Some(n) => [cell[0].rem_euclid(n[0]), cell[1].rem_euclid(n[1])],
+        }
+    }
+}
+
+/// A scaled 3D integer lattice, wrapped on periodic domains.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct Lattice3 {
+    pub(crate) frequency: Vec3,
+    /// Cells per period, per axis, on periodic domains.
+    pub(crate) wrap: Option<[i64; 3]>,
+}
+
+/// One 3D lattice lookup: the containing cell and the position inside it.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct CellPoint3 {
+    pub(crate) cell: [i64; 3],
+    pub(crate) frac: Vec3,
+}
+
+impl Lattice3 {
+    pub(crate) fn new(domain: Domain3, frequency: Vec3) -> Result<Self, DomainError> {
+        if !(frequency.is_finite() && frequency.min_element() > 0.0) {
+            return Err(DomainError::InvalidFrequency3 {
+                frequency: frequency.to_array(),
+            });
+        }
+        let wrap = match domain {
+            Domain3::Space => None,
+            Domain3::Periodic3 { period } => Some([
+                cells_per_period(0, frequency.x, period[0])?,
+                cells_per_period(1, frequency.y, period[1])?,
+                cells_per_period(2, frequency.z, period[2])?,
+            ]),
+        };
+        Ok(Self { frequency, wrap })
+    }
+
+    /// The lattice `factor` times finer, for fractal octaves.
+    pub(crate) fn refined(self, factor: u32) -> Result<Self, DomainError> {
+        let frequency = self.frequency * factor as f32;
+        let wrap = match self.wrap {
+            None => None,
+            Some(cells) => {
+                let mut out = [0; 3];
+                for (axis, (out, cells)) in out.iter_mut().zip(cells).enumerate() {
+                    let refined = cells.unsigned_abs() * u64::from(factor);
+                    if refined > MAX_LATTICE_CELLS {
+                        return Err(DomainError::LatticeTooFine {
+                            axis,
+                            cells: refined,
+                        });
+                    }
+                    *out = refined.cast_signed();
+                }
+                Some(out)
+            }
+        };
+        if !frequency.is_finite() {
+            return Err(DomainError::InvalidFrequency3 {
+                frequency: frequency.to_array(),
+            });
+        }
+        Ok(Self { frequency, wrap })
+    }
+
+    /// Highest lattice frequency across the axes.
+    pub(crate) fn max_frequency(self) -> f32 {
+        self.frequency.max_element()
+    }
+
+    pub(crate) fn locate(self, p: Vec3) -> CellPoint3 {
+        let q = p * self.frequency;
+        let floor = Vec3::new(libm::floorf(q.x), libm::floorf(q.y), libm::floorf(q.z));
+        CellPoint3 {
+            cell: [to_cell(floor.x), to_cell(floor.y), to_cell(floor.z)],
+            frac: q - floor,
+        }
+    }
+
+    /// Wraps a cell index onto the period, for hashing.
+    pub(crate) fn wrap_cell(self, cell: [i64; 3]) -> [i64; 3] {
+        match self.wrap {
+            None => cell,
+            Some(n) => [
+                cell[0].rem_euclid(n[0]),
+                cell[1].rem_euclid(n[1]),
+                cell[2].rem_euclid(n[2]),
+            ],
         }
     }
 }

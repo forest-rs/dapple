@@ -245,6 +245,31 @@ Converting between domains is explicit. A `Solid` field projected onto a plane
 (`Slice { plane }`) is a `Plane` field. A `Periodic` field used as a `Plane` is
 simply demoted.
 
+**As built.** One program IR covers both dimensions. Every node has a
+`Space`: `Planar(Domain)` or `Solid(Domain3)`, where `Domain3` is `Space` or
+`Periodic3`.
+
+- **3D leaves** (`Constant3`, `Noise3`, `Fractal3`, `Cellular3`, `Position3`)
+  and `Transform3` are their own ops. The existing 2D ops and their
+  fingerprints are unchanged.
+- **The other ops** (arithmetic, clamp, remap, mix, fract, length, vectors,
+  colors) work in either space, but refuse inputs from both.
+- **`Slice { origin, u, v, domain }`** is the only way from a solid field to a
+  planar one. It can be periodic when `u·px` and `v·py` are lattice vectors of
+  the solid period, and it scales footprints by the larger singular value of
+  `[u v]`.
+- **Evaluation** carries a 3D point and gradient through every context.
+  Planar kernels read `x` and `y` only, so planar results are bit-identical to
+  a purely 2D evaluator. Slices and solid transforms are context moves in the
+  flat plan, with their own gradient chain rules.
+- **Programs:** `finish_solid` yields a `SolidProgram` (a `SolidField`).
+  `SolidProgram::eval_chart` evaluates it at texel points in its solid space.
+  That is the seam `dapple_exedra` chart baking fills in: the chart supplies
+  each texel's point and footprint. Normals and tangent frames join the chart
+  sample when a node needs them.
+- **Static bounds** extend to solid nodes, with the slope bounding
+  `|∂x| + |∂y| + |∂z|`.
+
 ## Incremental evaluation
 
 ### On `execution_graph`

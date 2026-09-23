@@ -52,21 +52,24 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use glam::{Mat2, Vec2, Vec3};
+use glam::{Mat2, Mat3, Vec2, Vec3};
 
 use crate::cellular::{CellOutput, Cellular, CellularField};
-use crate::domain::{Domain, DomainError, Footprint};
-use crate::field::{Affine2, ScalarField, check_transform};
+use crate::domain::{Domain, Domain3, DomainError, Footprint};
+use crate::field::{Affine2, Affine3, ScalarField, check_transform, check_transform3};
 use crate::fractal::{Fractal, FractalKind, FractalParams};
 use crate::hash::hash;
 use crate::image::SampleImage;
 use crate::noise::{Basis, Noise};
 use crate::raster::Region;
 use crate::shape::Disk;
+use crate::solid::{Cellular3, CellularField3, Fractal3, Noise3, SolidField};
 use crate::types::{NormalBlend, NormalFrame, PortType, Primaries, Value};
 
 mod bounds;
 mod flat;
+#[cfg(test)]
+mod solid_tests;
 
 pub use bounds::StaticBounds;
 
@@ -75,6 +78,39 @@ pub use flat::{EvaluationStats, Evaluator};
 /// Version of the fingerprint encoding. Changing any word the encoding emits
 /// requires a new version, so persisted fingerprints never collide.
 pub const FINGERPRINT_VERSION: u64 = 1;
+
+/// Where a program node is defined: over a planar or a solid domain.
+///
+/// One program IR describes both. Leaves state their space; operations that
+/// combine inputs require them to share one, and [`Op::Slice`] is the only
+/// way from a solid field to a planar one.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Space {
+    /// A planar node over a [`Domain`], evaluated at 2D points.
+    Planar(Domain),
+    /// A solid node over a [`Domain3`], evaluated at 3D points.
+    Solid(Domain3),
+}
+
+impl Space {
+    /// The planar domain, if planar.
+    #[must_use]
+    pub const fn planar(self) -> Option<Domain> {
+        match self {
+            Self::Planar(domain) => Some(domain),
+            Self::Solid(_) => None,
+        }
+    }
+
+    /// The solid domain, if solid.
+    #[must_use]
+    pub const fn solid(self) -> Option<Domain3> {
+        match self {
+            Self::Planar(_) => None,
+            Self::Solid(domain) => Some(domain),
+        }
+    }
+}
 
 /// A node in a [`FieldProgram`] or [`ProgramBuilder`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -358,6 +394,96 @@ pub enum Op {
         /// The blend.
         method: NormalBlend,
     },
+    /// A constant value over a solid domain.
+    Constant3 {
+        /// Domain the constant is defined over.
+        domain: Domain3,
+        /// The value; must be finite.
+        value: f32,
+    },
+    /// One octave of solid lattice noise ([`Noise3`]).
+    Noise3 {
+        /// Noise flavor.
+        basis: Basis,
+        /// Domain.
+        domain: Domain3,
+        /// Lattice cells per domain unit, per axis.
+        frequency: [f32; 3],
+        /// Seed.
+        seed: u64,
+    },
+    /// A fractal sum of solid lattice noise ([`Fractal3`]).
+    Fractal3 {
+        /// Noise flavor.
+        basis: Basis,
+        /// Domain.
+        domain: Domain3,
+        /// Base lattice cells per domain unit, per axis.
+        frequency: [f32; 3],
+        /// Seed.
+        seed: u64,
+        /// Octave structure.
+        params: FractalParams,
+    },
+    /// One quantity of solid cellular noise ([`Cellular3`]).
+    Cellular3 {
+        /// Domain.
+        domain: Domain3,
+        /// Lattice cells per domain unit, per axis.
+        frequency: [f32; 3],
+        /// Feature-point jitter in `[0, 1]`.
+        jitter: f32,
+        /// Seed.
+        seed: u64,
+        /// The quantity returned.
+        output: CellOutput,
+    },
+    /// The evaluation point of [`Domain3::Space`] as a [`PortType::Vector3`].
+    ///
+    /// Positions do not repeat, so there is no periodic form. With
+    /// [`Op::Length`] and [`Op::Component`] it gives radial and axial
+    /// coordinates, such as the distance from a trunk's axis.
+    Position3,
+    /// `input(transform(p))` over a solid domain, lattice-checked like
+    /// [`Op::Transform`].
+    Transform3 {
+        /// The transformed field.
+        input: NodeId,
+        /// The coordinate map.
+        transform: Affine3,
+    },
+    /// A planar field from a solid one: `input(origin + x·u + y·v)`.
+    ///
+    /// `domain` is the planar result's domain. [`Domain::Plane`] is always
+    /// allowed. [`Domain::Periodic`] needs a periodic input whose lattice
+    /// contains `u · px` and `v · py`, so the slice tiles exactly. A footprint
+    /// `w` wide covers the parallelogram spanned by `w·u` and `w·v`, so the
+    /// input sees it scaled by the larger singular value of `[u v]`.
+    Slice {
+        /// The solid field.
+        input: NodeId,
+        /// The solid point at the plane's origin.
+        origin: [f32; 3],
+        /// The solid step per unit of the plane's x axis.
+        u: [f32; 3],
+        /// The solid step per unit of the plane's y axis.
+        v: [f32; 3],
+        /// The planar result's domain.
+        domain: Domain,
+    },
+    /// The Euclidean length of a [`PortType::Vector2`] or [`PortType::Vector3`].
+    Length {
+        /// The vector.
+        input: NodeId,
+    },
+    /// The fractional part `x − ⌊x⌋`, a sawtooth in `[0, 1)`.
+    ///
+    /// Its jumps are not band-limited: feed it slowly varying inputs, or
+    /// shape its output with ops that are smooth across the jump.
+    Fract {
+        /// Operand.
+        input: NodeId,
+    },
 }
 
 /// Where replacing one node's operation, or an input's value, can change a
@@ -521,6 +647,17 @@ impl Op {
                 words.extend([1, u64::from(period[0]), u64::from(period[1])]);
             }
         };
+        let domain3 = |words: &mut Vec<u64>, domain: Domain3| match domain {
+            Domain3::Space => words.push(0),
+            Domain3::Periodic3 { period } => {
+                words.extend([
+                    1,
+                    u64::from(period[0]),
+                    u64::from(period[1]),
+                    u64::from(period[2]),
+                ]);
+            }
+        };
         let float = |v: f32| u64::from(v.to_bits());
         match *op {
             Self::Constant { domain: d, value } => {
@@ -605,6 +742,69 @@ impl Op {
                 NormalBlend::Reoriented => 0,
                 NormalBlend::Udn => 1,
             }),
+            Self::Constant3 { domain: d, value } => {
+                domain3(&mut words, d);
+                words.push(float(value));
+            }
+            Self::Noise3 {
+                basis,
+                domain: d,
+                frequency,
+                seed,
+            } => {
+                words.push(basis_tag(basis));
+                domain3(&mut words, d);
+                words.extend(frequency.map(float));
+                words.push(seed);
+            }
+            Self::Fractal3 {
+                basis,
+                domain: d,
+                frequency,
+                seed,
+                params,
+            } => {
+                words.push(basis_tag(basis));
+                domain3(&mut words, d);
+                words.extend(frequency.map(float));
+                words.push(seed);
+                words.extend([
+                    match params.kind {
+                        FractalKind::Fbm => 0,
+                        FractalKind::Ridged => 1,
+                    },
+                    u64::from(params.octaves),
+                    u64::from(params.lacunarity),
+                    float(params.gain),
+                ]);
+            }
+            Self::Cellular3 {
+                domain: d,
+                frequency,
+                jitter,
+                seed,
+                output,
+            } => {
+                domain3(&mut words, d);
+                words.extend(frequency.map(float));
+                words.extend([float(jitter), seed, cell_output_tag(output)]);
+            }
+            Self::Transform3 { transform, .. } => {
+                let m = transform.matrix.to_cols_array();
+                let t = transform.translation.to_array();
+                words.extend(m.iter().chain(&t).map(|v| float(*v)));
+            }
+            Self::Slice {
+                origin,
+                u,
+                v,
+                domain: d,
+                ..
+            } => {
+                words.extend(origin.iter().chain(&u).chain(&v).map(|v| float(*v)));
+                domain(&mut words, d);
+            }
+            Self::Position3 | Self::Length { .. } | Self::Fract { .. } => {}
             Self::Vector2 { .. }
             | Self::Vector3 { .. }
             | Self::Color { .. }
@@ -644,7 +844,10 @@ impl Op {
     #[must_use]
     pub const fn operand_is_pointwise(&self, index: usize) -> bool {
         match self {
-            Self::Transform { .. } | Self::Demote { .. } => false,
+            Self::Transform { .. }
+            | Self::Demote { .. }
+            | Self::Transform3 { .. }
+            | Self::Slice { .. } => false,
             Self::Warp { .. } => index != 0,
             _ => true,
         }
@@ -660,8 +863,17 @@ impl Op {
             | Self::Fractal { .. }
             | Self::Cellular { .. }
             | Self::Disk { .. }
-            | Self::Sample { .. } => {}
+            | Self::Sample { .. }
+            | Self::Constant3 { .. }
+            | Self::Noise3 { .. }
+            | Self::Fractal3 { .. }
+            | Self::Cellular3 { .. }
+            | Self::Position3 => {}
             Self::Transform { input, .. }
+            | Self::Transform3 { input, .. }
+            | Self::Slice { input, .. }
+            | Self::Length { input }
+            | Self::Fract { input }
             | Self::Demote { input }
             | Self::Abs { input }
             | Self::Clamp { input, .. }
@@ -715,8 +927,17 @@ impl Op {
             | Self::Fractal { .. }
             | Self::Cellular { .. }
             | Self::Disk { .. }
-            | Self::Sample { .. } => {}
+            | Self::Sample { .. }
+            | Self::Constant3 { .. }
+            | Self::Noise3 { .. }
+            | Self::Fractal3 { .. }
+            | Self::Cellular3 { .. }
+            | Self::Position3 => {}
             Self::Transform { input, .. }
+            | Self::Transform3 { input, .. }
+            | Self::Slice { input, .. }
+            | Self::Length { input }
+            | Self::Fract { input }
             | Self::Demote { input }
             | Self::Abs { input }
             | Self::Clamp { input, .. }
@@ -792,6 +1013,15 @@ impl Op {
             Self::Coherence { .. } => "coherence",
             Self::BlendNormals { .. } => "blend-normals",
             Self::Sample { .. } => "sample",
+            Self::Constant3 { .. } => "constant3",
+            Self::Noise3 { .. } => "noise3",
+            Self::Fractal3 { .. } => "fractal3",
+            Self::Cellular3 { .. } => "cellular3",
+            Self::Position3 => "position3",
+            Self::Transform3 { .. } => "transform3",
+            Self::Slice { .. } => "slice",
+            Self::Length { .. } => "length",
+            Self::Fract { .. } => "fract",
         }
     }
 }
@@ -901,6 +1131,21 @@ pub enum ProgramError {
         /// The output node's type.
         found: PortType,
     },
+    /// Inputs of one node lie in different spaces, or an operation needs
+    /// the other space: a planar op given a solid input, or the reverse.
+    SpaceMismatch {
+        /// The operation's [`Op::name`].
+        op: &'static str,
+        /// The offending space.
+        found: Space,
+    },
+    /// The output is in the wrong space: [`ProgramBuilder::finish`] and
+    /// [`ProgramBuilder::finish_value`] need a planar output,
+    /// [`ProgramBuilder::finish_solid`] a solid one.
+    OutputSpace {
+        /// The output node's space.
+        found: Space,
+    },
 }
 
 impl From<DomainError> for ProgramError {
@@ -923,6 +1168,10 @@ impl fmt::Display for ProgramError {
             Self::OutputType { found } => {
                 write!(f, "a scalar field program cannot output a {found}")
             }
+            Self::SpaceMismatch { op, found } => {
+                write!(f, "{op} cannot take an input in {found:?}")
+            }
+            Self::OutputSpace { found } => write!(f, "the output is in the wrong space, {found:?}"),
         }
     }
 }
@@ -944,6 +1193,24 @@ enum Kernel {
         stretch: f32,
     },
     Pass(NodeId),
+    Noise3(Noise3),
+    Fractal3(Fractal3),
+    Cellular3(CellularField3),
+    Position3,
+    Transform3 {
+        input: NodeId,
+        transform: Affine3,
+        stretch: f32,
+    },
+    Slice {
+        input: NodeId,
+        origin: Vec3,
+        u: Vec3,
+        v: Vec3,
+        stretch: f32,
+    },
+    Length(NodeId),
+    Fract(NodeId),
     Binary(BinaryOp, NodeId, NodeId),
     Abs(NodeId),
     Clamp(NodeId, f32, f32),
@@ -984,7 +1251,7 @@ enum BinaryOp {
 #[derive(Clone, Debug, PartialEq)]
 struct Node {
     op: Op,
-    domain: Domain,
+    space: Space,
     port: PortType,
     fingerprint: Fingerprint,
     kernel: Kernel,
@@ -1011,14 +1278,14 @@ impl ProgramBuilder {
         for input in op.inputs().iter() {
             self.node(input)?;
         }
-        let domain = self.derive_domain(&op)?;
+        let space = self.derive_space(&op)?;
         let port = self.derive_type(&op)?;
         let kernel = self.kernel(&op)?;
         let fingerprint = self.fingerprint(&op);
         let id = NodeId(u32::try_from(self.nodes.len()).expect("fewer than 2^32 nodes"));
         self.nodes.push(Node {
             op,
-            domain,
+            space,
             port,
             fingerprint,
             kernel,
@@ -1064,9 +1331,21 @@ impl ProgramBuilder {
         Ok(mapped[program.output.0 as usize].expect("the output is needed"))
     }
 
-    /// The domain of an existing node.
+    /// The planar domain of an existing node.
+    ///
+    /// A solid node has none: it fails with [`ProgramError::SpaceMismatch`];
+    /// see [`Self::space`].
     pub fn domain(&self, id: NodeId) -> Result<Domain, ProgramError> {
-        Ok(self.node(id)?.domain)
+        let node = self.node(id)?;
+        node.space.planar().ok_or(ProgramError::SpaceMismatch {
+            op: node.op.name(),
+            found: node.space,
+        })
+    }
+
+    /// The [`Space`] of an existing node.
+    pub fn space(&self, id: NodeId) -> Result<Space, ProgramError> {
+        Ok(self.node(id)?.space)
     }
 
     /// The type of an existing node.
@@ -1081,17 +1360,40 @@ impl ProgramBuilder {
     /// types. Nodes that `output` does not depend on are kept for inspection
     /// but never evaluated, and do not affect [`FieldProgram::fingerprint`].
     pub fn finish(self, output: NodeId) -> Result<FieldProgram, ProgramError> {
-        let found = self.node(output)?.port;
-        if !found.is_scalar() {
-            return Err(ProgramError::OutputType { found });
+        let node = self.node(output)?;
+        if !node.port.is_scalar() {
+            return Err(ProgramError::OutputType { found: node.port });
+        }
+        if node.space.planar().is_none() {
+            return Err(ProgramError::OutputSpace { found: node.space });
         }
         Ok(FieldProgram::new(self.nodes, output))
     }
 
     /// Finishes a program whose output may have any [`PortType`].
+    ///
+    /// The output must be planar; slice a solid field first.
     pub fn finish_value(self, output: NodeId) -> Result<ValueProgram, ProgramError> {
-        self.node(output)?;
+        let node = self.node(output)?;
+        if node.space.planar().is_none() {
+            return Err(ProgramError::OutputSpace { found: node.space });
+        }
         Ok(ValueProgram {
+            program: FieldProgram::new(self.nodes, output),
+        })
+    }
+
+    /// Finishes a solid program with scalar or mask `output`, evaluated at 3D
+    /// points ([`SolidProgram`]).
+    pub fn finish_solid(self, output: NodeId) -> Result<SolidProgram, ProgramError> {
+        let node = self.node(output)?;
+        if !node.port.is_scalar() {
+            return Err(ProgramError::OutputType { found: node.port });
+        }
+        if node.space.solid().is_none() {
+            return Err(ProgramError::OutputSpace { found: node.space });
+        }
+        Ok(SolidProgram {
             program: FieldProgram::new(self.nodes, output),
         })
     }
@@ -1102,27 +1404,64 @@ impl ProgramBuilder {
             .ok_or(ProgramError::UnknownNode { node: id })
     }
 
-    fn derive_domain(&self, op: &Op) -> Result<Domain, ProgramError> {
+    fn derive_space(&self, op: &Op) -> Result<Space, ProgramError> {
+        let space = |id: NodeId| self.nodes[id.0 as usize].space;
+        let needs = |id: NodeId, solid: bool| {
+            let found = space(id);
+            if found.solid().is_some() == solid {
+                Ok(found)
+            } else {
+                Err(ProgramError::SpaceMismatch {
+                    op: op.name(),
+                    found,
+                })
+            }
+        };
         Ok(match *op {
             Op::Constant { domain, .. }
             | Op::Noise { domain, .. }
             | Op::Fractal { domain, .. }
             | Op::Cellular { domain, .. }
-            | Op::Disk { domain, .. } => domain,
-            Op::Sample { ref image } => image.domain(),
-            Op::Demote { .. } => Domain::Plane,
-            _ => {
-                let mut inputs = op
-                    .inputs()
-                    .iter()
-                    .map(|id| self.nodes[id.0 as usize].domain);
-                let first = inputs.next().expect("derived nodes have inputs");
-                if let Some(other) = inputs.find(|d| *d != first) {
-                    return Err(ProgramError::DomainMismatch { first, other });
-                }
-                first
+            | Op::Disk { domain, .. } => Space::Planar(domain),
+            Op::Sample { ref image } => Space::Planar(image.domain()),
+            Op::Constant3 { domain, .. }
+            | Op::Noise3 { domain, .. }
+            | Op::Fractal3 { domain, .. }
+            | Op::Cellular3 { domain, .. } => Space::Solid(domain),
+            Op::Position3 => Space::Solid(Domain3::Space),
+            Op::Demote { input } => match space(input) {
+                Space::Planar(_) => Space::Planar(Domain::Plane),
+                Space::Solid(_) => Space::Solid(Domain3::Space),
+            },
+            Op::Transform { input, .. } | Op::Warp { input, .. } => {
+                needs(input, false)?;
+                self.shared_space(op)?
             }
+            Op::Transform3 { input, .. } => needs(input, true)?,
+            Op::Slice { input, domain, .. } => {
+                needs(input, true)?;
+                Space::Planar(domain)
+            }
+            _ => self.shared_space(op)?,
         })
+    }
+
+    /// The one space all of `op`'s inputs share.
+    fn shared_space(&self, op: &Op) -> Result<Space, ProgramError> {
+        let mut inputs = op.inputs().iter().map(|id| self.nodes[id.0 as usize].space);
+        let first = inputs.next().expect("derived nodes have inputs");
+        if let Some(other) = inputs.find(|s| *s != first) {
+            return Err(match (first, other) {
+                (Space::Planar(first), Space::Planar(other)) => {
+                    ProgramError::DomainMismatch { first, other }
+                }
+                _ => ProgramError::SpaceMismatch {
+                    op: op.name(),
+                    found: other,
+                },
+            });
+        }
+        Ok(first)
     }
 
     fn derive_type(&self, op: &Op) -> Result<PortType, ProgramError> {
@@ -1161,7 +1500,57 @@ impl ProgramBuilder {
             }
         };
         Ok(match *op {
-            Op::Constant { .. } | Op::Noise { .. } | Op::Fractal { .. } | Op::Cellular { .. } => {
+            Op::Constant { .. }
+            | Op::Noise { .. }
+            | Op::Fractal { .. }
+            | Op::Cellular { .. }
+            | Op::Constant3 { .. }
+            | Op::Noise3 { .. }
+            | Op::Fractal3 { .. }
+            | Op::Cellular3 { .. } => PortType::Scalar,
+            Op::Position3 => PortType::Vector3,
+            Op::Transform3 { input, transform } => {
+                let found = port(input);
+                let directional = matches!(
+                    found,
+                    PortType::Vector2
+                        | PortType::Vector3
+                        | PortType::Normal(_)
+                        | PortType::Direction
+                );
+                if directional && transform.matrix != Mat3::IDENTITY {
+                    return Err(mismatch(
+                        found,
+                        "a rotating or scaling transform would leave directions unrotated",
+                    ));
+                }
+                found
+            }
+            Op::Slice { input, .. } => {
+                let found = port(input);
+                if matches!(
+                    found,
+                    PortType::Vector2
+                        | PortType::Vector3
+                        | PortType::Normal(_)
+                        | PortType::Direction
+                ) {
+                    return Err(mismatch(
+                        found,
+                        "directional values keep their solid frame and cannot be sliced",
+                    ));
+                }
+                found
+            }
+            Op::Length { input } => {
+                let found = port(input);
+                if !matches!(found, PortType::Vector2 | PortType::Vector3) {
+                    return Err(mismatch(found, "needs a vector2 or vector3"));
+                }
+                PortType::Scalar
+            }
+            Op::Fract { input } => {
+                scalar(input)?;
                 PortType::Scalar
             }
             Op::Disk { .. } => PortType::Mask,
@@ -1351,7 +1740,11 @@ impl ProgramBuilder {
             } => Kernel::Disk(Disk::new(domain, Vec2::from(center), radius, softness)?),
             Op::Sample { ref image } => Kernel::Sample(image.clone()),
             Op::Transform { input, transform } => {
-                let stretch = check_transform(self.nodes[input.0 as usize].domain, transform)?;
+                let domain = self.nodes[input.0 as usize]
+                    .space
+                    .planar()
+                    .expect("the input's space was checked");
+                let stretch = check_transform(domain, transform)?;
                 Kernel::Transform {
                     input,
                     transform,
@@ -1420,6 +1813,75 @@ impl ProgramBuilder {
                 detail,
                 method,
             } => Kernel::BlendNormals(base, detail, method),
+            Op::Constant3 { value, .. } => {
+                finite("value", &[value])?;
+                Kernel::Constant(value)
+            }
+            Op::Noise3 {
+                basis,
+                domain,
+                frequency,
+                seed,
+            } => Kernel::Noise3(Noise3::new(basis, domain, Vec3::from(frequency), seed)?),
+            Op::Fractal3 {
+                basis,
+                domain,
+                frequency,
+                seed,
+                params,
+            } => Kernel::Fractal3(Fractal3::new(
+                basis,
+                domain,
+                Vec3::from(frequency),
+                seed,
+                params,
+            )?),
+            Op::Cellular3 {
+                domain,
+                frequency,
+                jitter,
+                seed,
+                output,
+            } => Kernel::Cellular3(
+                Cellular3::new(domain, Vec3::from(frequency), jitter, seed)?.output(output),
+            ),
+            Op::Position3 => Kernel::Position3,
+            Op::Transform3 { input, transform } => {
+                let domain = self.nodes[input.0 as usize]
+                    .space
+                    .solid()
+                    .expect("the input's space was checked");
+                let stretch = check_transform3(domain, transform)?;
+                Kernel::Transform3 {
+                    input,
+                    transform,
+                    stretch,
+                }
+            }
+            Op::Slice {
+                input,
+                origin,
+                u,
+                v,
+                domain,
+            } => {
+                finite("slice", &[origin, u, v].concat())?;
+                let input_domain = self.nodes[input.0 as usize]
+                    .space
+                    .solid()
+                    .expect("the input's space was checked");
+                check_slice(input_domain, u, v, domain)?;
+                let (u, v) = (Vec3::from(u), Vec3::from(v));
+                Kernel::Slice {
+                    input,
+                    origin: Vec3::from(origin),
+                    u,
+                    v,
+                    stretch: slice_stretch(u, v),
+                }
+            }
+            Op::Length { input } => Kernel::Length(input),
+            Op::Fract { input } => Kernel::Fract(input),
         })
     }
 
@@ -1464,7 +1926,55 @@ fn op_tag(op: &Op) -> u64 {
         Op::Coherence { .. } => 26,
         Op::Disk { .. } => 27,
         Op::Sample { .. } => 28,
+        Op::Constant3 { .. } => 29,
+        Op::Noise3 { .. } => 30,
+        Op::Fractal3 { .. } => 31,
+        Op::Cellular3 { .. } => 32,
+        Op::Position3 => 33,
+        Op::Transform3 { .. } => 34,
+        Op::Slice { .. } => 35,
+        Op::Length { .. } => 36,
+        Op::Fract { .. } => 37,
     }
+}
+
+/// Checks a slice's requested planar domain against its solid input's.
+///
+/// A periodic slice repeats every `px` along `u` and `py` along `v`, which
+/// must be lattice vectors of the input's period on every solid axis.
+fn check_slice(
+    input: Domain3,
+    u: [f32; 3],
+    v: [f32; 3],
+    domain: Domain,
+) -> Result<(), DomainError> {
+    let Domain::Periodic { period } = domain else {
+        return Ok(());
+    };
+    let Domain3::Periodic3 { period: solid } = input else {
+        return Err(DomainError::NotLatticePreserving);
+    };
+    let tiles = |step: [f32; 3], repeat: u32| {
+        step.iter().zip(solid).all(|(&m, p)| {
+            let steps = f64::from(m) * f64::from(repeat) / f64::from(p);
+            libm::trunc(steps) == steps
+        })
+    };
+    if tiles(u, period[0]) && tiles(v, period[1]) {
+        Ok(())
+    } else {
+        Err(DomainError::NotLatticePreserving)
+    }
+}
+
+/// The larger singular value of the 3 × 2 matrix `[u v]`: how much a slice
+/// stretches a planar footprint.
+fn slice_stretch(u: Vec3, v: Vec3) -> f32 {
+    let (uu, vv, uv) = (u.dot(u), v.dot(v), u.dot(v));
+    let sum = uu + vv;
+    let det = uu * vv - uv * uv;
+    let disc = libm::sqrtf((sum * sum - 4.0 * det).max(0.0));
+    libm::sqrtf((sum + disc) * 0.5)
 }
 
 const fn basis_tag(basis: Basis) -> u64 {
@@ -1546,10 +2056,18 @@ impl FieldProgram {
         self.nodes.get(id.0 as usize).map(|node| &node.op)
     }
 
-    /// The domain of `id`, if it exists.
+    /// The planar domain of `id`, if it exists and is planar.
     #[must_use]
     pub fn node_domain(&self, id: NodeId) -> Option<Domain> {
-        self.nodes.get(id.0 as usize).map(|node| node.domain)
+        self.nodes
+            .get(id.0 as usize)
+            .and_then(|node| node.space.planar())
+    }
+
+    /// The [`Space`] of `id`, if it exists.
+    #[must_use]
+    pub fn node_space(&self, id: NodeId) -> Option<Space> {
+        self.nodes.get(id.0 as usize).map(|node| node.space)
     }
 
     /// The fingerprint of `id`, if it exists.
@@ -1596,17 +2114,47 @@ impl FieldProgram {
     ///
     /// # Panics
     ///
-    /// Panics if `id` is not a node of this program.
+    /// Panics if `id` is not a planar node of this program.
     #[must_use]
     pub fn eval_value(&self, id: NodeId, p: Vec2, footprint: Footprint) -> Value {
+        assert!(
+            self.nodes[id.0 as usize].space.planar().is_some(),
+            "eval_value needs a planar node"
+        );
+        self.eval_at(id, p.extend(0.0), footprint)
+    }
+
+    /// Evaluates node `id` at a point of its space: planar nodes read `x`
+    /// and `y` and ignore `z`.
+    pub(super) fn eval_at(&self, id: NodeId, p: Vec3, footprint: Footprint) -> Value {
         let node = &self.nodes[id.0 as usize];
         match node.kernel {
             Kernel::Transform {
                 input,
                 transform,
                 stretch,
-            } => self.eval_value(input, transform.apply(p), footprint.scaled(stretch)),
-            Kernel::Pass(input) => self.eval_value(input, p, footprint),
+            } => self.eval_at(
+                input,
+                transform.apply(p.truncate()).extend(p.z),
+                footprint.scaled(stretch),
+            ),
+            Kernel::Transform3 {
+                input,
+                transform,
+                stretch,
+            } => self.eval_at(input, transform.apply(p), footprint.scaled(stretch)),
+            Kernel::Slice {
+                input,
+                origin,
+                u,
+                v,
+                stretch,
+            } => self.eval_at(
+                input,
+                slice_point(origin, u, v, p),
+                footprint.scaled(stretch),
+            ),
+            Kernel::Pass(input) => self.eval_at(input, p, footprint),
             Kernel::Warp {
                 input,
                 dx,
@@ -1614,13 +2162,13 @@ impl FieldProgram {
                 amount,
             } => {
                 let (q, footprint) = self.warp_point(dx, dy, amount, p, footprint).0;
-                self.eval_value(input, q, footprint)
+                self.eval_at(input, q, footprint)
             }
             ref kernel => {
                 let mut args = [Value::Scalar(0.0); 3];
                 let mut count = 0;
                 for input in node.op.inputs().iter() {
-                    args[count] = self.eval_value(input, p, footprint);
+                    args[count] = self.eval_at(input, p, footprint);
                     count += 1;
                 }
                 kernel.combine(p, footprint, &args[..count])
@@ -1633,21 +2181,25 @@ impl FieldProgram {
     ///
     /// The value equals [`Self::eval_node`]'s, bit for bit. Gradients follow
     /// the chain rule through every op with a closed-form derivative, and
-    /// through transforms and warps; any other node's gradient, such as a
-    /// vector component's, is taken by central differences of that node
+    /// through transforms, slices and warps; any other node's gradient, such
+    /// as a vector component's, is taken by central differences of that node
     /// (see [`central_difference`](crate::central_difference)).
     ///
     /// # Panics
     ///
-    /// Panics if `id` is not a scalar or mask node of this program.
+    /// Panics if `id` is not a planar scalar or mask node of this program.
     #[must_use]
     pub fn eval_node_gradient(&self, id: NodeId, p: Vec2, footprint: Footprint) -> (f32, Vec2) {
-        let (value, gradient) = self.gradient_value(id, p, footprint);
+        assert!(
+            self.nodes[id.0 as usize].space.planar().is_some(),
+            "eval_node_gradient needs a planar node"
+        );
+        let (value, gradient) = self.gradient_at(id, p.extend(0.0), footprint);
         (
             value
                 .scalar()
                 .expect("eval_node_gradient needs a scalar or mask node"),
-            gradient,
+            gradient.truncate(),
         )
     }
 
@@ -1657,22 +2209,22 @@ impl FieldProgram {
         dx: NodeId,
         dy: NodeId,
         amount: f32,
-        p: Vec2,
+        p: Vec3,
         footprint: Footprint,
-    ) -> ((Vec2, Footprint), [Vec2; 2]) {
+    ) -> ((Vec3, Footprint), [Vec3; 2]) {
         if footprint.width() <= 0.0 {
             // A point footprint does not scale, so no derivatives are needed.
             let center = [
-                self.eval_value(dx, p, footprint),
-                self.eval_value(dy, p, footprint),
+                self.eval_at(dx, p, footprint),
+                self.eval_at(dy, p, footprint),
             ];
             return (
-                warp_move(p, footprint, amount, center, [Vec2::ZERO; 2]),
-                [Vec2::ZERO; 2],
+                warp_move(p, footprint, amount, center, [Vec3::ZERO; 2]),
+                [Vec3::ZERO; 2],
             );
         }
-        let (cx, gx) = self.gradient_value(dx, p, footprint);
-        let (cy, gy) = self.gradient_value(dy, p, footprint);
+        let (cx, gx) = self.gradient_at(dx, p, footprint);
+        let (cy, gy) = self.gradient_at(dy, p, footprint);
         (
             warp_move(p, footprint, amount, [cx, cy], [gx, gy]),
             [gx, gy],
@@ -1680,8 +2232,9 @@ impl FieldProgram {
     }
 
     /// A node's value and the gradient of its scalar value (zero for vector
-    /// values, whose consumers differentiate their own scalars).
-    fn gradient_value(&self, id: NodeId, p: Vec2, footprint: Footprint) -> (Value, Vec2) {
+    /// values, whose consumers differentiate their own scalars). A planar
+    /// node's gradient has zero `z`.
+    pub(super) fn gradient_at(&self, id: NodeId, p: Vec3, footprint: Footprint) -> (Value, Vec3) {
         let node = &self.nodes[id.0 as usize];
         match node.kernel {
             Kernel::Transform {
@@ -1689,29 +2242,58 @@ impl FieldProgram {
                 transform,
                 stretch,
             } => {
+                let (value, gradient) = self.gradient_at(
+                    input,
+                    transform.apply(p.truncate()).extend(p.z),
+                    footprint.scaled(stretch),
+                );
+                (
+                    value,
+                    (transform.matrix.transpose() * gradient.truncate()).extend(0.0),
+                )
+            }
+            Kernel::Transform3 {
+                input,
+                transform,
+                stretch,
+            } => {
                 let (value, gradient) =
-                    self.gradient_value(input, transform.apply(p), footprint.scaled(stretch));
+                    self.gradient_at(input, transform.apply(p), footprint.scaled(stretch));
                 (value, transform.matrix.transpose() * gradient)
             }
-            Kernel::Pass(input) => self.gradient_value(input, p, footprint),
+            Kernel::Slice {
+                input,
+                origin,
+                u,
+                v,
+                stretch,
+            } => {
+                let (value, gradient) = self.gradient_at(
+                    input,
+                    slice_point(origin, u, v, p),
+                    footprint.scaled(stretch),
+                );
+                (value, slice_chain(gradient, u, v))
+            }
+            Kernel::Pass(input) => self.gradient_at(input, p, footprint),
             Kernel::Warp {
                 input,
                 dx,
                 dy,
                 amount,
             } => {
-                let (cx, gx) = self.gradient_value(dx, p, footprint);
-                let (cy, gy) = self.gradient_value(dy, p, footprint);
+                let (cx, gx) = self.gradient_at(dx, p, footprint);
+                let (cy, gy) = self.gradient_at(dy, p, footprint);
                 let (q, moved) = warp_move(p, footprint, amount, [cx, cy], [gx, gy]);
-                let (value, gradient) = self.gradient_value(input, q, moved);
+                let (value, gradient) = self.gradient_at(input, q, moved);
                 (value, warp_chain(gradient, [gx, gy], amount))
             }
             ref kernel => {
                 let mut values = [Value::Scalar(0.0); 3];
-                let mut gradients = [Vec2::ZERO; 3];
+                let mut gradients = [Vec3::ZERO; 3];
                 let mut count = 0;
                 for input in node.op.inputs().iter() {
-                    (values[count], gradients[count]) = self.gradient_value(input, p, footprint);
+                    (values[count], gradients[count]) = self.gradient_at(input, p, footprint);
                     count += 1;
                 }
                 let value = kernel.combine(p, footprint, &values[..count]);
@@ -1724,27 +2306,47 @@ impl FieldProgram {
     }
 
     /// Central differences of node `id` around `p`, zero for vector values.
+    ///
+    /// Planar nodes step along `x` and `y` only.
     pub(super) fn numeric_gradient(
         &self,
         id: NodeId,
         value: Value,
-        p: Vec2,
+        p: Vec3,
         footprint: Footprint,
-    ) -> Vec2 {
+    ) -> Vec3 {
         if value.scalar().is_none() {
-            return Vec2::ZERO;
+            return Vec3::ZERO;
         }
-        let h = (footprint.width() * 0.5).max(1e-4 * p.abs().max_element().max(1.0));
-        let at = |q: Vec2| {
-            self.eval_value(id, q, footprint)
+        let at = |q: Vec3| {
+            self.eval_at(id, q, footprint)
                 .scalar()
                 .expect("a node's type does not depend on the point")
         };
-        Vec2::new(
-            (at(p + Vec2::new(h, 0.0)) - at(p - Vec2::new(h, 0.0))) / (2.0 * h),
-            (at(p + Vec2::new(0.0, h)) - at(p - Vec2::new(0.0, h))) / (2.0 * h),
-        )
+        if self.nodes[id.0 as usize].space.planar().is_some() {
+            let q = p.truncate();
+            let h = (footprint.width() * 0.5).max(1e-4 * q.abs().max_element().max(1.0));
+            let at2 = |r: Vec2| at(r.extend(p.z));
+            return Vec3::new(
+                (at2(q + Vec2::new(h, 0.0)) - at2(q - Vec2::new(h, 0.0))) / (2.0 * h),
+                (at2(q + Vec2::new(0.0, h)) - at2(q - Vec2::new(0.0, h))) / (2.0 * h),
+                0.0,
+            );
+        }
+        let h = (footprint.width() * 0.5).max(1e-4 * p.abs().max_element().max(1.0));
+        let axis = |e: Vec3| (at(p + e * h) - at(p - e * h)) / (2.0 * h);
+        Vec3::new(axis(Vec3::X), axis(Vec3::Y), axis(Vec3::Z))
     }
+}
+
+/// The solid point a slice reads for planar point `p`.
+fn slice_point(origin: Vec3, u: Vec3, v: Vec3, p: Vec3) -> Vec3 {
+    origin + u * p.x + v * p.y
+}
+
+/// A slice's gradient chain rule: the planar gradient is `(u·∇, v·∇)`.
+fn slice_chain(gradient: Vec3, u: Vec3, v: Vec3) -> Vec3 {
+    Vec3::new(u.dot(gradient), v.dot(gradient), 0.0)
 }
 
 /// The point and footprint a warp's input is evaluated at, from the
@@ -1754,14 +2356,14 @@ impl FieldProgram {
 /// The footprint grows by `1 + |amount| · max_i Σ_j |∂d_i/∂p_j|`, a bound on
 /// the warp's local stretch; a point footprint stays a point.
 fn warp_move(
-    p: Vec2,
+    p: Vec3,
     footprint: Footprint,
     amount: f32,
     center: [Value; 2],
-    rows: [Vec2; 2],
-) -> (Vec2, Footprint) {
+    rows: [Vec3; 2],
+) -> (Vec3, Footprint) {
     let scalar = |v: Value| v.scalar().expect("warp displacements are scalars");
-    let q = p + Vec2::new(scalar(center[0]), scalar(center[1])) * amount;
+    let q = (p.truncate() + Vec2::new(scalar(center[0]), scalar(center[1])) * amount).extend(p.z);
     if footprint.width() <= 0.0 {
         return (q, footprint);
     }
@@ -1772,9 +2374,11 @@ fn warp_move(
 }
 
 /// A warp's gradient chain rule: `input(q(p))` with `q = p + a·d(p)` has
-/// gradient `(I + a·J)ᵀ ∇input`, where `rows` are the rows of `J`.
-fn warp_chain(gradient: Vec2, rows: [Vec2; 2], amount: f32) -> Vec2 {
-    gradient + (rows[0] * gradient.x + rows[1] * gradient.y) * amount
+/// gradient `(I + a·J)ᵀ ∇input`, where `rows` are the rows of `J`. Warps are
+/// planar, so only `x` and `y` take part.
+fn warp_chain(gradient: Vec3, rows: [Vec3; 2], amount: f32) -> Vec3 {
+    let (g, rows) = (gradient.truncate(), rows.map(Vec3::truncate));
+    (g + (rows[0] * g.x + rows[1] * g.y) * amount).extend(0.0)
 }
 
 impl Kernel {
@@ -1782,19 +2386,27 @@ impl Kernel {
     /// values and gradients, or `None` when it has no closed-form rule here.
     fn gradient(
         &self,
-        p: Vec2,
+        p: Vec3,
         footprint: Footprint,
         values: &[Value],
-        gradients: &[Vec2],
-    ) -> Option<Vec2> {
+        gradients: &[Vec3],
+    ) -> Option<Vec3> {
         let s = |i: usize| values[i].scalar();
+        let q = p.truncate();
         Some(match *self {
-            Self::Constant(_) => Vec2::ZERO,
-            Self::Noise(ref noise) => noise.eval_gradient(p, footprint).1,
-            Self::Fractal(ref fractal) => fractal.eval_gradient(p, footprint).1,
-            Self::Disk(ref disk) => disk.eval_gradient(p, footprint).1,
-            Self::Cellular(ref cellular) => cellular.eval_gradient(p, footprint).1,
-            Self::Sample(ref image) => image.sample_gradient(p, footprint).1,
+            Self::Constant(_) => Vec3::ZERO,
+            Self::Noise(ref noise) => noise.eval_gradient(q, footprint).1.extend(0.0),
+            Self::Fractal(ref fractal) => fractal.eval_gradient(q, footprint).1.extend(0.0),
+            Self::Disk(ref disk) => disk.eval_gradient(q, footprint).1.extend(0.0),
+            Self::Cellular(ref cellular) => cellular.eval_gradient(q, footprint).1.extend(0.0),
+            Self::Sample(ref image) => image.sample_gradient(q, footprint).1.extend(0.0),
+            Self::Noise3(ref noise) => noise.eval_gradient(p, footprint).1,
+            Self::Fractal3(ref fractal) => fractal.eval_gradient(p, footprint).1,
+            Self::Cellular3(ref cellular) => cellular.eval_gradient(p, footprint).1,
+            Self::Fract(_) => {
+                s(0)?;
+                gradients[0]
+            }
             Self::Binary(op, ..) => {
                 let (a, b) = (s(0)?, s(1)?);
                 let (ga, gb) = (gradients[0], gradients[1]);
@@ -1821,7 +2433,7 @@ impl Kernel {
             Self::Abs(_) => {
                 let a = s(0)?;
                 if a == 0.0 {
-                    Vec2::ZERO
+                    Vec3::ZERO
                 } else {
                     gradients[0] * a.signum()
                 }
@@ -1831,7 +2443,7 @@ impl Kernel {
                 if a > min && a < max {
                     gradients[0]
                 } else {
-                    Vec2::ZERO
+                    Vec3::ZERO
                 }
             }
             Self::AsMask(_) => {
@@ -1839,7 +2451,7 @@ impl Kernel {
                 if a > 0.0 && a < 1.0 {
                     gradients[0]
                 } else {
-                    Vec2::ZERO
+                    Vec3::ZERO
                 }
             }
             Self::Remap { scale, .. } => gradients[0] * scale,
@@ -1852,15 +2464,29 @@ impl Kernel {
     }
 
     /// Evaluates a pure kernel from its operands' values, in operand order.
-    fn combine(&self, p: Vec2, footprint: Footprint, args: &[Value]) -> Value {
+    fn combine(&self, p: Vec3, footprint: Footprint, args: &[Value]) -> Value {
         let scalar = |i: usize| args[i].scalar().expect("operand types were checked");
+        let q = p.truncate();
         match *self {
             Self::Constant(value) => Value::Scalar(value),
-            Self::Noise(ref noise) => Value::Scalar(noise.eval(p, footprint)),
-            Self::Fractal(ref fractal) => Value::Scalar(fractal.eval(p, footprint)),
-            Self::Cellular(ref cellular) => Value::Scalar(cellular.eval(p, footprint)),
-            Self::Disk(ref disk) => Value::Scalar(disk.eval(p, footprint)),
-            Self::Sample(ref image) => Value::Scalar(image.sample(p, footprint)),
+            Self::Noise(ref noise) => Value::Scalar(noise.eval(q, footprint)),
+            Self::Fractal(ref fractal) => Value::Scalar(fractal.eval(q, footprint)),
+            Self::Cellular(ref cellular) => Value::Scalar(cellular.eval(q, footprint)),
+            Self::Disk(ref disk) => Value::Scalar(disk.eval(q, footprint)),
+            Self::Sample(ref image) => Value::Scalar(image.sample(q, footprint)),
+            Self::Noise3(ref noise) => Value::Scalar(noise.eval(p, footprint)),
+            Self::Fractal3(ref fractal) => Value::Scalar(fractal.eval(p, footprint)),
+            Self::Cellular3(ref cellular) => Value::Scalar(cellular.eval(p, footprint)),
+            Self::Position3 => Value::Vector3(p),
+            Self::Length(_) => Value::Scalar(match args[0] {
+                Value::Vector2(v) => v.length(),
+                Value::Vector3(v) => v.length(),
+                _ => unreachable!("length input was type-checked"),
+            }),
+            Self::Fract(_) => {
+                let x = scalar(0);
+                Value::Scalar(x - libm::floorf(x))
+            }
             Self::Binary(op, ..) => componentwise(args[0], args[1], |a, b| match op {
                 BinaryOp::Add => a + b,
                 BinaryOp::Sub => a - b,
@@ -1928,7 +2554,11 @@ impl Kernel {
                 };
                 Value::Vector3(blend_normals(base, detail, method))
             }
-            Self::Transform { .. } | Self::Pass(_) | Self::Warp { .. } => {
+            Self::Transform { .. }
+            | Self::Transform3 { .. }
+            | Self::Slice { .. }
+            | Self::Pass(_)
+            | Self::Warp { .. } => {
                 unreachable!("only pure kernels combine")
             }
         }
@@ -1973,7 +2603,10 @@ fn blend_normals(base: Vec3, detail: Vec3, method: NormalBlend) -> Vec3 {
 
 impl ScalarField for FieldProgram {
     fn domain(&self) -> Domain {
-        self.nodes[self.output.0 as usize].domain
+        self.nodes[self.output.0 as usize]
+            .space
+            .planar()
+            .expect("finish checks the output is planar")
     }
 
     fn eval(&self, p: Vec2, footprint: Footprint) -> f32 {
@@ -2034,7 +2667,10 @@ impl ValueProgram {
     /// The output's domain.
     #[must_use]
     pub fn domain(&self) -> Domain {
-        self.program.nodes[self.program.output.0 as usize].domain
+        self.program.nodes[self.program.output.0 as usize]
+            .space
+            .planar()
+            .expect("finish_value checks the output is planar")
     }
 
     /// The program's content fingerprint: its output node's.
@@ -2072,6 +2708,93 @@ impl ValueProgram {
             index,
         })?;
         builder.finish(component)
+    }
+}
+
+/// A finished solid program: a scalar field over a [`Domain3`].
+///
+/// The same IR as [`FieldProgram`], finished at a solid output by
+/// [`ProgramBuilder::finish_solid`]. It is a [`SolidField`], and
+/// [`Self::eval_chart`] evaluates it at surface points given in its solid
+/// space, the seam through which charted surfaces bake solid materials.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SolidProgram {
+    program: FieldProgram,
+}
+
+/// One surface point for [`SolidProgram::eval_chart`]: where a texel lands in
+/// the solid, and the footprint the texel covers there.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct ChartSample {
+    /// The texel's point in the program's solid space.
+    pub position: Vec3,
+    /// The side of the solid region the texel stands for, in domain units.
+    pub footprint: Footprint,
+}
+
+impl SolidProgram {
+    /// The underlying program: its nodes, fingerprints and bounds.
+    #[must_use]
+    pub const fn program(&self) -> &FieldProgram {
+        &self.program
+    }
+
+    /// The program's content fingerprint.
+    #[must_use]
+    pub fn fingerprint(&self) -> Fingerprint {
+        self.program.fingerprint()
+    }
+
+    /// Static bounds of the output; `slope` bounds `|∂f/∂x| + |∂f/∂y| + |∂f/∂z|`.
+    #[must_use]
+    pub fn bounds(&self) -> StaticBounds {
+        self.program.bounds()
+    }
+
+    /// Evaluates the program at each chart sample into `out`, through the
+    /// flat plan, bit-identical to [`SolidField::eval`] at each sample.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `out` is shorter than `samples`.
+    pub fn eval_chart(&self, samples: &[ChartSample], out: &mut [f32]) {
+        assert!(
+            out.len() >= samples.len(),
+            "output shorter than the samples"
+        );
+        let mut evaluator = self.program.evaluator();
+        for (value, sample) in out.iter_mut().zip(samples) {
+            *value = evaluator
+                .eval_value_at(sample.position, sample.footprint)
+                .scalar()
+                .expect("finish_solid checks the output is scalar");
+        }
+    }
+}
+
+impl SolidField for SolidProgram {
+    fn domain(&self) -> Domain3 {
+        self.program.nodes[self.program.output.0 as usize]
+            .space
+            .solid()
+            .expect("finish_solid checks the output is solid")
+    }
+
+    fn eval(&self, p: Vec3, footprint: Footprint) -> f32 {
+        self.program
+            .eval_at(self.program.output, p, footprint)
+            .scalar()
+            .expect("finish_solid checks the output is scalar")
+    }
+
+    fn eval_gradient(&self, p: Vec3, footprint: Footprint) -> (f32, Vec3) {
+        let (value, gradient) = self.program.gradient_at(self.program.output, p, footprint);
+        (
+            value
+                .scalar()
+                .expect("finish_solid checks the output is scalar"),
+            gradient,
+        )
     }
 }
 

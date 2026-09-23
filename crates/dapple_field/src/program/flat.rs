@@ -6,11 +6,11 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use glam::{Mat2, Vec2};
+use glam::{Mat2, Mat3, Vec2, Vec3};
 
-use super::{FieldProgram, Kernel, Node, NodeId, warp_chain, warp_move};
+use super::{FieldProgram, Kernel, Node, NodeId, slice_chain, slice_point, warp_chain, warp_move};
 use crate::domain::Footprint;
-use crate::field::Affine2;
+use crate::field::{Affine2, Affine3};
 use crate::types::Value;
 
 /// How a context's point and footprint follow from its parent's.
@@ -18,6 +18,16 @@ use crate::types::Value;
 enum Move {
     Transform {
         transform: Affine2,
+        stretch: f32,
+    },
+    Transform3 {
+        transform: Affine3,
+        stretch: f32,
+    },
+    Slice {
+        origin: Vec3,
+        u: Vec3,
+        v: Vec3,
         stretch: f32,
     },
     /// A warp: registers of `dx` and `dy` at the parent's point, with their
@@ -33,6 +43,10 @@ enum Move {
 enum Chain {
     /// Through a transform: the transposed matrix.
     Linear(Mat2),
+    /// Through a solid transform: the transposed matrix.
+    Linear3(Mat3),
+    /// Through a slice: `(u·∇, v·∇)`.
+    Slice { u: Vec3, v: Vec3 },
     /// Through a warp: `(I + a·J)ᵀ`, with the Jacobian rows in registers.
     Warp { rows: [usize; 2], amount: f32 },
 }
@@ -143,6 +157,38 @@ impl Compiler<'_> {
                     from
                 }
             }
+            Kernel::Transform3 {
+                input,
+                transform,
+                stretch,
+            } => {
+                let child = self.context(ctx, node, Move::Transform3 { transform, stretch });
+                self.chained(
+                    input,
+                    child,
+                    gradient,
+                    Chain::Linear3(transform.matrix.transpose()),
+                )
+            }
+            Kernel::Slice {
+                input,
+                origin,
+                u,
+                v,
+                stretch,
+            } => {
+                let child = self.context(
+                    ctx,
+                    node,
+                    Move::Slice {
+                        origin,
+                        u,
+                        v,
+                        stretch,
+                    },
+                );
+                self.chained(input, child, gradient, Chain::Slice { u, v })
+            }
             Kernel::Pass(input) => self.compile(input, ctx, gradient),
             Kernel::Warp {
                 input,
@@ -192,6 +238,19 @@ impl Compiler<'_> {
         reg
     }
 
+    /// `input` compiled in the moved context `child`, with its gradient
+    /// carried back `by` a chain step when `gradient`.
+    fn chained(&mut self, input: NodeId, child: usize, gradient: bool, by: Chain) -> usize {
+        let from = self.compile(input, child, gradient);
+        if gradient {
+            let reg = self.register();
+            self.steps.push(Step::Chain { reg, from, by });
+            reg
+        } else {
+            from
+        }
+    }
+
     /// Kernel evaluations recursive evaluation performs for `node` in `ctx`.
     fn tree_count(&mut self, node: NodeId, ctx: usize) -> u64 {
         if let Some(&count) = self.counts.get(&(node, ctx)) {
@@ -199,7 +258,9 @@ impl Compiler<'_> {
         }
         let entry = &self.nodes[node.0 as usize];
         let count = match entry.kernel {
-            Kernel::Transform { input, .. } => {
+            Kernel::Transform { input, .. }
+            | Kernel::Transform3 { input, .. }
+            | Kernel::Slice { input, .. } => {
                 let child = self.contexts[&(ctx, node)];
                 self.tree_count(input, child)
             }
@@ -262,8 +323,8 @@ impl Plan {
 pub struct Evaluator<'a> {
     program: &'a FieldProgram,
     registers: Vec<Value>,
-    gradients: Vec<Vec2>,
-    points: Vec<(Vec2, Footprint)>,
+    gradients: Vec<Vec3>,
+    points: Vec<(Vec3, Footprint)>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -271,13 +332,18 @@ impl<'a> Evaluator<'a> {
         Self {
             program,
             registers: alloc::vec![Value::Scalar(0.0); program.plan.registers],
-            gradients: alloc::vec![Vec2::ZERO; program.plan.registers],
-            points: alloc::vec![(Vec2::ZERO, Footprint::POINT); program.plan.contexts],
+            gradients: alloc::vec![Vec3::ZERO; program.plan.registers],
+            points: alloc::vec![(Vec3::ZERO, Footprint::POINT); program.plan.contexts],
         }
     }
 
     /// The output's value at `p`.
     pub fn eval_value(&mut self, p: Vec2, footprint: Footprint) -> Value {
+        self.eval_value_at(p.extend(0.0), footprint)
+    }
+
+    /// The output's value at a point of its space; a planar output ignores `z`.
+    pub(crate) fn eval_value_at(&mut self, p: Vec3, footprint: Footprint) -> Value {
         let plan = &self.program.plan;
         self.points[0] = (p, footprint);
         for step in &plan.steps {
@@ -289,9 +355,19 @@ impl<'a> Evaluator<'a> {
                 } => {
                     let (p, footprint) = self.points[parent];
                     self.points[ctx] = match *by {
-                        Move::Transform { transform, stretch } => {
+                        Move::Transform { transform, stretch } => (
+                            transform.apply(p.truncate()).extend(p.z),
+                            footprint.scaled(stretch),
+                        ),
+                        Move::Transform3 { transform, stretch } => {
                             (transform.apply(p), footprint.scaled(stretch))
                         }
+                        Move::Slice {
+                            origin,
+                            u,
+                            v,
+                            stretch,
+                        } => (slice_point(origin, u, v, p), footprint.scaled(stretch)),
                         Move::Warp { center, amount } => warp_move(
                             p,
                             footprint,
@@ -311,7 +387,7 @@ impl<'a> Evaluator<'a> {
                 } => {
                     let (p, footprint) = self.points[ctx];
                     let mut values = [Value::Scalar(0.0); 3];
-                    let mut gradients = [Vec2::ZERO; 3];
+                    let mut gradients = [Vec3::ZERO; 3];
                     for (i, &arg) in args[..count].iter().enumerate() {
                         values[i] = self.registers[arg];
                         gradients[i] = self.gradients[arg];
@@ -331,7 +407,9 @@ impl<'a> Evaluator<'a> {
                     self.registers[reg] = self.registers[from];
                     let g = self.gradients[from];
                     self.gradients[reg] = match *by {
-                        Chain::Linear(transpose) => transpose * g,
+                        Chain::Linear(transpose) => (transpose * g.truncate()).extend(0.0),
+                        Chain::Linear3(transpose) => transpose * g,
+                        Chain::Slice { u, v } => slice_chain(g, u, v),
                         Chain::Warp { rows, amount } => {
                             warp_chain(g, rows.map(|r| self.gradients[r]), amount)
                         }

@@ -35,6 +35,13 @@
 //! - [`Disk`]: a filled, antialiased disk mask, zero outside its support.
 //! - [`Transformed`]: domain-checked affine coordinate maps.
 //!
+//! **Solid fields.** [`Domain3`] fields ([`SolidField`]) exist through a
+//! volume: [`Noise3`], [`Fractal3`], and [`Cellular3`], with the same
+//! contracts. Programs mix both spaces in one IR: solid nodes reach the plane
+//! only through a slice ([`program::Op::Slice`]), and a
+//! [`SolidProgram`](program::SolidProgram) is evaluated at chart points by
+//! [`SolidProgram::eval_chart`](program::SolidProgram::eval_chart).
+//!
 //! [`program`] describes fields as values: a DAG of operations with content
 //! [`Fingerprint`](program::Fingerprint)s, evaluated bit-identically to the
 //! field types above.
@@ -72,15 +79,17 @@ mod noise;
 pub mod program;
 pub mod raster;
 mod shape;
+mod solid;
 mod types;
 
 pub use cellular::{CellOutput, CellSample, Cellular, CellularField};
-pub use domain::{Domain, DomainError, Footprint, MAX_LATTICE_CELLS};
-pub use field::{Affine2, PlaneField, ScalarField, Transformed, central_difference};
+pub use domain::{Domain, Domain3, DomainError, Footprint, MAX_LATTICE_CELLS};
+pub use field::{Affine2, Affine3, PlaneField, ScalarField, Transformed, central_difference};
 pub use fractal::{Fractal, FractalKind, FractalParams, MAX_OCTAVES};
 pub use image::{Edge, ImageLevel, SampleImage};
 pub use noise::{Basis, Noise};
 pub use shape::Disk;
+pub use solid::{Cellular3, CellularField3, Fractal3, Noise3, SolidField, central_difference3};
 pub use types::{NormalBlend, NormalFrame, PortType, Primaries, Value};
 
 #[cfg(test)]

@@ -5,9 +5,9 @@
 
 use alloc::boxed::Box;
 
-use glam::{Mat2, Vec2};
+use glam::{Mat2, Mat3, Vec2, Vec3};
 
-use crate::domain::{Domain, DomainError, Footprint};
+use crate::domain::{Domain, Domain3, DomainError, Footprint};
 
 /// A point-evaluable scalar field over a [`Domain`].
 ///
@@ -236,6 +236,80 @@ fn preserves_lattice(matrix: Mat2, period: [u32; 2]) -> bool {
             libm::trunc(steps) == steps
         })
     })
+}
+
+/// An affine map of solid coordinates: `p' = matrix * p + translation`.
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Affine3 {
+    /// Linear part, column-major.
+    pub matrix: Mat3,
+    /// Translation, applied after `matrix`.
+    pub translation: Vec3,
+}
+
+impl Affine3 {
+    /// The identity map.
+    pub const IDENTITY: Self = Self {
+        matrix: Mat3::IDENTITY,
+        translation: Vec3::ZERO,
+    };
+
+    /// A pure translation.
+    #[must_use]
+    pub const fn translation(offset: Vec3) -> Self {
+        Self {
+            matrix: Mat3::IDENTITY,
+            translation: offset,
+        }
+    }
+
+    /// A per-axis scale.
+    #[must_use]
+    pub const fn scale(scale: Vec3) -> Self {
+        Self {
+            matrix: Mat3::from_diagonal(scale),
+            translation: Vec3::ZERO,
+        }
+    }
+
+    /// Applies the map to `p`.
+    #[must_use]
+    pub fn apply(&self, p: Vec3) -> Vec3 {
+        self.matrix * p + self.translation
+    }
+
+    /// A bound on the factor by which the map stretches any direction: the
+    /// Frobenius norm of `matrix`, which is at least its spectral norm.
+    #[must_use]
+    pub fn max_stretch(&self) -> f32 {
+        let m = self.matrix.to_cols_array();
+        libm::sqrtf(m.iter().map(|v| v * v).sum())
+    }
+}
+
+/// Checks a solid transform against `domain`'s lattice and returns its stretch.
+pub(crate) fn check_transform3(domain: Domain3, transform: Affine3) -> Result<f32, DomainError> {
+    if !(transform.matrix.is_finite() && transform.translation.is_finite()) {
+        return Err(DomainError::InvalidParameter { name: "transform" });
+    }
+    if let Domain3::Periodic3 { period } = domain {
+        let columns = [
+            transform.matrix.x_axis,
+            transform.matrix.y_axis,
+            transform.matrix.z_axis,
+        ];
+        let preserves = columns.iter().enumerate().all(|(j, column)| {
+            column.to_array().iter().enumerate().all(|(i, &m)| {
+                let steps = f64::from(m) * f64::from(period[j]) / f64::from(period[i]);
+                libm::trunc(steps) == steps
+            })
+        });
+        if !preserves {
+            return Err(DomainError::NotLatticePreserving);
+        }
+    }
+    Ok(transform.max_stretch())
 }
 
 /// A field explicitly demoted to [`Domain::Plane`].

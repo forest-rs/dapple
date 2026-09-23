@@ -15,7 +15,8 @@ use crate::types::PortType;
 /// Bounds of a scalar or mask node that hold at every point and footprint.
 ///
 /// `range` bounds the node's values; `slope` bounds `|∂f/∂x| + |∂f/∂y|`, the
-/// row sum a warp's footprint scaling reads. Either is `None` where no sound
+/// row sum a warp's footprint scaling reads, or `|∂f/∂x| + |∂f/∂y| + |∂f/∂z|`
+/// for a solid node. Either is `None` where no sound
 /// bound is known: a discontinuous field (cell values, identifiers, a hard
 /// disk) has no slope bound, and vector-valued nodes have no bounds at all.
 /// Bounds are conservative, never tight: they may exceed what the node
@@ -50,6 +51,19 @@ const VALUE_NOISE_AXIS_SLOPE: f64 = 3.75;
 
 /// Cellular distances stay below √3.25 < 2 cells; see [`crate::Cellular`].
 const CELL_DISTANCE_BOUND: f64 = 2.0;
+
+/// Provable bound on `|n|` for one octave of solid [`Basis::Gradient`] noise:
+/// at most 27 corners lie within 1.5 cells of any point, each term is at most
+/// 0.8504 as in the plane, and the sum is scaled by `1 / 2.49`:
+/// `27 · 0.8504 / 2.49 < 9.3`.
+const GRADIENT_NOISE3_BOUND: f64 = 9.3;
+
+/// Per-axis, per-cell slope bound of one solid gradient-noise octave:
+/// `27 · 2.149 / 2.49 < 23.4`, by the planar argument over 27 corners.
+const GRADIENT_NOISE3_AXIS_SLOPE: f64 = 23.4;
+
+/// Solid cellular distances stay below √4.25 < 2.1 cells; see [`crate::Cellular3`].
+const CELL3_DISTANCE_BOUND: f64 = 2.1;
 
 /// Relative widening absorbing `f32` rounding, per node.
 const ROUNDING: f64 = 1e-5;
@@ -181,6 +195,51 @@ fn noise_bounds(basis: Basis, frequency: [f64; 2]) -> (f64, f64) {
         Basis::Gradient => (GRADIENT_NOISE_BOUND, GRADIENT_NOISE_AXIS_SLOPE),
     };
     (bound, axis * (frequency[0] + frequency[1]))
+}
+
+fn noise3_bounds(basis: Basis, frequency: [f64; 3]) -> (f64, f64) {
+    let (bound, axis) = match basis {
+        Basis::Value => (1.0, VALUE_NOISE_AXIS_SLOPE),
+        Basis::Gradient => (GRADIENT_NOISE3_BOUND, GRADIENT_NOISE3_AXIS_SLOPE),
+    };
+    (bound, axis * (frequency[0] + frequency[1] + frequency[2]))
+}
+
+/// Largest absolute row sum of a 3 × 3 matrix given column-major.
+fn max_row_sum3(m: glam::Mat3) -> f64 {
+    let c = m.to_cols_array().map(f64::from);
+    (0..3)
+        .map(|row| c[row].abs() + c[3 + row].abs() + c[6 + row].abs())
+        .fold(0.0, f64::max)
+}
+
+/// Fractal bounds from one octave's `(bound, slope)` at a frequency scale.
+fn fractal_bounds(
+    params: crate::fractal::FractalParams,
+    bound: f64,
+    octave_slope: impl Fn(f64) -> f64,
+) -> Bounds {
+    let lacunarity = f64::from(params.lacunarity);
+    let gain = f64::from(params.gain);
+    let (mut amplitude, mut scale) = (1.0, 1.0);
+    let (mut total, mut slope) = (0.0, 0.0);
+    for _ in 0..params.octaves {
+        total += amplitude;
+        slope += amplitude * octave_slope(scale);
+        amplitude *= gain;
+        scale *= lacunarity;
+    }
+    let slope = slope / total;
+    match params.kind {
+        FractalKind::Fbm => Bounds {
+            range: Some([-bound, bound]),
+            slope: Some(slope),
+        },
+        FractalKind::Ridged => Bounds {
+            range: Some([0.0, (1.0 + bound) * (1.0 + bound)]),
+            slope: Some(slope * 2.0 * (bound - 1.0).max(1.0)),
+        },
+    }
 }
 
 fn node_bounds(op: &Op, all: &[Bounds]) -> Bounds {
@@ -413,8 +472,76 @@ fn node_bounds(op: &Op, all: &[Bounds]) -> Bounds {
             range: Some([0.0, 1.0]),
             slope: None,
         },
+        Op::Constant3 { value, .. } => Bounds {
+            range: Some([f64::from(value); 2]),
+            slope: Some(0.0),
+        },
+        Op::Noise3 {
+            basis, frequency, ..
+        } => {
+            let (bound, slope) = noise3_bounds(basis, frequency.map(f64::from));
+            Bounds {
+                range: Some([-bound, bound]),
+                slope: Some(slope),
+            }
+        }
+        // As for planar fractals: one octave's range, the amplitude-weighted
+        // average of the octaves' slopes.
+        Op::Fractal3 {
+            basis,
+            frequency,
+            params,
+            ..
+        } => {
+            let (bound, _) = noise3_bounds(basis, [1.0; 3]);
+            fractal_bounds(params, bound, |scale| {
+                noise3_bounds(basis, frequency.map(|f| f64::from(f) * scale)).1
+            })
+        }
+        Op::Cellular3 {
+            frequency, output, ..
+        } => {
+            let cells: f64 = frequency.iter().map(|f| f64::from(*f)).sum();
+            let (range, slope) = match output {
+                CellOutput::F1 | CellOutput::F2 | CellOutput::Border => {
+                    ([0.0, CELL3_DISTANCE_BOUND], Some(cells))
+                }
+                CellOutput::F2MinusF1 => ([0.0, CELL3_DISTANCE_BOUND], Some(2.0 * cells)),
+                CellOutput::CellValue => ([0.0, 1.0], None),
+            };
+            Bounds {
+                range: Some(range),
+                slope,
+            }
+        }
+        Op::Transform3 { input, transform } => {
+            let b = at(input);
+            Bounds {
+                range: b.range,
+                slope: b.slope.map(|s| s * max_row_sum3(transform.matrix)),
+            }
+        }
+        // The planar gradient is (u·∇, v·∇), and |u·g| ≤ max|u_i| · Σ|g_i|.
+        Op::Slice { input, u, v, .. } => {
+            let b = at(input);
+            let norm = |w: [f32; 3]| w.iter().map(|c| f64::from(c.abs())).fold(0.0, f64::max);
+            Bounds {
+                range: b.range,
+                slope: b.slope.map(|s| s * (norm(u) + norm(v))),
+            }
+        }
+        // A sawtooth jumps, so it has no slope bound.
+        Op::Fract { .. } => Bounds {
+            range: Some([0.0, 1.0]),
+            slope: None,
+        },
+        Op::Length { .. } => Bounds {
+            range: None,
+            slope: None,
+        },
         // Vector-valued nodes and identifiers: no scalar bounds.
-        Op::Vector2 { .. }
+        Op::Position3
+        | Op::Vector2 { .. }
         | Op::Vector3 { .. }
         | Op::Color { .. }
         | Op::Component { .. }

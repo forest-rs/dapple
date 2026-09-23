@@ -484,6 +484,19 @@ pub enum Op {
         /// Operand.
         input: NodeId,
     },
+    /// The angle `atan2(y, x)` of the point `(x, y)`, in `[−π, π]`; 0 at the
+    /// origin.
+    ///
+    /// With [`Op::Component`]s of [`Op::Position3`] it gives the angle
+    /// around an axis, such as a trunk's. The angle jumps by 2π across the
+    /// negative x half-axis; `fract(angle · n / 2π)` for an integer `n` is
+    /// continuous there.
+    Atan2 {
+        /// The point's second coordinate.
+        y: NodeId,
+        /// The point's first coordinate.
+        x: NodeId,
+    },
 }
 
 /// Where replacing one node's operation, or an input's value, can change a
@@ -804,7 +817,7 @@ impl Op {
                 words.extend(origin.iter().chain(&u).chain(&v).map(|v| float(*v)));
                 domain(&mut words, d);
             }
-            Self::Position3 | Self::Length { .. } | Self::Fract { .. } => {}
+            Self::Position3 | Self::Length { .. } | Self::Fract { .. } | Self::Atan2 { .. } => {}
             Self::Vector2 { .. }
             | Self::Vector3 { .. }
             | Self::Color { .. }
@@ -890,6 +903,7 @@ impl Op {
             | Self::Mul { a, b }
             | Self::Min { a, b }
             | Self::Max { a, b }
+            | Self::Atan2 { y: a, x: b }
             | Self::Vector2 { x: a, y: b }
             | Self::BlendNormals {
                 base: a, detail: b, ..
@@ -954,6 +968,7 @@ impl Op {
             | Self::Mul { a, b }
             | Self::Min { a, b }
             | Self::Max { a, b }
+            | Self::Atan2 { y: a, x: b }
             | Self::Vector2 { x: a, y: b }
             | Self::BlendNormals {
                 base: a, detail: b, ..
@@ -1022,6 +1037,7 @@ impl Op {
             Self::Slice { .. } => "slice",
             Self::Length { .. } => "length",
             Self::Fract { .. } => "fract",
+            Self::Atan2 { .. } => "atan2",
         }
     }
 }
@@ -1211,6 +1227,7 @@ enum Kernel {
     },
     Length(NodeId),
     Fract(NodeId),
+    Atan2(NodeId, NodeId),
     Binary(BinaryOp, NodeId, NodeId),
     Abs(NodeId),
     Clamp(NodeId, f32, f32),
@@ -1553,6 +1570,11 @@ impl ProgramBuilder {
                 scalar(input)?;
                 PortType::Scalar
             }
+            Op::Atan2 { y, x } => {
+                scalar(y)?;
+                scalar(x)?;
+                PortType::Scalar
+            }
             Op::Disk { .. } => PortType::Mask,
             Op::Sample { .. } => PortType::Scalar,
             Op::Transform { input, transform } => {
@@ -1882,6 +1904,7 @@ impl ProgramBuilder {
             }
             Op::Length { input } => Kernel::Length(input),
             Op::Fract { input } => Kernel::Fract(input),
+            Op::Atan2 { y, x } => Kernel::Atan2(y, x),
         })
     }
 
@@ -1935,6 +1958,7 @@ fn op_tag(op: &Op) -> u64 {
         Op::Slice { .. } => 35,
         Op::Length { .. } => 36,
         Op::Fract { .. } => 37,
+        Op::Atan2 { .. } => 38,
     }
 }
 
@@ -2407,6 +2431,15 @@ impl Kernel {
                 s(0)?;
                 gradients[0]
             }
+            Self::Atan2(..) => {
+                let (y, x) = (s(0)?, s(1)?);
+                let r2 = x * x + y * y;
+                if r2 > 0.0 {
+                    (gradients[0] * x - gradients[1] * y) / r2
+                } else {
+                    Vec3::ZERO
+                }
+            }
             Self::Binary(op, ..) => {
                 let (a, b) = (s(0)?, s(1)?);
                 let (ga, gb) = (gradients[0], gradients[1]);
@@ -2487,6 +2520,7 @@ impl Kernel {
                 let x = scalar(0);
                 Value::Scalar(x - libm::floorf(x))
             }
+            Self::Atan2(..) => Value::Scalar(libm::atan2f(scalar(0), scalar(1))),
             Self::Binary(op, ..) => componentwise(args[0], args[1], |a, b| match op {
                 BinaryOp::Add => a + b,
                 BinaryOp::Sub => a - b,

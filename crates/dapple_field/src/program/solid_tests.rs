@@ -319,3 +319,52 @@ fn solid_fingerprints_are_distinct_and_stable() {
     let numeric = central_difference3(&direct, p, Footprint::new(1e-3).unwrap());
     assert!((program.eval_gradient(p, Footprint::POINT).1 - numeric).length() < 1e-2);
 }
+
+#[test]
+fn angles_around_an_axis() {
+    use core::f32::consts::TAU;
+
+    let angle = |sectors: Option<f32>| {
+        let mut b = ProgramBuilder::new();
+        let p = b.add(Op::Position3).unwrap();
+        let x = b.add(Op::Component { input: p, index: 0 }).unwrap();
+        let y = b.add(Op::Component { input: p, index: 1 }).unwrap();
+        let mut out = b.add(Op::Atan2 { y, x }).unwrap();
+        if let Some(n) = sectors {
+            let turns = b
+                .add(Op::Remap {
+                    input: out,
+                    from: [0.0, TAU],
+                    to: [0.0, n],
+                })
+                .unwrap();
+            out = b.add(Op::Fract { input: turns }).unwrap();
+        }
+        b.finish_solid(out).unwrap()
+    };
+    let program = angle(None);
+    let bounds = program.bounds();
+    for p in points3(64, 2.0) {
+        let p = p - Vec3::ONE;
+        let value = program.eval(p, Footprint::POINT);
+        assert_eq!(value.to_bits(), libm::atan2f(p.y, p.x).to_bits());
+        let [lo, hi] = bounds.range.unwrap();
+        assert!((lo..=hi).contains(&value));
+        // Away from the jump, the analytic gradient matches differences.
+        if p.x > -0.1 || p.y.abs() > 0.1 {
+            let numeric = central_difference3(&program, p, Footprint::new(1e-3).unwrap());
+            let analytic = program.eval_gradient(p, Footprint::POINT).1;
+            assert!(
+                (analytic - numeric).length() < 1e-2 * (1.0 + numeric.length()),
+                "{p} {analytic} {numeric}"
+            );
+        }
+    }
+    assert_eq!(program.eval(Vec3::ZERO, Footprint::POINT), 0.0);
+    // Whole sectors make the sawtooth continuous across the jump.
+    let sectors = angle(Some(8.0));
+    let below = sectors.eval(Vec3::new(-1.0, -1e-4, 0.0), Footprint::POINT);
+    let above = sectors.eval(Vec3::new(-1.0, 1e-4, 0.0), Footprint::POINT);
+    let gap = (above - below).abs();
+    assert!(gap.min(1.0 - gap) < 1e-3, "{below} {above}");
+}

@@ -535,6 +535,11 @@ fn node_bounds(op: &Op, all: &[Bounds]) -> Bounds {
             range: Some([0.0, 1.0]),
             slope: None,
         },
+        // The angle jumps across the negative x half-axis.
+        Op::Atan2 { .. } => Bounds {
+            range: Some([-core::f64::consts::PI, core::f64::consts::PI]),
+            slope: None,
+        },
         Op::Length { .. } => Bounds {
             range: None,
             slope: None,

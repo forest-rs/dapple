@@ -16,17 +16,19 @@ use std::path::{Path, PathBuf};
 
 use dapple_compress::{CompressSettings, Encoding, compress};
 use dapple_encode::{Filter, Image, MaterialMaps, PackSettings, Profile, ktx2, pack};
-use dapple_field::program::{FieldProgram, NodeId, Op, ProgramBuilder, ProgramError, ValueProgram};
+use dapple_field::program::{
+    ChartSample, FieldProgram, NodeId, Op, ProgramBuilder, ProgramError, SolidProgram, ValueProgram,
+};
 use dapple_field::raster::{Grid, Region};
 use dapple_field::{
-    Basis, CellOutput, Cellular, Domain, DomainError, Footprint, Fractal, FractalKind,
+    Basis, CellOutput, Cellular, Domain, Domain3, DomainError, Footprint, Fractal, FractalKind,
     FractalParams, ImageLevel, Noise, SampleImage, ScalarField,
 };
 use dapple_raster::{
     AmbientOcclusion, DistanceTransform, Edge, GaussianBlur, HeightToNormal, Raster, RasterOp,
     Realization, realize,
 };
-use glam::Vec2;
+use glam::{Vec2, Vec3};
 
 const SIZE: u32 = 256;
 const SEED: u64 = 7;
@@ -126,6 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     bark(&out)?;
+    wood(&out)?;
     Ok(())
 }
 
@@ -512,6 +515,304 @@ fn ramp(
         min: to[0].min(to[1]),
         max: to[0].max(to[1]),
     })
+}
+
+/// Solid oak-like wood around a trunk along z, in meters, previewed on three
+/// sawn faces (slices) and on a log's surface (a cylinder chart).
+fn wood(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let channels =
+        |finish: &dyn Fn(&mut ProgramBuilder, NodeId) -> Result<NodeId, ProgramError>| {
+            (0..3)
+                .map(|index| {
+                    let mut b = ProgramBuilder::new();
+                    let color = wood_color(&mut b)?;
+                    let channel = b.add(Op::Component {
+                        input: color,
+                        index,
+                    })?;
+                    let output = finish(&mut b, channel)?;
+                    Ok((b, output))
+                })
+                .collect::<Result<Vec<_>, ProgramError>>()
+        };
+    let unit = Region {
+        origin: Vec2::ZERO,
+        size: Vec2::ONE,
+    };
+    // Sawn faces: planar slices through the solid, 12 cm across at about 4
+    // texels per mm, since the thin rays and sharp ring ends are not
+    // band-limited.
+    let faces = [
+        // End grain: a cross-section from near the pith outward.
+        (
+            "wood-end-grain",
+            [-0.03, -0.03, 0.2],
+            [0.12, 0.0, 0.0],
+            [0.0, 0.12, 0.0],
+            1,
+        ),
+        // Flat sawn: a plane parallel to the axis, 7 cm off it.
+        (
+            "wood-flat-sawn",
+            [-0.06, 0.07, 0.0],
+            [0.0, 0.0, 0.12],
+            [0.12, 0.0, 0.0],
+            3,
+        ),
+        // Quarter sawn: through the axis, along the rays, which wander in
+        // and out of the face as flecks.
+        (
+            "wood-quarter-sawn",
+            [0.02, 0.0, 0.0],
+            [0.0, 0.0, 0.12],
+            [0.12, 0.0, 0.0],
+            3,
+        ),
+    ];
+    for (name, origin, u, v, aspect) in faces {
+        let rgb = channels(&|b, channel| {
+            b.add(Op::Slice {
+                input: channel,
+                origin,
+                u,
+                v,
+                domain: Domain::Plane,
+            })
+        })?
+        .into_iter()
+        .map(|(b, output)| {
+            let program = b.finish(output)?;
+            let region = Region {
+                size: Vec2::new(aspect as f32, 1.0),
+                ..unit
+            };
+            Ok(Grid::sample(&program, region, 2 * aspect * SIZE, 2 * SIZE).values)
+        })
+        .collect::<Result<Vec<_>, ProgramError>>()?;
+        let pixels: Vec<[f32; 3]> = (0..rgb[0].len())
+            .map(|i| [rgb[0][i], rgb[1][i], rgb[2][i]])
+            .collect();
+        write_color(out, name, 2 * aspect * SIZE, 2 * SIZE, &pixels)?;
+    }
+
+    let solids = channels(&|_, channel| Ok(channel))?
+        .into_iter()
+        .map(|(b, output)| b.finish_solid(output))
+        .collect::<Result<Vec<SolidProgram>, ProgramError>>()?;
+    println!(
+        "wood program {} ({} nodes)",
+        solids[0].fingerprint(),
+        solids[0].program().len()
+    );
+    // A log of radius 11 cm, its surface unrolled: x is the angle around
+    // the axis, y runs along it at the same scale.
+    let radius = 0.11;
+    let (width, height) = (3 * SIZE, SIZE);
+    let texel = core::f32::consts::TAU * radius / width as f32;
+    let footprint = Footprint::new(texel).expect("finite");
+    let samples: Vec<ChartSample> = (0..width * height)
+        .map(|i| {
+            let (x, y) = (i % width, i / width);
+            let angle = (x as f32 + 0.5) / width as f32 * core::f32::consts::TAU;
+            ChartSample {
+                position: Vec3::new(
+                    radius * angle.cos(),
+                    radius * angle.sin(),
+                    (y as f32 + 0.5) * texel,
+                ),
+                footprint,
+            }
+        })
+        .collect();
+    let chart = chart_color(&solids, &samples);
+    write_color(out, "wood-log-chart", width, height, &chart)?;
+
+    // The same log seen from the side, shaded: each visible point evaluated
+    // with a footprint widened by the surface's slant.
+    let (width, height) = (SIZE, 2 * SIZE);
+    let pixel = 2.4 * radius / width as f32;
+    let to_light = Vec3::new(-0.5, -1.0, 0.4).normalize();
+    let mut samples = Vec::new();
+    let mut shading = Vec::new();
+    for i in 0..width * height {
+        let (x, y) = (i % width, i / width);
+        let px = (x as f32 + 0.5) * pixel - 1.2 * radius;
+        let z = (height - y) as f32 * pixel;
+        if px.abs() < radius {
+            let normal = Vec3::new(px / radius, -(1.0 - (px / radius).powi(2)).sqrt(), 0.0);
+            let slant = (-normal.y).max(0.05);
+            samples.push(ChartSample {
+                position: normal * radius + Vec3::Z * z,
+                footprint: Footprint::new(pixel / slant).expect("finite"),
+            });
+            shading.push(Some(0.2 + 0.8 * normal.dot(to_light).max(0.0)));
+        } else {
+            shading.push(None);
+        }
+    }
+    let mut colors = chart_color(&solids, &samples).into_iter();
+    let side: Vec<[f32; 3]> = shading
+        .into_iter()
+        .map(|shade| match shade {
+            Some(shade) => colors
+                .next()
+                .expect("one color per sample")
+                .map(|c| c * shade),
+            None => [0.8; 3],
+        })
+        .collect();
+    write_color(out, "wood-log-side", width, height, &side)?;
+    Ok(())
+}
+
+/// Evaluates three solid channel programs at chart samples, as colors.
+fn chart_color(channels: &[SolidProgram], samples: &[ChartSample]) -> Vec<[f32; 3]> {
+    let mut values = vec![vec![0.0; samples.len()]; 3];
+    for (program, out) in channels.iter().zip(&mut values) {
+        program.eval_chart(samples, out);
+    }
+    (0..samples.len())
+        .map(|i| [values[0][i], values[1][i], values[2][i]])
+        .collect()
+}
+
+/// The wood's linear color: growth rings with noise-perturbed radii, dark
+/// latewood closing each ring, earlywood pores, medullary rays and slow
+/// mottling.
+fn wood_color(b: &mut ProgramBuilder) -> Result<NodeId, ProgramError> {
+    let domain = Domain3::Space;
+    let color = |b: &mut ProgramBuilder, rgb: [f32; 3]| {
+        let [r, g, bl] = rgb.map(|value| b.add(Op::Constant3 { domain, value }));
+        b.add(Op::Color {
+            r: r?,
+            g: g?,
+            b: bl?,
+        })
+    };
+    let noise = |b: &mut ProgramBuilder, basis, frequency, seed, octaves| {
+        b.add(Op::Fractal3 {
+            basis,
+            domain,
+            frequency,
+            seed,
+            params: FractalParams {
+                octaves,
+                ..FractalParams::default()
+            },
+        })
+    };
+    let position = b.add(Op::Position3)?;
+    let x = b.add(Op::Component {
+        input: position,
+        index: 0,
+    })?;
+    let y = b.add(Op::Component {
+        input: position,
+        index: 1,
+    })?;
+    let xy = b.add(Op::Vector2 { x, y })?;
+    let radius = b.add(Op::Length { input: xy })?;
+    // The trunk tapers: each ring is a cone, 3 cm wider per meter lower.
+    let z = b.add(Op::Component {
+        input: position,
+        index: 2,
+    })?;
+    let taper = b.add(Op::Remap {
+        input: z,
+        from: [0.0, 1.0],
+        to: [0.0, 0.03],
+    })?;
+    let radius = b.add(Op::Add {
+        a: radius,
+        b: taper,
+    })?;
+
+    // Rings 5.5 mm apart, their radii wandering by up to ±8 mm.
+    let wobble = noise(b, Basis::Gradient, [6.0, 6.0, 4.0], SEED + 10, 4)?;
+    let wobble = b.add(Op::Remap {
+        input: wobble,
+        from: [-1.0, 1.0],
+        to: [-0.008, 0.008],
+    })?;
+    let radius = b.add(Op::Add {
+        a: radius,
+        b: wobble,
+    })?;
+    let rings = b.add(Op::Remap {
+        input: radius,
+        from: [0.0, 1.0],
+        to: [0.0, 180.0],
+    })?;
+    let phase = b.add(Op::Fract { input: rings })?;
+    // Each year opens with a band of large pores and darkens toward its
+    // latewood, which ends sharply at the next year's pores.
+    let late = ramp(b, phase, [0.4, 0.95], [0.0, 1.0])?;
+    let early = ramp(b, phase, [0.12, 0.3], [1.0, 0.0])?;
+
+    // Large earlywood pores, drawn out along the grain.
+    let pores = b.add(Op::Noise3 {
+        basis: Basis::Value,
+        domain,
+        frequency: [700.0, 700.0, 60.0],
+        seed: SEED + 11,
+    })?;
+    let pores = ramp(b, pores, [0.1, 0.5], [0.3, 0.9])?;
+    let pores = b.add(Op::Mul { a: pores, b: early })?;
+
+    // Rays: thin radial ribbons, 90 around the trunk, a cm or two tall.
+    let angle = b.add(Op::Atan2 { y, x })?;
+    let sway = noise(b, Basis::Gradient, [20.0, 20.0, 20.0], SEED + 12, 2)?;
+    let sway = b.add(Op::Remap {
+        input: sway,
+        from: [-1.0, 1.0],
+        to: [-0.05, 0.05],
+    })?;
+    let angle = b.add(Op::Add { a: angle, b: sway })?;
+    let sectors = b.add(Op::Remap {
+        input: angle,
+        from: [0.0, core::f32::consts::TAU],
+        to: [0.0, 90.0],
+    })?;
+    let sector = b.add(Op::Fract { input: sectors })?;
+    let half = b.add(Op::Constant3 { domain, value: 0.5 })?;
+    let offset = b.add(Op::Sub { a: sector, b: half })?;
+    let offset = b.add(Op::Abs { input: offset })?;
+    let ray = ramp(b, offset, [0.44, 0.47], [0.0, 1.0])?;
+    let extent = b.add(Op::Noise3 {
+        basis: Basis::Value,
+        domain,
+        frequency: [30.0, 30.0, 60.0],
+        seed: SEED + 13,
+    })?;
+    let extent = ramp(b, extent, [-0.2, 0.2], [0.0, 0.9])?;
+    let ray = b.add(Op::Mul { a: ray, b: extent })?;
+
+    let early_color = color(b, [0.42, 0.27, 0.14])?;
+    let late_color = color(b, [0.27, 0.16, 0.075])?;
+    let pore_color = color(b, [0.1, 0.055, 0.025])?;
+    let ray_color = color(b, [0.52, 0.37, 0.21])?;
+    let wood = b.add(Op::Mix {
+        a: early_color,
+        b: late_color,
+        t: late,
+    })?;
+    let wood = b.add(Op::Mix {
+        a: wood,
+        b: pore_color,
+        t: pores,
+    })?;
+    let wood = b.add(Op::Mix {
+        a: wood,
+        b: ray_color,
+        t: ray,
+    })?;
+    let mottle = noise(b, Basis::Gradient, [4.0, 4.0, 1.0], SEED + 14, 3)?;
+    let mottle = b.add(Op::Remap {
+        input: mottle,
+        from: [-1.0, 1.0],
+        to: [0.85, 1.15],
+    })?;
+    b.add(Op::Mul { a: wood, b: mottle })
 }
 
 /// Writes linear colors as an sRGB-encoded PNG.

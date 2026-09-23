@@ -1,0 +1,29 @@
+[package]
+name = "dapple_encode"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Mip chains, specular anti-aliasing, channel packing, and KTX2/PNG output for dapple textures"
+readme = "README.md"
+keywords = ["texture", "mipmap", "ktx2", "no_std"]
+categories = ["graphics", "encoding", "no-std"]
+
+[dependencies]
+dapple_raster.workspace = true
+libm.workspace = true
+png = { optional = true, workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# PNG output through the `png` crate.
+std = ["dep:png"]
+
+[package.metadata.docs.rs]
+all-features = true
+default-target = "x86_64-unknown-linux-gnu"
+targets = []

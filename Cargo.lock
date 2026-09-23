@@ -30,6 +30,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dapple_encode"
+version = "0.0.1"
+dependencies = [
+ "dapple_raster",
+ "libm",
+ "png",
+]
+
+[[package]]
 name = "dapple_field"
 version = "0.0.1"
 dependencies = [

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/dapple_encode",
     "crates/dapple_field",
     "crates/dapple_raster",
     "examples/field_gallery",
@@ -69,6 +70,7 @@ clippy.wildcard_dependencies = "warn"
 clippy.allow_attributes = "warn"
 
 [workspace.dependencies]
+dapple_encode = { path = "crates/dapple_encode" }
 dapple_field = { path = "crates/dapple_field" }
 dapple_raster = { path = "crates/dapple_raster" }
 glam = { default-features = false, features = ["libm"], version = "0.33.8" }

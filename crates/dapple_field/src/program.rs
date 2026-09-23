@@ -60,6 +60,8 @@ use crate::field::{Affine2, ScalarField, check_transform};
 use crate::fractal::{Fractal, FractalKind, FractalParams};
 use crate::hash::hash;
 use crate::noise::{Basis, Noise};
+use crate::raster::Region;
+use crate::shape::Disk;
 use crate::types::{NormalBlend, NormalFrame, PortType, Primaries, Value};
 
 mod flat;
@@ -141,6 +143,17 @@ pub enum Op {
         seed: u64,
         /// The quantity returned.
         output: CellOutput,
+    },
+    /// A filled [`Disk`] mask, zero outside its support.
+    Disk {
+        /// Domain.
+        domain: Domain,
+        /// Center, in domain units.
+        center: [f32; 2],
+        /// Radius, in domain units.
+        radius: f32,
+        /// Edge band width at a point footprint, in domain units.
+        softness: f32,
     },
     /// `input(transform(p))`, lattice-checked like [`Transformed`](crate::Transformed).
     Transform {
@@ -325,7 +338,106 @@ pub enum Op {
     },
 }
 
+/// Where replacing one node's operation, or an input's value, can change a
+/// node's value.
+///
+/// Regions are stated at a point footprint. Evaluating with a footprint `w`
+/// wide grows each region by `w / 2` on every side. On a periodic domain the
+/// regions also repeat with the period.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Change {
+    /// Nowhere: the value is unchanged.
+    Nowhere,
+    /// Only inside these regions.
+    Within(Vec<Region>),
+    /// Possibly anywhere.
+    Everywhere,
+}
+
+impl Change {
+    /// Largest number of regions kept before they merge into their bounds.
+    pub const MAX_REGIONS: usize = 16;
+
+    /// The union of `self` and `other`.
+    #[must_use]
+    pub fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Everywhere, _) | (_, Self::Everywhere) => Self::Everywhere,
+            (Self::Nowhere, change) | (change, Self::Nowhere) => change,
+            (Self::Within(mut a), Self::Within(b)) => {
+                a.extend(b);
+                if a.len() > Self::MAX_REGIONS {
+                    let min = a.iter().fold(Vec2::INFINITY, |m, r| m.min(r.origin));
+                    let max = a
+                        .iter()
+                        .fold(Vec2::NEG_INFINITY, |m, r| m.max(r.origin + r.size));
+                    a = alloc::vec![Region {
+                        origin: min,
+                        size: max - min,
+                    }];
+                }
+                Self::Within(a)
+            }
+        }
+    }
+}
+
 impl Op {
+    /// Where replacing `previous` with `self` can change this node's value,
+    /// with its inputs unchanged.
+    ///
+    /// Equal operations change nothing. A [`Op::Disk`] replaced by a disk on
+    /// the same domain changes only the two disks' supports. Any other edit
+    /// may change the value anywhere.
+    #[must_use]
+    pub fn change_from(&self, previous: &Self) -> Change {
+        if self == previous {
+            return Change::Nowhere;
+        }
+        match (self, previous) {
+            (
+                Self::Disk {
+                    domain,
+                    center,
+                    radius,
+                    softness,
+                },
+                Self::Disk {
+                    domain: d0,
+                    center: c0,
+                    radius: r0,
+                    softness: s0,
+                },
+            ) if domain == d0 => {
+                match (
+                    Disk::new(*domain, Vec2::from(*center), *radius, *softness),
+                    Disk::new(*d0, Vec2::from(*c0), *r0, *s0),
+                ) {
+                    (Ok(a), Ok(b)) => Change::Within(alloc::vec![b.support(), a.support()]),
+                    _ => Change::Everywhere,
+                }
+            }
+            _ => Change::Everywhere,
+        }
+    }
+
+    /// Whether this node's value at a point depends on operand `index` only
+    /// at the same point.
+    ///
+    /// Then a change of that operand within a region changes this node only
+    /// within the same region. [`Op::Transform`] and the warped input of
+    /// [`Op::Warp`] read their operand elsewhere. [`Op::Demote`] reads it at
+    /// the same point, but a plane field does not repeat, so a periodic
+    /// change's repeats would no longer be stated.
+    #[must_use]
+    pub const fn operand_is_pointwise(&self, index: usize) -> bool {
+        match self {
+            Self::Transform { .. } | Self::Demote { .. } => false,
+            Self::Warp { .. } => index != 0,
+            _ => true,
+        }
+    }
+
     /// The node's inputs, in operand order.
     #[must_use]
     pub fn inputs(&self) -> Inputs {
@@ -334,7 +446,8 @@ impl Op {
             Self::Constant { .. }
             | Self::Noise { .. }
             | Self::Fractal { .. }
-            | Self::Cellular { .. } => {}
+            | Self::Cellular { .. }
+            | Self::Disk { .. } => {}
             Self::Transform { input, .. }
             | Self::Demote { input }
             | Self::Abs { input }
@@ -387,7 +500,8 @@ impl Op {
             Self::Constant { .. }
             | Self::Noise { .. }
             | Self::Fractal { .. }
-            | Self::Cellular { .. } => {}
+            | Self::Cellular { .. }
+            | Self::Disk { .. } => {}
             Self::Transform { input, .. }
             | Self::Demote { input }
             | Self::Abs { input }
@@ -439,6 +553,7 @@ impl Op {
             Self::Noise { .. } => "noise",
             Self::Fractal { .. } => "fractal",
             Self::Cellular { .. } => "cellular",
+            Self::Disk { .. } => "disk",
             Self::Transform { .. } => "transform",
             Self::Demote { .. } => "demote",
             Self::Add { .. } => "add",
@@ -587,6 +702,7 @@ enum Kernel {
     Noise(Noise),
     Fractal(Fractal),
     Cellular(CellularField),
+    Disk(Disk),
     Transform {
         input: NodeId,
         transform: Affine2,
@@ -756,7 +872,8 @@ impl ProgramBuilder {
             Op::Constant { domain, .. }
             | Op::Noise { domain, .. }
             | Op::Fractal { domain, .. }
-            | Op::Cellular { domain, .. } => domain,
+            | Op::Cellular { domain, .. }
+            | Op::Disk { domain, .. } => domain,
             Op::Demote { .. } => Domain::Plane,
             _ => {
                 let mut inputs = op
@@ -811,6 +928,7 @@ impl ProgramBuilder {
             Op::Constant { .. } | Op::Noise { .. } | Op::Fractal { .. } | Op::Cellular { .. } => {
                 PortType::Scalar
             }
+            Op::Disk { .. } => PortType::Mask,
             Op::Transform { input, transform } => {
                 let found = port(input);
                 let directional = matches!(
@@ -988,6 +1106,12 @@ impl ProgramBuilder {
             } => Kernel::Cellular(
                 Cellular::new(domain, Vec2::from(frequency), jitter, seed)?.output(output),
             ),
+            Op::Disk {
+                domain,
+                center,
+                radius,
+                softness,
+            } => Kernel::Disk(Disk::new(domain, Vec2::from(center), radius, softness)?),
             Op::Transform { input, transform } => {
                 let stretch = check_transform(self.nodes[input.0 as usize].domain, transform)?;
                 Kernel::Transform {
@@ -1123,6 +1247,20 @@ impl ProgramBuilder {
                     cell_output_tag(output),
                 ]);
             }
+            Op::Disk {
+                domain: d,
+                center,
+                radius,
+                softness,
+            } => {
+                domain(&mut words, d);
+                words.extend([
+                    float(center[0]),
+                    float(center[1]),
+                    float(radius),
+                    float(softness),
+                ]);
+            }
             Op::Transform { transform, .. } => {
                 let m = transform.matrix.to_cols_array();
                 let t = transform.translation.to_array();
@@ -1195,6 +1333,7 @@ fn op_tag(op: &Op) -> u64 {
         Op::Direction { .. } => 24,
         Op::Angle { .. } => 25,
         Op::Coherence { .. } => 26,
+        Op::Disk { .. } => 27,
     }
 }
 
@@ -1418,6 +1557,7 @@ impl Kernel {
             Self::Noise(ref noise) => Value::Scalar(noise.eval(p, footprint)),
             Self::Fractal(ref fractal) => Value::Scalar(fractal.eval(p, footprint)),
             Self::Cellular(ref cellular) => Value::Scalar(cellular.eval(p, footprint)),
+            Self::Disk(ref disk) => Value::Scalar(disk.eval(p, footprint)),
             Self::Binary(op, ..) => componentwise(args[0], args[1], |a, b| match op {
                 BinaryOp::Add => a + b,
                 BinaryOp::Sub => a - b,
@@ -2483,5 +2623,93 @@ mod tests {
                 b: NodeId(6)
             }
         );
+    }
+
+    #[test]
+    fn disks_are_masks_matching_the_direct_field() {
+        let d = torus();
+        let op = Op::Disk {
+            domain: d,
+            center: [0.5, 0.5],
+            radius: 0.2,
+            softness: 0.05,
+        };
+        let mut b = ProgramBuilder::new();
+        let disk = b.add(op.clone()).unwrap();
+        assert_eq!(b.port_type(disk), Ok(PortType::Mask));
+        let program = b.finish(disk).unwrap();
+        let direct = Disk::new(d, Vec2::new(0.5, 0.5), 0.2, 0.05).unwrap();
+        let footprint = Footprint::new(0.01).unwrap();
+        for i in 0..50 {
+            let p = Vec2::new(i as f32 * 0.041, i as f32 * 0.023);
+            assert_eq!(
+                program.eval(p, footprint).to_bits(),
+                direct.eval(p, footprint).to_bits()
+            );
+        }
+
+        let mut other = ProgramBuilder::new();
+        let moved = other
+            .add(Op::Disk {
+                domain: d,
+                center: [0.6, 0.5],
+                radius: 0.2,
+                softness: 0.05,
+            })
+            .unwrap();
+        assert_ne!(
+            program.fingerprint(),
+            other.finish(moved).unwrap().fingerprint()
+        );
+    }
+
+    #[test]
+    fn disk_edits_change_only_their_supports() {
+        let d = torus();
+        let disk = |x: f32| Op::Disk {
+            domain: d,
+            center: [x, 0.5],
+            radius: 0.1,
+            softness: 0.0,
+        };
+        assert_eq!(disk(0.3).change_from(&disk(0.3)), Change::Nowhere);
+        let Change::Within(regions) = disk(0.6).change_from(&disk(0.3)) else {
+            panic!("a moved disk changes locally");
+        };
+        assert_eq!(regions.len(), 2);
+        assert!(regions[0].origin.abs_diff_eq(Vec2::new(0.2, 0.4), 1e-6));
+        assert!(regions[1].origin.abs_diff_eq(Vec2::new(0.5, 0.4), 1e-6));
+        let noise = Op::Noise {
+            basis: Basis::Gradient,
+            domain: d,
+            frequency: [2.0, 2.0],
+            seed: 1,
+        };
+        assert_eq!(disk(0.3).change_from(&noise), Change::Everywhere);
+        assert!(
+            !Op::Warp {
+                input: NodeId(0),
+                dx: NodeId(1),
+                dy: NodeId(2),
+                amount: 1.0
+            }
+            .operand_is_pointwise(0)
+        );
+        let many = (0..20).fold(Change::Nowhere, |c, i| {
+            c.union(Change::Within(alloc::vec![Region {
+                origin: Vec2::splat(i as f32),
+                size: Vec2::ONE,
+            }]))
+        });
+        let Change::Within(merged) = many else {
+            panic!("regions stay local");
+        };
+        assert!(merged.len() <= Change::MAX_REGIONS);
+        let covers = |p: Vec2| {
+            merged
+                .iter()
+                .any(|r| p.cmpge(r.origin).all() && p.cmple(r.origin + r.size).all())
+        };
+        assert!((0..20).all(|i| covers(Vec2::splat(i as f32 + 0.5))));
     }
 }

@@ -20,6 +20,24 @@ pub trait ScalarField {
 
     /// Evaluates the field at `p`, band-limited to `footprint`.
     fn eval(&self, p: Vec2, footprint: Footprint) -> f32;
+
+    /// Evaluates the field at every point of `points` into `out`, all with
+    /// one footprint.
+    ///
+    /// The results must equal [`Self::eval`] at each point, bit for bit. The
+    /// default calls it per point; fields with per-batch setup, such as a
+    /// [`FieldProgram`](crate::program::FieldProgram)'s evaluation buffers,
+    /// override it to set up once.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `out` is shorter than `points`.
+    fn eval_batch(&self, points: &[Vec2], footprint: Footprint, out: &mut [f32]) {
+        assert!(out.len() >= points.len(), "output shorter than the points");
+        for (value, &p) in out.iter_mut().zip(points) {
+            *value = self.eval(p, footprint);
+        }
+    }
 }
 
 impl<F: ScalarField + ?Sized> ScalarField for &F {
@@ -30,6 +48,10 @@ impl<F: ScalarField + ?Sized> ScalarField for &F {
     fn eval(&self, p: Vec2, footprint: Footprint) -> f32 {
         (**self).eval(p, footprint)
     }
+
+    fn eval_batch(&self, points: &[Vec2], footprint: Footprint, out: &mut [f32]) {
+        (**self).eval_batch(points, footprint, out);
+    }
 }
 
 impl<F: ScalarField + ?Sized> ScalarField for Box<F> {
@@ -39,6 +61,10 @@ impl<F: ScalarField + ?Sized> ScalarField for Box<F> {
 
     fn eval(&self, p: Vec2, footprint: Footprint) -> f32 {
         (**self).eval(p, footprint)
+    }
+
+    fn eval_batch(&self, points: &[Vec2], footprint: Footprint, out: &mut [f32]) {
+        (**self).eval_batch(points, footprint, out);
     }
 }
 

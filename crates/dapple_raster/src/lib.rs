@@ -398,6 +398,8 @@ impl Realization {
 
 /// Evaluates `field` at every texel center of `realization`.
 ///
+/// Rows are evaluated with [`ScalarField::eval_batch`], so fields with
+/// per-batch setup set up once per row.
 /// Each texel is evaluated with a footprint of its larger side, so fields
 /// band-limit to the raster's resolution. A wrapping realization requires the
 /// field's domain to be the realization's periodic domain; a clamping one
@@ -415,12 +417,18 @@ pub fn realize(field: &impl ScalarField, realization: Realization) -> Result<Ras
     }
     let footprint = Footprint::new(texel.max_element()).ok_or(RasterError::InvalidRegion)?;
     let count = check_size(realization.width, realization.height)?;
-    let mut values = Vec::with_capacity(count);
-    for y in 0..realization.height {
+    let mut values = alloc::vec![0.0; count];
+    let mut points = Vec::with_capacity(realization.width as usize);
+    for (y, row) in values
+        .chunks_exact_mut(realization.width as usize)
+        .enumerate()
+    {
+        points.clear();
         for x in 0..realization.width {
             let center = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
-            values.push(field.eval(realization.region.origin + center * texel, footprint));
+            points.push(realization.region.origin + center * texel);
         }
+        field.eval_batch(&points, footprint, row);
     }
     Raster::from_values(
         realization.width,

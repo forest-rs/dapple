@@ -1316,6 +1316,23 @@ impl ScalarField for FieldProgram {
             self.eval_node(self.output, p, footprint)
         }
     }
+
+    /// Evaluates through one [`Evaluator`] when the plan saves work, so a
+    /// batch allocates its buffers once.
+    fn eval_batch(&self, points: &[Vec2], footprint: Footprint, out: &mut [f32]) {
+        assert!(out.len() >= points.len(), "output shorter than the points");
+        let stats = self.plan.stats();
+        if stats.instances < stats.tree_evaluations {
+            let mut evaluator = self.evaluator();
+            for (value, &p) in out.iter_mut().zip(points) {
+                *value = evaluator.eval(p, footprint);
+            }
+        } else {
+            for (value, &p) in out.iter_mut().zip(points) {
+                *value = self.eval_node(self.output, p, footprint);
+            }
+        }
+    }
 }
 
 /// A finished program whose output may have any [`PortType`].
@@ -2070,5 +2087,22 @@ mod tests {
             program.eval(p, Footprint::POINT),
             program.program().eval_value(color, p, Footprint::POINT)
         );
+    }
+
+    #[test]
+    fn batches_match_single_evaluations() {
+        let mut b = ProgramBuilder::new();
+        let n = noise(&mut b, 6);
+        let square = b.add(Op::Mul { a: n, b: n }).unwrap();
+        let shared = b.add(Op::Add { a: square, b: n }).unwrap();
+        let program = b.finish(shared).unwrap();
+        assert!(program.evaluation_stats().instances < program.evaluation_stats().tree_evaluations);
+        let points: Vec<Vec2> = (0..40).map(|i| Vec2::new(i as f32 * 0.051, 0.3)).collect();
+        let footprint = Footprint::new(0.01).unwrap();
+        let mut out = alloc::vec![0.0; points.len()];
+        program.eval_batch(&points, footprint, &mut out);
+        for (&p, v) in points.iter().zip(&out) {
+            assert_eq!(v.to_bits(), program.eval(p, footprint).to_bits());
+        }
     }
 }

@@ -461,6 +461,23 @@ has its own rule:
   later step is for `texture_bake` to reuse dapple's mip builders, so both
   paths share one definition of correct mips.
 
+**Relation to Lightweald's `texture_bake`.** The two tools cover different
+sources. `texture_bake` bakes photographic sources (downloaded images listed
+in a manifest) into pool textures, letting `ctt` build color and data mips and
+building normal mips itself. Dapple produces procedural sources and builds
+every mip chain itself from what each texture means: coverage, normal
+variance folded into roughness, footprint re-evaluation of fields. It then
+hands finished chains to `ctt` only for block compression
+(`dapple_compress`). The output conventions are shared: the same
+color/data/normal kinds, pool formats per encoding, glTF normal convention,
+`Encoding`/`Quality`/Zstandard settings, and normal chains that match
+`texture_bake`'s 2 × 2 renormalized average when variance folding is off. They
+could later share code in both directions. `texture_bake` could reuse
+dapple's mip builders for photo sources, which would give it coverage
+preservation and variance folding. Both could share one pool-format and
+normal-chain definition in a small common crate, instead of each keeping its
+own table.
+
 **Packing profiles** (`lightweald`, `gltf`, `raw`) decide channels, encodings
 and the alpha cutoff, and declare which parameters they cannot carry. Output
 is a `MaterialBundle`: textures and their encodings, constant parameters,

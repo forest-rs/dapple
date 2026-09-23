@@ -13,11 +13,11 @@ env:
   # This should be limited to packages that are intended for publishing.
   RUST_MIN_VER_PKGS: "-p dapple_field -p dapple_raster -p dapple_encode"
   # List of packages that don't support `no_std`.
-  RUST_STD_ONLY_PKGS: "--exclude field_gallery"
+  RUST_STD_ONLY_PKGS: "--exclude field_gallery --exclude dapple_compress"
   # List of packages that don't support wasip1
-  RUST_NO_WASIP1_PKGS:
+  RUST_NO_WASIP1_PKGS: "--exclude dapple_compress --exclude field_gallery"
   # List of packages that don't support wasm32
-  RUST_NO_WASM_PKGS:
+  RUST_NO_WASM_PKGS: "--exclude dapple_compress --exclude field_gallery"
   # List of features that depend on the standard library and will be excluded from no_std checks.
   FEATURES_DEPENDING_ON_STD: "std,default"
 

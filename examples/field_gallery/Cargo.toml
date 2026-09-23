@@ -2,13 +2,15 @@
 name = "field_gallery"
 version = "0.0.0"
 edition.workspace = true
-rust-version.workspace = true
+# dapple_compress needs 1.90.
+rust-version = "1.90"
 license.workspace = true
 repository.workspace = true
 description = "Writes preview images of dapple_field fields and dapple_raster operations"
 publish = false
 
 [dependencies]
+dapple_compress.workspace = true
 dapple_encode = { features = ["std"], workspace = true }
 dapple_field.workspace = true
 dapple_raster.workspace = true

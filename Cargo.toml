@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/dapple_compress",
     "crates/dapple_encode",
     "crates/dapple_field",
     "crates/dapple_raster",
@@ -70,6 +71,7 @@ clippy.wildcard_dependencies = "warn"
 clippy.allow_attributes = "warn"
 
 [workspace.dependencies]
+dapple_compress = { path = "crates/dapple_compress" }
 dapple_encode = { path = "crates/dapple_encode" }
 dapple_field = { path = "crates/dapple_field" }
 dapple_raster = { path = "crates/dapple_raster" }

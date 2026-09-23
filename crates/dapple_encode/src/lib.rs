@@ -74,7 +74,11 @@ mod golden_tests;
 use alloc::vec::Vec;
 use core::fmt;
 
-use dapple_raster::{Edge, Raster, RasterError};
+use dapple_raster::{Raster, RasterError};
+
+/// How images and textures continue past their border; re-exported from
+/// `dapple_raster`.
+pub use dapple_raster::Edge;
 
 pub use filter::{Filter, KAISER_BETA, KAISER_RADIUS};
 pub use mips::{

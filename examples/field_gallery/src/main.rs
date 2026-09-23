@@ -12,6 +12,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
+use dapple_compress::{CompressSettings, Encoding, compress};
 use dapple_encode::{Filter, Image, MaterialMaps, PackSettings, Profile, ktx2, pack};
 use dapple_field::program::{FieldProgram, Op, ProgramBuilder, ProgramError};
 use dapple_field::raster::{Grid, Region};
@@ -230,6 +231,17 @@ fn bark_set(
                 dir.join(format!("{}.png", texture.name)),
                 dapple_encode::png::write(texture)?,
             )?;
+        }
+        // Lightweald's pool encodings, with dapple's own mips kept.
+        if profile == Profile::Lightweald {
+            for (encoding, name) in [(Encoding::Bc, "bc"), (Encoding::Astc, "astc")] {
+                let encoded = dir.join(name);
+                std::fs::create_dir_all(&encoded)?;
+                for texture in &bundle.textures {
+                    let file = compress(texture, CompressSettings::new(encoding))?;
+                    std::fs::write(encoded.join(format!("{}.ktx2", texture.name)), file)?;
+                }
+            }
         }
         let variance: Vec<String> = bundle
             .report

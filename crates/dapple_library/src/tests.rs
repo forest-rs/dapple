@@ -5,7 +5,7 @@ use dapple_field::program::ValueProgram;
 use dapple_field::{Domain, Footprint, ScalarField, Value};
 use glam::Vec2;
 
-use crate::{brick, oak, parquet};
+use crate::{brick, gravel, oak, parquet};
 
 fn torus() -> Domain {
     Domain::periodic(1, 1).unwrap()
@@ -44,6 +44,11 @@ fn tileable_materials_repeat_across_the_period() {
         "brick",
         &brick::height(torus()).unwrap(),
         &brick::color(torus()).unwrap(),
+    );
+    assert_tiles(
+        "gravel",
+        &gravel::height(torus()).unwrap(),
+        &gravel::color(torus()).unwrap(),
     );
     assert_tiles(
         "parquet",

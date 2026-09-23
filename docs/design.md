@@ -526,6 +526,18 @@ are built from these in the graph (`dapple_library`'s `brick` and
 `parquet`), not baked into the op; per-orientation grain mixes two
 anisotropic fields by the orientation output.
 
+**As built** (`Op::Scatter`, `dapple_field::Scatter`): at most one splat
+per lattice cell, present with a given density, centered anywhere in its
+cell, with a random radius of at most one cell and optionally a random
+turn. A point is therefore covered only by splats of the 5 × 5 cells around
+it, whatever the density, so cost and tile dependencies stay bounded. A
+splat stamps a soft disk, a dome, or a `SampleImage` (a leaf drawn with
+`dapple_imaging`, say) read with its mips at the footprint scaled into the
+stamp. Outputs are order-independent: the union coverage `1 − Π(1 − aᵢ)`,
+the highest stamp (overlapping pebbles), and that splat's own random value
+for per-splat tone. Splatting a whole sub-graph, rather than a leaf stamp,
+needs evaluation contexts per splat and is left for later.
+
 **Tone:**
 - levels, curves (monotone cubic), clamp, remap, gradient map (a color ramp
   evaluated in linear space);

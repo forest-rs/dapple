@@ -62,6 +62,7 @@ use crate::hash::hash;
 use crate::image::SampleImage;
 use crate::noise::{Basis, Noise};
 use crate::raster::Region;
+use crate::scatter::{Placement, Scatter, ScatterField, ScatterOutput, Stamp};
 use crate::shape::Disk;
 use crate::solid::{Cellular3, CellularField3, Fractal3, Noise3, SolidField};
 use crate::tiling::{Pattern, TileOutput, Tiling, TilingField};
@@ -199,6 +200,19 @@ pub enum Op {
         seed: u64,
         /// The quantity returned.
         output: TileOutput,
+    },
+    /// One quantity of stamps scattered at random points ([`Scatter`]).
+    Scatter {
+        /// Domain.
+        domain: Domain,
+        /// Where splats go and how large they are.
+        placement: Placement,
+        /// What each splat stamps.
+        stamp: Stamp,
+        /// Seed.
+        seed: u64,
+        /// The quantity returned.
+        output: ScatterOutput,
     },
     /// A filled [`Disk`] mask, zero outside its support.
     Disk {
@@ -752,6 +766,31 @@ impl Op {
                 }
                 words.extend([seed, tile_output_tag(output)]);
             }
+            Self::Scatter {
+                domain: d,
+                placement,
+                ref stamp,
+                seed,
+                output,
+            } => {
+                domain(&mut words, d);
+                words.extend([
+                    float(placement.frequency),
+                    float(placement.density),
+                    float(placement.radius[0]),
+                    float(placement.radius[1]),
+                    u64::from(placement.rotate),
+                ]);
+                match stamp {
+                    Stamp::Disk { softness } => words.extend([0, float(*softness)]),
+                    Stamp::Dome => words.push(1),
+                    Stamp::Image(image) => {
+                        let [lo, hi] = fingerprint_halves(image.derivation());
+                        words.extend([2, lo, hi]);
+                    }
+                }
+                words.extend([seed, scatter_output_tag(output)]);
+            }
             Self::Disk {
                 domain: d,
                 center,
@@ -905,6 +944,7 @@ impl Op {
             | Self::Fractal { .. }
             | Self::Cellular { .. }
             | Self::Tiling { .. }
+            | Self::Scatter { .. }
             | Self::Disk { .. }
             | Self::Sample { .. }
             | Self::Constant3 { .. }
@@ -971,6 +1011,7 @@ impl Op {
             | Self::Fractal { .. }
             | Self::Cellular { .. }
             | Self::Tiling { .. }
+            | Self::Scatter { .. }
             | Self::Disk { .. }
             | Self::Sample { .. }
             | Self::Constant3 { .. }
@@ -1035,6 +1076,7 @@ impl Op {
             Self::Fractal { .. } => "fractal",
             Self::Cellular { .. } => "cellular",
             Self::Tiling { .. } => "tiling",
+            Self::Scatter { .. } => "scatter",
             Self::Disk { .. } => "disk",
             Self::Transform { .. } => "transform",
             Self::Demote { .. } => "demote",
@@ -1234,6 +1276,7 @@ enum Kernel {
     Fractal(Fractal),
     Cellular(CellularField),
     Tiling(TilingField),
+    Scatter(ScatterField),
     Disk(Disk),
     Sample(SampleImage),
     Transform {
@@ -1473,6 +1516,7 @@ impl ProgramBuilder {
             | Op::Fractal { domain, .. }
             | Op::Cellular { domain, .. }
             | Op::Tiling { domain, .. }
+            | Op::Scatter { domain, .. }
             | Op::Disk { domain, .. } => Space::Planar(domain),
             Op::Sample { ref image } => Space::Planar(image.domain()),
             Op::Constant3 { domain, .. }
@@ -1556,6 +1600,7 @@ impl ProgramBuilder {
             | Op::Fractal { .. }
             | Op::Cellular { .. }
             | Op::Tiling { .. }
+            | Op::Scatter { .. }
             | Op::Constant3 { .. }
             | Op::Noise3 { .. }
             | Op::Fractal3 { .. }
@@ -1795,6 +1840,15 @@ impl ProgramBuilder {
                 seed,
                 output,
             } => Kernel::Tiling(Tiling::new(domain, pattern, seed)?.output(output)),
+            Op::Scatter {
+                domain,
+                placement,
+                ref stamp,
+                seed,
+                output,
+            } => Kernel::Scatter(
+                Scatter::new(domain, placement, stamp.clone(), seed)?.output(output),
+            ),
             Op::Disk {
                 domain,
                 center,
@@ -2001,6 +2055,7 @@ fn op_tag(op: &Op) -> u64 {
         Op::Fract { .. } => 37,
         Op::Atan2 { .. } => 38,
         Op::Tiling { .. } => 39,
+        Op::Scatter { .. } => 40,
     }
 }
 
@@ -2047,6 +2102,14 @@ const fn basis_tag(basis: Basis) -> u64 {
     match basis {
         Basis::Value => 0,
         Basis::Gradient => 1,
+    }
+}
+
+const fn scatter_output_tag(output: ScatterOutput) -> u64 {
+    match output {
+        ScatterOutput::Coverage => 0,
+        ScatterOutput::Max => 1,
+        ScatterOutput::TopValue => 2,
     }
 }
 
@@ -2476,6 +2539,7 @@ impl Kernel {
             Self::Disk(ref disk) => disk.eval_gradient(q, footprint).1.extend(0.0),
             Self::Cellular(ref cellular) => cellular.eval_gradient(q, footprint).1.extend(0.0),
             Self::Tiling(ref tiling) => tiling.eval_gradient(q, footprint).1.extend(0.0),
+            Self::Scatter(ref scatter) => scatter.eval_gradient(q, footprint).1.extend(0.0),
             Self::Sample(ref image) => image.sample_gradient(q, footprint).1.extend(0.0),
             Self::Noise3(ref noise) => noise.eval_gradient(p, footprint).1,
             Self::Fractal3(ref fractal) => fractal.eval_gradient(p, footprint).1,
@@ -2559,6 +2623,7 @@ impl Kernel {
             Self::Fractal(ref fractal) => Value::Scalar(fractal.eval(q, footprint)),
             Self::Cellular(ref cellular) => Value::Scalar(cellular.eval(q, footprint)),
             Self::Tiling(ref tiling) => Value::Scalar(tiling.eval(q, footprint)),
+            Self::Scatter(ref scatter) => Value::Scalar(scatter.eval(q, footprint)),
             Self::Disk(ref disk) => Value::Scalar(disk.eval(q, footprint)),
             Self::Sample(ref image) => Value::Scalar(image.sample(q, footprint)),
             Self::Noise3(ref noise) => Value::Scalar(noise.eval(p, footprint)),

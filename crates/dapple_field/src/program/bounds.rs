@@ -10,6 +10,7 @@ use super::{FieldProgram, NodeId, Op};
 use crate::cellular::CellOutput;
 use crate::fractal::FractalKind;
 use crate::noise::Basis;
+use crate::scatter::{ScatterOutput, Stamp};
 use crate::tiling::{Pattern, TileOutput};
 use crate::types::PortType;
 
@@ -346,6 +347,20 @@ fn node_bounds(op: &Op, all: &[Bounds]) -> Bounds {
             range: Some([0.0, 1.0]),
             slope: (softness > 0.0).then(|| core::f64::consts::SQRT_2 * 1.5 / f64::from(softness)),
         },
+        Op::Scatter {
+            ref stamp, output, ..
+        } => {
+            let range = match (output, stamp) {
+                (ScatterOutput::Max, Stamp::Image(image)) => image
+                    .static_bounds()
+                    .range
+                    // Outside every splat the value is 0.
+                    .map(|[lo, hi]| [f64::from(lo).min(0.0), f64::from(hi).max(0.0)]),
+                _ => Some([0.0, 1.0]),
+            };
+            // Splat borders and overlaps make the value jump.
+            Bounds { range, slope: None }
+        }
         Op::Sample { ref image } => {
             let b = image.static_bounds();
             Bounds {

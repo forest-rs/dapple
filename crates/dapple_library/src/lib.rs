@@ -11,6 +11,7 @@
 //! - [`oak`]: oak bark (planar, tileable) and solid oak wood (a solid field
 //!   around a trunk axis, for slices and surface charts).
 //! - [`brick`]: a running-bond brick wall, tileable.
+//! - [`gravel`]: scattered pebbles of three sizes over sand, tileable.
 //! - [`parquet`]: oak planks in herringbone, tileable.
 
 #![no_std]
@@ -18,6 +19,7 @@
 use dapple_field::program::{NodeId, Op, ProgramBuilder, ProgramError};
 
 pub mod brick;
+pub mod gravel;
 pub mod oak;
 pub mod parquet;
 

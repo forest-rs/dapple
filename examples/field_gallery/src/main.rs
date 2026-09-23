@@ -30,7 +30,7 @@ use dapple_raster::{
 };
 use glam::{Vec2, Vec3};
 
-use dapple_library::{brick, oak, parquet};
+use dapple_library::{brick, gravel, oak, parquet};
 
 const SIZE: u32 = 256;
 const SEED: u64 = 7;
@@ -148,6 +148,12 @@ fn patterns(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
             parquet::height(torus)?,
             parquet::color(torus)?,
             0.001,
+        ),
+        (
+            "gravel",
+            gravel::height(torus)?,
+            gravel::color(torus)?,
+            0.02,
         ),
     ];
     for (name, height, color, relief) in materials {

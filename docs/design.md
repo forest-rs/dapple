@@ -192,8 +192,11 @@ as wrong-looking output:
 
 - `Scalar`, optionally with declared range and units: `Weight` (0–1),
   `Roughness`, `Height { units }`, `Distance`, `Angle`.
-- `Color` is **always linear, with declared primaries**: Rec. 709/sRGB
-  primaries by default, which is what OpenPBR expects. sRGB transfer encoding
+- `Color` is **always linear, with declared primaries**. Dapple's working
+  space is linear Rec. 709/sRGB primaries by default; that is dapple's
+  declared choice, not OpenPBR's (OpenPBR takes ACEScg when color-space
+  metadata is absent), so the primaries travel with every color across
+  every boundary. sRGB transfer encoding
   exists **only** at the output-encoding stage. There is no "sRGB color" port
   type, so gamma-space blending is impossible to write by accident.
 - `Vector2`, `Vector3`.
@@ -205,7 +208,9 @@ as wrong-looking output:
 - `Direction` for tangent/anisotropy directions: a 2D angle field in tangent
   space. It needs a π-periodic, sign-free representation when averaged or
   blurred; this matters for mips.
-- `Mask` is scalar coverage in 0–1, with coverage-preserving mips.
+- `Mask` is scalar coverage in 0–1. Its reductions are an explicit policy:
+  area average by default, or threshold-coverage preservation for
+  alpha-tested cutouts.
 - `Id` is integer region or cell identifiers. Its interpolation is nearest
   only; you cannot blur an ID.
 
@@ -584,10 +589,11 @@ reusable materials, and come back as modules.
 has its own rule:
 - **Color:** box or Kaiser filtering in linear light, with premultiplied
   alpha where there is opacity.
-- **Masks and opacity:** *coverage-preserving* (Castaño 2010). For each level,
-  the threshold is solved so that the fraction of texels above the consumer's
-  alpha cutoff matches level 0. The cutoff is part of the packing profile.
-  Without this, alpha-tested foliage thins away at distance.
+- **Masks and opacity:** area average by default; for alpha-tested cutouts,
+  *coverage-preserving* (Castaño 2010), where each level's threshold is
+  solved so that the fraction of texels above the consumer's alpha cutoff
+  matches level 0. The cutoff is part of the packing profile and the policy
+  is opt-in. Without it, alpha-tested foliage thins away at distance.
 - **Normals:** filtering averages unit normals and records the resulting
   length loss. Rather than simply renormalizing, **the lost variance moves into
   roughness** (Toksvig; LEAN/Kaplanyan–Hill style). Each level's
@@ -596,11 +602,14 @@ has its own rule:
   sparkly. Anisotropic variance can feed `specular_roughness_anisotropy`
   later.
 - **Directions** use π-periodic averaging.
-- **IDs** use nearest or majority.
+- **IDs** use point or mode over the level-0 footprint, both lossy
+  summaries (see slice 0).
 - **Footprint-aware fields can skip filtering entirely:** a level can be
-  *re-evaluated* at its own footprint instead of downsampled. That gives
-  exact, alias-free mips for pure field graphs, and is often cheaper than it
-  sounds.
+  *re-evaluated* at its own footprint instead of downsampled. How good that
+  level is depends on the compiled expression's sampling contract (see
+  *Sampling correctness* in the milestones): exact where every op integrates
+  exactly under the stated filter, approximate or heuristic otherwise. It is
+  often cheaper than it sounds.
 
 **Files:**
 - PNG (8/16-bit), and EXR or raw float for data;
@@ -739,7 +748,7 @@ purpose, for the reason below.
 
 ### Structured content before breadth
 
-An external review (September 2026) found that dapple's gap is not more
+Two external reviews (September 2026) found that dapple's gap is not more
 noises or effects but **data models for structured material content**. Brick,
 parquet and gravel each work, but each is a scalar field that forgets what
 it is drawing: a brick's identity exists only as a hash inside
@@ -748,103 +757,270 @@ cannot agree about which brick they belong to except by rebuilding the same
 layout in every program. New material families then mean kernel edits
 (another op, another output enum) instead of library content.
 
-The next slices therefore build the data models first, and library breadth
-resumes afterwards as content on top of them. Weathering, the Heitz–Neyret
-by-example blend and material layering become modules of slice 2, not
-nodes.
+The success criterion for the whole sequence: **a new material family is
+usually a new recipe library, not an edit to the kernel's operation enum.**
+Material families (moss, weathered brick, varnished oak) are library
+modules. New kernel primitives are introduced when they provide reusable
+computational capabilities that the existing program model cannot express
+adequately: histogram transforms, global reductions, neighborhood
+operations and iterative solvers can be legitimate primitives.
 
-**Slice 0: typed values through the whole graph.** Field programs already
-type their ports (`Scalar`, `Mask`, `Id`, `Vector2`, `Vector3`,
-`Color(primaries)`, `Normal(frame)`, `Direction`); realization forgets
-them. `RasterData` is a scalar or three-channel raster, `Sample` reads
-scalars, and mips, caches and recipes know nothing of meaning.
-- A realized raster carries its `PortType`, with storage to match: `u32`
-  for IDs, two and three channels for vectors, colors, normals and
-  directions.
-- Realize, sample, filter, cache and serialize preserve the type. IDs and
-  other integers are never filtered (nearest only, no blur, majority mips);
-  colors keep their primaries; normals keep their frame and renormalize;
-  directions stay axial (doubled-angle averaging); masks keep
-  coverage-preserving mips; vectors filter per component.
-- Raster ops declare the types they accept, so blurring an ID is a graph
-  build error, not a wrong image. `dapple_encode`'s per-type mip rules
-  become the one definition the graph also uses.
-- Done when every port type survives realize → mip → sample with its own
-  rule, and cache keys and recipes carry the type.
+The next slices therefore build the data models first. Each slice carries
+its own **acceptance gates**: a small, executable piece of the sampling,
+execution and laboratory work, so those never drift into a backlog "after
+the interesting features". The gallery accompanies the gates; it never
+substitutes for them.
 
-**Slice 1: structured surfaces.**
-- **Element sets:** a set of elements, each with a stable key, a transform,
-  bounds, a variant and typed attributes (a column table). The layout
-  (which elements exist and where) is separate from realization (how they
-  are drawn). Operations: *layout* (bonds, herringbone, grids, from today's
-  `Tiling`), *scatter* (from today's `Scatter`), *filter*, *transform*
-  (per-element jitter from attributes), *instance* (a shape or sub-material
-  per variant) and *composite* (realize into fields and rasters). Keys
-  derive from the layout's own coordinates, so an edit keeps unaffected
-  elements' keys and their randomness.
-- **Region map and region table:** an integer label raster (an `Id` from
-  slice 0) and a table per label: key, centroid, bounds, area, orientation,
-  neighbors and provenance. Compositing an element set preserves identity
-  (label → element key). Regions reconstructed from rasters (flood fill of a
-  mask) are matched to the previous regions by overlap, and splits and
-  merges are recorded as explicit correspondences, never silently
-  renumbered.
+#### Identity, change and correspondence
+
+Four concepts stay distinct everywhere they appear:
+
+| Concept | Meaning |
+|---|---|
+| **Identity** | Which authored or generated element this is. |
+| **Content fingerprint** | Whether its current geometry, attributes or dependencies changed. |
+| **Dense index** | Where it happens to be stored in this realization. |
+| **Correspondence** | How elements or regions in one version relate to those of another. |
+
+- **Identity does not depend on position.** An explicit transform of an
+  existing element preserves its identity and everything derived from it:
+  moving a brick keeps its glaze variation and its chips.
+- **A generator's identity is its logical identity plus the element's
+  anchor and slot**, never the generator's content fingerprint. Changing the
+  mortar width changes every brick's fingerprint and none of their
+  identities. Position, jitter, rotation and dimensions are properties of an
+  element, not its identity.
+- **Topology changes may replace elements.** Which edits replace which
+  elements is documented per generator, with a correspondence where one is
+  known, rather than being an accident of hashing.
+- **Canonical reconstruction is the default.** The current inputs alone
+  determine labels, keys and bytes. Matching a result against a previous one
+  produces a separate *correspondence report* and never changes the
+  canonical result, so opening a final recipe and baking it agrees with
+  reaching the same recipe through a history of edits. Authored element
+  identities are preserved whenever they exist. Retained identity is
+  possible only as *persisted identity state* that is serialized in the
+  material document and consumed by a clean rebuild; an incremental cache
+  never becomes an authoring database.
+
+#### Slice 0: semantic types and sampling policies through the whole graph
+
+Field programs already type their ports (`Scalar`, `Mask`, `Id`,
+`Vector2`, `Vector3`, `Color(primaries)`, `Normal(frame)`, `Direction`);
+realization forgets them. `RasterData` is a scalar or three-channel raster,
+`Sample` reads scalars, and mips, caches and recipes know nothing of
+meaning.
+
+- **Realized values preserve their semantic type.** A raster carries its
+  `PortType`, with storage to match: `u32` for IDs, two and three channels
+  for vectors, colors, normals and directions.
+- **Sampling and reduction policies are explicit, validated against the
+  type, and part of derivation identity.** A type says which operations are
+  meaningful; it does not say which meaningful operation a consumer needs.
+  A continuous selection mask keeps its fractional weights under averaging,
+  while an alpha-test cutout may instead preserve the fraction above a
+  threshold, and applying the second rule to a blend mask changes its
+  meaning. So every type has *permitted* reduction policies, each stating
+  what it retains and what it loses, with a documented default:
+  - scalars and masks: area average (default) or, for masks,
+    threshold-coverage preservation at a stated cutoff;
+  - colors: area average in linear light with their primaries;
+  - normals: area average **retaining the mean length** alongside the
+    direction, so a later variance-to-roughness transfer still has the
+    information it needs; renormalization happens where a consumer asks;
+  - directions: axial (doubled-angle) averaging;
+  - vectors: per-component average;
+  - IDs: never filtered. Their only reductions are *point* (the texel at a
+    level's sample point) and *mode over the level-0 footprint* (the most
+    frequent label among the level-0 texels the texel covers, ties to the
+    smallest key). Either is a **lossy summary**: it does not describe
+    every region a texel covers, and repeated majority is not majority
+    over the original footprint, which is why the promise is stated over
+    level 0.
+- Raster ops declare the types and policies they accept, so blurring an ID
+  is a graph-build error, not a wrong image. `dapple_encode`'s per-type
+  rules become the defaults the graph also uses.
+- **Gates:** every port type survives realize → reduce → sample under each
+  permitted policy with its stated retention; an unpermitted policy is
+  refused when the graph is built; policies change fingerprints; a normal
+  chain keeps its mean length through the graph and the packer's roughness
+  adjustment matches a direct computation.
+
+#### Slice 1a: keyed elements and one coherent material
+
+- **Element sets** (`dapple_elements`): elements with identity (above), a
+  transform, bounds, a variant and typed attributes, stored as a column
+  table. The *layout* (which elements exist and where) is separate from
+  *realization* (how they are drawn), so one layout drives every output
+  coherently instead of rerunning similar random choices per channel.
+  First operations: layout (bonds from today's `Tiling`), filter,
+  per-element transform, and composite.
+- **Compositing ownership is explicit** from the first implementation:
+  - *partition / winner*: one element owns a point, with a deterministic
+    tie-break;
+  - *coverage compositing*: several elements contribute, under a declared
+    order or an order-independent rule;
+  - *summary labels*: an exported owner label is identified as a summary.
+    Contributors can be recomputed on request; the representation never
+    equates "the dominant element" with "the only contributor".
+- **Element identity and surface-material identity are separate.** The
+  glaze and the exposed ceramic belong to the same brick while being
+  different materials.
+- **A minimal callable-program contract** comes forward from slice 2 so an
+  element can invoke a reusable surface program: named typed inputs, named
+  typed outputs, explicit resource dependencies, a stable instance identity
+  and an inspectable body. Rust builders are fine, but they produce
+  *inspectable values*, never opaque closures, so serialization, dependency
+  tracking and later shader translation need no rewrite. Each input
+  declares its **execution scope** (per material, per element, per
+  sample), and the dependencies are checked: a per-element value may depend
+  on material parameters and element attributes, never on the sample
+  position. The compiler may hoist further work when it can prove it.
+- **Demo: glazed brickwork.** One brick's identity drives its shape, bevel,
+  glaze (tone, thickness, pooling toward the lower edge), chips, and the
+  ceramic body the chips expose.
+- **Gates** (executable tests, not gallery images):
+  - moving one brick keeps its key and identity-derived appearance, and the
+    affected work covers both its old and new bounds;
+  - changing one brick's glaze leaves unrelated element attributes and
+    unrelated output regions unchanged;
+  - changing realization resolution leaves element identity independent of
+    raster labels and storage order;
+  - reaching the same document through different edit histories gives the
+    same canonical output;
+  - tile scheduling and incremental evaluation agree with a clean reference;
+  - a mixed boundary texel reports ownership labels and contribution
+    semantics without confusing the two.
+
+#### Slice 1b: the structural vocabulary
+
+- **Region maps and region tables:** an integer label raster (an `Id`) and
+  a table per label: identity, centroid, bounds, area, orientation,
+  neighbors and provenance. Regions composited from element sets keep the
+  elements' identity; regions reconstructed from rasters (a flood fill of a
+  mask) are canonical, with split/merge correspondence reported separately.
 - **Curve networks:** polylines and curves with arc length, width profiles,
   tangents and intersections, exposed as fields (distance, along and across
-  coordinates): joints, cracks, veins, grooves.
-- **Morphology and shape processing:** dilate, erode, open and close on
-  masks and per region; insets from distance fields; per-region statistics.
-- **Demo: glazed brickwork**, where one brick's identity drives its shape,
-  bevel, glaze variation (tone, thickness, pooling toward the lower edge),
-  chips, and the substrate the chips expose, all coherently, rendered to
-  the gallery.
+  coordinates) and as element layouts (stitches every 4 mm along a seam,
+  fibers following a curve): joints, cracks, veins, grooves.
+- **Scatter and instance** on element sets (from today's `Scatter`), with
+  variants choosing shapes or sub-materials.
+- **Morphology and shape processing:** dilate, erode, open, close and
+  connected components on masks and per region; insets and bevel profiles
+  from distance fields; edge extraction; per-region statistics.
+- **Gates:** a region round-trips through composite → reconstruct with a
+  correspondence that names every split and merge; curve-driven element
+  spacing is independent of realization resolution.
 
-**Slice 2: reusable materials.**
+#### Slice 2: reusable materials
+
 - **Typed multichannel material values:** a material is its OpenPBR
   parameters, each bound to a constant or a typed output, with auxiliary
-  channels (height, region) kept separate. Distinct operations for
-  *spatial selection* (where material A gives way to B), *detail
-  application* (normal/height detail onto a base) and *coating* (a layer
-  over a base: glaze, varnish, water, moss), each with per-parameter rules
-  (colors linear, roughness in α space, normals by RNM), instead of one
-  vague universal blend. Lowering to a packing profile reports every
-  approximation it makes.
+  channels (height, region) kept separate.
+- **Four material operations, each with its own contract**, rather than one
+  channel-wise blend under different names:
+
+  | Operation | Contract |
+  |---|---|
+  | **Spatial selection** | Select or transition between materials with one shared selection decision across every channel; parameter-space approximations (for example roughness interpolated in α) are documented as approximations. |
+  | **Detail application** | Apply height, slope or normal perturbation in a specified frame, with a defined identity operation. Reoriented normal mapping belongs here, and only here. |
+  | **Optical coating** | Keep base and coat parameters separate where the target represents them (OpenPBR's coat is a dielectric layer that transmits without scattering). |
+  | **Deposit or covering** | A higher-level recipe (moss, dirt, snow) that may change coverage, geometry, material selection and optical properties together. |
+
+  Approximation is **reported where it happens**, in the material
+  operation that collapsed a richer combination, not only when the packer
+  lowers the result. Dapple stays a material compiler; it does not grow a
+  BSDF evaluator.
 - **Parameterized modules:** a public interface of typed parameters with
   units, ranges and defaults, resource inputs and named outputs, with a
-  versioned identity. Instantiation binds parameters explicitly and derives
-  seeds from the instance path; diagnostics and reports keep the module
-  boundary.
-- **Execution frequencies:** each value is computed per material, per
-  element, per region, per sample or per raster pass, declared rather than
-  inferred, so per-brick values are computed once per brick.
+  versioned identity (an oak board exposes board width, grain scale,
+  finish, weathering and seed, not `warp_17.amount`). Instantiation binds
+  parameters explicitly and derives seeds from the instance path;
+  diagnostics keep the module boundary even when compilation inlines it.
+- **A programmable field-IR core:** coordinate access, a fuller arithmetic
+  and vector vocabulary, comparisons and selection, reusable function
+  calls and bounded iteration where a workload justifies it, plus
+  registered operations with declared contracts (output type,
+  dependencies, sampling behavior, deterministic implementation, supported
+  backends) instead of opaque closures.
+- **Execution scopes** extended to per region and per raster pass.
 - **Host-resolved resource inputs:** images and exemplars a host supplies,
   with content identity, semantic type, color information, physical scale
-  and mip policy. The Heitz–Neyret blend and weathering (edge wear from
-  curvature, dirt from AO, moss by orientation) are modules built here.
+  and mip policy; decoding and file access stay outside the `no_std`
+  kernel. The Heitz–Neyret blend and weathering (edge wear from curvature,
+  dirt from AO, moss by orientation) are modules built here.
+- **Image processing by workflow:** value shaping (curves, ramps, smooth
+  thresholds, histogram measurement, percentile remapping, controlled
+  normalization) and directional processing (directional blur,
+  slope-driven sampling, vector displacement, later advection). The
+  scheduler knows each op's category (local stencil, separable pass,
+  reduction, global transform, iterative solve) so locality, parallelism,
+  work reporting and cancellation stay coherent.
+- **Gates:** the same stone, wood and finish modules reused in several
+  assets without duplicating graphs; a material-wide transform moves every
+  channel; each material operation reports its approximations.
 
-**Slice 3: materials on objects.**
-- **Surface evaluation context** through a host interface: world, part and
-  stock-local coordinates kept distinct; tangent frames and derivatives;
-  region identity; host-supplied fields such as thickness, curvature and
-  exposure.
+#### Slice 3: materials on objects
+
+- **Surface evaluation context** through a host interface, with explicitly
+  requested inputs: world, part and **stock-local** coordinates kept
+  distinct (a timber moved into another assembly keeps its grain, and a
+  fresh cut reveals the same stock-local material); tangent frames and
+  derivatives; region identity; host-supplied fields such as thickness,
+  curvature, exposure and distance to a boundary. Dapple owns no scene
+  graph.
 - **A chart-aware baking adapter** generalizing `dapple_exedra`: coverage
-  per chart, seam padding, normal-frame conversion between the chart and
-  the material, and atlas packing.
+  per chart, seam padding, normal-frame conversion between chart and
+  material, consistent sampling across charts, atlas packing, and reported
+  errors or missing inputs.
+- **Gates:** a cut timber or chipped plaster object whose new surfaces
+  agree with the retained construction and material intent.
 
-**Cross-cutting.**
-- **Sampling correctness:** every op classified as exactly band-limited,
-  approximately (fading to a mean), or point-sampled, with a reference
-  integration path (supersampled over the footprint) that measures each
-  op's error. Footprints become anisotropic: a 2 × 2 covariance carried
-  through transforms, warps, slices and charts as `Σ' = J Σ Jᵀ`.
-- **Execution scale:** demand-driven outputs (realize only what a consumer
-  asks for); tile storage with an eviction policy; multi-output
-  compilation, so a color's channels share one program instead of three;
-  deterministic parallel CPU evaluation; backend policies in cache keys;
-  richer metrics.
-- **A headless material lab:** parameter sweeps, contact-sheet previews,
-  and relationship tests (the mortar is darker than every brick; chips only
-  expose substrate) as executable assertions.
+#### Cross-cutting, delivered as gates inside the slices
+
+- **Sampling correctness.** Each op, and each compiled subgraph, states its
+  guarantee in precise terms: *exact integration under a specified filter*,
+  *frequency attenuation*, *heuristic fading to a mean*, or *point
+  evaluation only*. A reference integration path evaluates the **complete
+  underlying expression** at reference sample points and then integrates,
+  because filtering each input does not filter a nonlinear graph
+  (average(f²) ≠ average(f)²); tests compare whole expressions, not only
+  single ops. Footprints become anisotropic as a local linear
+  approximation: a 2 × 2 covariance in a 2D parameter space, and on a
+  surface the 2D footprint plus its differential basis, so that for a
+  surface map with 3 × 2 Jacobian `J` the material-space footprint
+  `J Σ Jᵀ` (3 × 3, rank ≤ 2) keeps its orientation. Subpixel variation can
+  survive as coverage, normal variation, roughness or a distributional
+  approximation rather than always fading to a constant.
+- **Execution scale:** demand-driven outputs (a consumer requests an
+  output, region, resolution or mip); tile storage with eviction and
+  reconstruction, later disk caches; multi-output compilation so related
+  channels share one program; deterministic parallel CPU evaluation;
+  explicit backend policies (a reproducible reference with pinned numerics,
+  accelerated backends with declared tolerance, a shader-compatible subset)
+  in cache keys; metrics for peak resident bytes, bytes copied, primitive
+  evaluations, tiles recomputed, compilation cost and work avoided.
+- **A headless material laboratory:** parameter sweeps, contact sheets,
+  close-ups, grazing-angle views and mip/LOD comparisons through an
+  external renderer, with machine-readable reports (ranges, invalid values,
+  seam errors, unsupported export channels, incremental-versus-clean
+  agreement) and relationship tests: a seed change never violates
+  constraints; **raising resolution never changes physical feature size**;
+  moving a shape across a periodic boundary stays consistent; an
+  incremental edit equals a clean recompute; a material-wide transform
+  leaves no channel behind.
+- **A portable material package:** module interface, graph, dependencies,
+  resources or resource requirements, presets, semantic output
+  declarations and expected engine capabilities, with the editable source
+  representation kept distinct from an optimized execution artifact.
+
+**Beyond parity: authoring by constraints and measurements.** Instead of
+exposing twenty unrelated knobs, a material can target measurable
+statements: roughly 8% exposed substrate, chips concentrated near
+boundaries, grain spacing within a range, average appearance retained as
+detail goes subpixel. This starts with measurable outputs and parameter
+sweeps; optimization comes later (spatial gradients are not gradients with
+respect to authoring parameters).
 
 **Afterwards:** library breadth as modules; runtime procedural detail (field
 IR → Slang for lightweald shaders, micro-detail and anti-repetition, and a
@@ -867,17 +1043,21 @@ GPU preview backend).
 5. **Lightweald slots:** which of the parameters that vary spatially and lack a
    slot today (`subsurface_color`, `transmission_color`, `emission_luminance`,
    geometry tangent) lightweald adds. Leaves want `subsurface_color` first.
-6. **Where structured surfaces live:** proposed: a new `no_std` crate,
+6. **Where structured surfaces live:** decided: a new `no_std` crate,
    `dapple_elements`, for element sets, region maps and tables, and curve
    networks, depending on `dapple_field` and `dapple_raster`; `Op::Tiling`
    and `Op::Scatter` stay as the field-level lowering of layouts without
    attributes.
-7. **Element keys:** proposed: 64-bit keys from the keyed hash of the
-   layout's identity and the element's lattice anchor, stable under edits
-   that do not move the element; collisions are checked per set.
-8. **The module format:** Rust builders first, as today; whether modules
-   also get a data form beside `dapple_graph::Recipe` is decided in
-   slice 2.
+7. **Element keys:** decided: 64-bit keys from the keyed hash of the
+   layout's *logical* identity (a name given by its author, never its
+   content fingerprint) and the element's anchor and slot. Keys are
+   independent of position and transform, so moving an element keeps its
+   key; parameter edits that keep topology keep every key; topology changes
+   replace elements as each generator documents. Collisions are refused per
+   set.
+8. **The module format:** decided for now: Rust builders that produce
+   inspectable values (never opaque closures); whether modules also get a
+   data form beside `dapple_graph::Recipe` is decided in slice 2.
 
 ## References
 

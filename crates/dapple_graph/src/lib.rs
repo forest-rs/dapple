@@ -253,8 +253,11 @@ struct TileState {
     /// What the previous output was computed from: the input program's
     /// fingerprint, or the raster operation and its input grid.
     source: Option<Source>,
-    output: Option<RasterData>,
+    /// The previous output, shared with the graph's output value.
+    output: Option<Arc<RasterValue>>,
     keys: Vec<InternId>,
+    /// Tiles still to recompute against `source`, left by a tile budget.
+    pending: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -383,6 +386,12 @@ impl DappleExecutor {
     #[must_use]
     pub const fn tile_report(&self) -> TileReport {
         self.tiles.report
+    }
+
+    /// Limits the tiles one run recomputes; see
+    /// [`MaterialGraph::set_tile_budget`].
+    pub fn set_tile_budget(&mut self, budget: Option<u64>) {
+        self.tiles.budget = budget;
     }
 }
 
@@ -636,6 +645,18 @@ fn refresh<T: Copy>(
     }
 }
 
+/// Keeps `value` as the node's output, shared with the graph, and notes
+/// tiles a budget left pending so the node runs again.
+fn keep(tiles: &mut Tiles, node: u32, state: &mut TileState, value: RasterValue) -> GraphValue {
+    if !state.pending.is_empty() {
+        tiles.report.pending_tiles += state.pending.len() as u64;
+        tiles.pending_nodes.push(node);
+    }
+    let value = Arc::new(value);
+    state.output = Some(Arc::clone(&value));
+    GraphValue::Raster(value)
+}
+
 /// Keeps the new output, reports the work, and marks the dependents of the
 /// tiles whose bits changed. Returns whether any changed.
 fn settle(
@@ -650,6 +671,7 @@ fn settle(
     let previous = state
         .output
         .as_ref()
+        .map(|v| &v.data)
         .filter(|previous| previous.same_grid(output));
     if previous.is_none() || state.keys.len() != grid.count() as usize {
         state.keys = tiles.keys(node, grid, &state.keys);
@@ -688,7 +710,7 @@ fn run_realize(
     let realization = Realization::period(domain, width, height).map_err(NodeError::Raster)?;
     let fingerprint = program.fingerprint();
     let grid = Grid::new(width, height, tiles.size(), Edge::Wrap);
-    let previous = match (&state.source, &state.output) {
+    let previous = match (&state.source, state.output.as_ref().map(|v| &v.data)) {
         (
             Some(Source::Realize {
                 program: last,
@@ -707,6 +729,7 @@ fn run_realize(
         previous.map(|(last, _)| last),
         fingerprint,
     );
+    let dirty = tiles.schedule(&mut state.pending, dirty, grid.count());
     let (raster, recomputed) = refresh(
         grid,
         &dirty,
@@ -727,8 +750,7 @@ fn run_realize(
         width,
         height,
     });
-    state.output = Some(value.data.clone());
-    Ok(GraphValue::Raster(Arc::new(value)))
+    Ok(keep(tiles, node, state, value))
 }
 
 fn run_normals(
@@ -748,7 +770,7 @@ fn run_normals(
     let realization = Realization::period(domain, width, height).map_err(NodeError::Raster)?;
     let fingerprint = program.fingerprint();
     let grid = Grid::new(width, height, tiles.size(), Edge::Wrap);
-    let previous = match (&state.source, &state.output) {
+    let previous = match (&state.source, state.output.as_ref().map(|v| &v.data)) {
         (
             Some(Source::Normals {
                 program: last,
@@ -768,6 +790,7 @@ fn run_normals(
         previous.map(|(last, _)| last),
         fingerprint,
     );
+    let dirty = tiles.schedule(&mut state.pending, dirty, grid.count());
     let (raster, recomputed) = refresh(
         grid,
         &dirty,
@@ -792,8 +815,7 @@ fn run_normals(
         height,
         scale: scale.to_bits(),
     });
-    state.output = Some(value.data.clone());
-    Ok(GraphValue::Raster(Arc::new(value)))
+    Ok(keep(tiles, node, state, value))
 }
 
 /// Runs one raster operation tile-wise: `recompute` returns the new data and
@@ -848,7 +870,7 @@ fn run_raster(
         && state
             .output
             .as_ref()
-            .is_some_and(|out| out.grid(tiles.size()) == grid);
+            .is_some_and(|out| out.data.grid(tiles.size()) == grid);
     if !same || state.keys.len() != grid.count() as usize {
         // A new operation, input, or grid: re-key and re-wire the tiles.
         state.keys = tiles.keys(node, grid, &state.keys);
@@ -877,6 +899,7 @@ fn run_raster(
     let dirty: Dirty = if !same {
         None
     } else if footprint.is_none() {
+        // Global: pending tiles cannot occur, as every run recomputes whole.
         if value.changed {
             None
         } else {
@@ -885,7 +908,9 @@ fn run_raster(
     } else {
         Some(marked)
     };
-    let previous_scalar = match &state.output {
+    let dirty = tiles.schedule(&mut state.pending, dirty, grid.count());
+    let previous_output = state.output.clone();
+    let previous_scalar = match previous_output.as_ref().map(|v| &v.data) {
         Some(RasterData::Scalar(r)) if same => Some(r),
         _ => None,
     };
@@ -895,7 +920,7 @@ fn run_raster(
             (RasterData::Scalar(r), t)
         }
         RasterParams::HeightToNormal(op) => {
-            let previous = match &state.output {
+            let previous = match previous_output.as_ref().map(|v| &v.data) {
                 Some(RasterData::Vector3(r)) if same => Some(r),
                 _ => None,
             };
@@ -922,8 +947,7 @@ fn run_raster(
         tile_space: node,
     };
     state.source = Some(source);
-    state.output = Some(out.data.clone());
-    Ok(GraphValue::Raster(Arc::new(out)))
+    Ok(keep(tiles, node, state, out))
 }
 
 impl Executor for DappleExecutor {
@@ -1210,8 +1234,30 @@ impl MaterialGraph {
     /// Realize and raster nodes recompute only the tiles their input changes
     /// reach; [`MaterialGraph::tile_report`] counts the work.
     pub fn run(&mut self) -> Result<RunSummary, MaterialError> {
-        self.graph.executor_mut().tiles.report = TileReport::default();
-        Ok(self.graph.run_all()?)
+        self.graph.executor_mut().tiles.begin_run();
+        let summary = self.graph.run_all()?;
+        // Nodes a tile budget left unfinished run again next time.
+        let pending = core::mem::take(&mut self.graph.executor_mut().tiles.pending_nodes);
+        for key in pending {
+            let node = self.order[key as usize];
+            self.graph
+                .invalidate_input(Self::params_name(&self.entries[&node].label));
+        }
+        Ok(summary)
+    }
+
+    /// Limits each [`MaterialGraph::run`] to recomputing about `budget`
+    /// tiles, or removes the limit with `None`.
+    ///
+    /// Tiles past the budget stay pending in their node, which runs again
+    /// on the next run, so repeated runs converge to exactly the unbudgeted
+    /// result. Until then those nodes' rasters mix recomputed and stale
+    /// tiles; [`TileReport::pending_tiles`] counts what is left. A node with
+    /// no reusable output (a first run, a new grid or operation, a global
+    /// operation, or an unbounded change) still computes whole, and that
+    /// work counts against the budget.
+    pub fn set_tile_budget(&mut self, budget: Option<u64>) {
+        self.graph.executor_mut().set_tile_budget(budget);
     }
 
     /// Tile work done by the last [`MaterialGraph::run`].

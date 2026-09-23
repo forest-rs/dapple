@@ -551,3 +551,31 @@ fn normals_nodes_recompute_locally_and_match_fresh_graphs() {
         NodeFingerprint::Raster(g.raster_value(normals).unwrap().fingerprint)
     );
 }
+
+#[test]
+fn tile_budgets_spread_work_and_converge_exactly() {
+    let mut s = stamped(0.2, 1);
+    s.graph.run().unwrap();
+    s.graph.set_tile_budget(Some(3));
+    s.graph.set_field_op(s.disk, disk_op(0.6)).unwrap();
+    let mut runs = 0;
+    loop {
+        s.graph.run().unwrap();
+        runs += 1;
+        let report = s.graph.tile_report();
+        // The distance transform is global and recomputes whole when its
+        // input changed; everything else stays within the budget.
+        let local = report.tiles_recomputed - 64 * report.whole_recomputes;
+        assert!(local <= 3, "run {runs}: {report:?}");
+        if report.pending_tiles == 0 {
+            break;
+        }
+        assert!(runs < 100, "budgeted runs must converge");
+    }
+    assert!(runs > 1, "the edit should need several budgeted runs");
+    let mut fresh = stamped(0.6, 1);
+    fresh.graph.run().unwrap();
+    assert_eq!(digests(&s), digests(&fresh));
+    // Settled: nothing left to run.
+    assert_eq!(s.graph.run().unwrap().executed_nodes, 0);
+}

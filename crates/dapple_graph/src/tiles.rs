@@ -49,6 +49,9 @@ pub struct TileReport {
     /// Realizations recomputed whole only because their field changed with
     /// no stated region, although a previous raster existed.
     pub unbounded_changes: u64,
+    /// Tiles a tile budget left for later runs, over all nodes. Their nodes'
+    /// rasters mix recomputed and stale tiles until this is zero.
+    pub pending_tiles: u64,
 }
 
 /// The tile layout of one raster.
@@ -147,6 +150,12 @@ pub(crate) struct Tiles {
     interner: Interner<TileKey>,
     tracker: InvalidationTracker<InternId>,
     pub(crate) report: TileReport,
+    /// Tiles each run may recompute.
+    pub(crate) budget: Option<u64>,
+    /// What is left of this run's budget.
+    remaining: Option<u64>,
+    /// Nodes left with pending tiles by this run.
+    pub(crate) pending_nodes: Vec<u32>,
 }
 
 impl Tiles {
@@ -159,6 +168,43 @@ impl Tiles {
 
     pub(crate) const fn size(&self) -> u32 {
         self.size
+    }
+
+    /// Starts a run: a fresh report and budget.
+    pub(crate) fn begin_run(&mut self) {
+        self.report = TileReport::default();
+        self.remaining = self.budget;
+        self.pending_nodes.clear();
+    }
+
+    /// The tiles to recompute now, from a node's `dirty` tiles and those it
+    /// left `pending`, within what is left of the run's budget; the rest
+    /// stay pending. A whole recomputation (`None`) clears the pending tiles
+    /// and spends `count` tiles of the budget.
+    pub(crate) fn schedule(
+        &mut self,
+        pending: &mut Vec<u32>,
+        dirty: Option<Vec<u32>>,
+        count: u32,
+    ) -> Option<Vec<u32>> {
+        let Some(mut tiles) = dirty else {
+            pending.clear();
+            if let Some(left) = &mut self.remaining {
+                *left = left.saturating_sub(u64::from(count));
+            }
+            return None;
+        };
+        tiles.append(pending);
+        tiles.sort_unstable();
+        tiles.dedup();
+        if let Some(left) = &mut self.remaining {
+            let now = usize::try_from(*left)
+                .unwrap_or(usize::MAX)
+                .min(tiles.len());
+            *pending = tiles.split_off(now);
+            *left -= now as u64;
+        }
+        Some(tiles)
     }
 
     /// Interned keys for every tile of `node` on `grid`, in tile order.

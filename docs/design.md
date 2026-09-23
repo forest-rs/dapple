@@ -305,8 +305,18 @@ nodes at mip level 0:
   their input changed. `TileReport` counts recomputed, reused and changed
   tiles, whole recomputes, and unbounded changes.
 
-Still to come: the byte-budgeted tile cache, work budgets with partial
-progress, per-level (mip) tiles, and `Sample`'s bounded-warp dependencies.
+- Tile budgets (`MaterialGraph::set_tile_budget`) cap the tiles one run
+  recomputes. The rest stay pending in their node, which runs again, so
+  repeated runs converge exactly to the unbudgeted result;
+  `TileReport::pending_tiles` says how much is left.
+- Each node shares its retained output with the graph's output value
+  rather than copying it, so retention costs nothing beyond the outputs
+  themselves. A byte-budgeted cache would only pay off once outputs
+  themselves can be dropped and recomputed on demand. That waits for a
+  consumer that needs it.
+
+Still to come: mip levels and `Sample` as graph nodes, with per-level tiles
+and bounded-warp tile dependencies.
 
 ### Fingerprints and caches
 

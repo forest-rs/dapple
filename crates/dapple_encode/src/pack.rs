@@ -57,6 +57,17 @@ pub struct MaterialMaps {
     pub anisotropy_direction: Option<Image>,
     /// OpenPBR `specular_roughness_anisotropy`, 1 channel.
     pub specular_roughness_anisotropy: Option<Image>,
+    /// OpenPBR `subsurface_weight`, 1 channel. On a thin-walled material
+    /// (`geometry_thin_walled`, a material constant rather than a map), this
+    /// is diffuse translucency: the share of light scattered through a thin
+    /// sheet such as a leaf.
+    pub subsurface_weight: Option<Image>,
+    /// OpenPBR `subsurface_color`, 3 channels: the tint of that scattered
+    /// light.
+    pub subsurface_color: Option<Image>,
+    /// OpenPBR `transmission_weight`, 1 channel: specular transmission, as
+    /// through glass.
+    pub transmission_weight: Option<Image>,
 }
 
 /// Settings for [`pack()`].
@@ -76,6 +87,10 @@ pub struct PackSettings {
     /// `specular_roughness_anisotropy` where a direction map is given but no
     /// strength map.
     pub specular_roughness_anisotropy: f32,
+    /// `subsurface_weight` where a color map is given but no weight map.
+    pub subsurface_weight: f32,
+    /// `subsurface_color` where a weight map is given but no color map.
+    pub subsurface_color: [f32; 3],
     /// Widen roughness mips by the variance of the normals they cover
     /// (Toksvig). Off, roughness is filtered alone and the textures match a
     /// plain bake of the same maps.
@@ -85,7 +100,7 @@ pub struct PackSettings {
 impl Default for PackSettings {
     /// Box filtering, no coverage preservation, normal variance folded into
     /// roughness, and OpenPBR's defaults: roughness 0.3, base color 0.8,
-    /// metalness 0, anisotropy 0.
+    /// metalness 0, anisotropy 0, subsurface weight 0 and color 0.8.
     fn default() -> Self {
         Self {
             filter: Filter::Box,
@@ -94,6 +109,8 @@ impl Default for PackSettings {
             base_color: [0.8; 3],
             base_metalness: 0.0,
             specular_roughness_anisotropy: 0.0,
+            subsurface_weight: 0.0,
+            subsurface_color: [0.8; 3],
             fold_normal_variance: true,
         }
     }
@@ -139,6 +156,9 @@ pub struct PackReport {
     pub coverage: Vec<CoverageLevel>,
     /// Largest normal variance moved into roughness, per level.
     pub normal_variance: Vec<f32>,
+    /// Maps given that the profile has no texture for, in [`MaterialMaps`]
+    /// field order; their values are not in the bundle.
+    pub unsupported: Vec<&'static str>,
 }
 
 /// Textures for one profile.
@@ -147,7 +167,8 @@ pub struct Bundle {
     /// The profile the textures follow.
     pub profile: Profile,
     /// The textures, in a fixed order: `base_color`, `normal`, `orm`,
-    /// `anisotropy` (raw: one per parameter, in [`MaterialMaps`] field
+    /// `anisotropy`, then translucency: `diffuse_transmission` (glTF) and
+    /// `transmission` (raw: one per parameter, in [`MaterialMaps`] field
     /// order).
     pub textures: Vec<EncodedTexture>,
     /// Measurements.
@@ -256,6 +277,22 @@ fn encode(
 /// glTF normal maps store `+Y` toward the top of the image, the glTF
 /// convention: the input's `+Y` runs along increasing rows, which files store
 /// top to bottom, so Y is negated.
+///
+/// Translucency:
+///
+/// - `transmission` (R `transmission_weight`, linear) is Lightweald's
+///   `Transmission` slot and glTF's `KHR_materials_transmission`
+///   `transmissionTexture`.
+/// - glTF packs thin-walled subsurface as `diffuse_transmission`: sRGB RGB
+///   `subsurface_color` and linear A `subsurface_weight`, the layout of
+///   `KHR_materials_diffuse_transmission`, whose
+///   `diffuseTransmissionColorTexture` reads RGB and
+///   `diffuseTransmissionTexture` reads A of the same image. That extension
+///   models OpenPBR's thin-walled subsurface; on a volumetric material the
+///   projection is lossy. Color mips are weighted by the weight, like base
+///   color by opacity.
+/// - Lightweald has no subsurface slot yet, so its profile lists the
+///   subsurface maps in [`PackReport::unsupported`] instead of packing them.
 pub fn pack(
     maps: &MaterialMaps,
     profile: Profile,
@@ -277,6 +314,9 @@ pub fn pack(
         "specular_roughness_anisotropy",
         1,
     )?;
+    check(maps.subsurface_weight.as_ref(), "subsurface_weight", 1)?;
+    check(maps.subsurface_color.as_ref(), "subsurface_color", 3)?;
+    check(maps.transmission_weight.as_ref(), "transmission_weight", 1)?;
     let present = [
         ("base_color", maps.base_color.as_ref()),
         ("opacity", maps.opacity.as_ref()),
@@ -289,6 +329,9 @@ pub fn pack(
             "specular_roughness_anisotropy",
             maps.specular_roughness_anisotropy.as_ref(),
         ),
+        ("subsurface_weight", maps.subsurface_weight.as_ref()),
+        ("subsurface_color", maps.subsurface_color.as_ref()),
+        ("transmission_weight", maps.transmission_weight.as_ref()),
     ];
     let Some(first) = present.iter().find_map(|(_, i)| *i) else {
         return Ok(Bundle {
@@ -305,6 +348,11 @@ pub fn pack(
     if !(0.0..=1.0).contains(&settings.specular_roughness) {
         return Err(EncodeError::InvalidParameter {
             name: "specular_roughness",
+        });
+    }
+    if !(0.0..=1.0).contains(&settings.subsurface_weight) {
+        return Err(EncodeError::InvalidParameter {
+            name: "subsurface_weight",
         });
     }
     let edge = first.edge;
@@ -562,6 +610,105 @@ pub fn pack(
                 ));
             }
         }
+    }
+    let subsurface = maps.subsurface_weight.is_some() || maps.subsurface_color.is_some();
+    match profile {
+        Profile::Lightweald => {
+            for (name, image) in [
+                ("subsurface_weight", &maps.subsurface_weight),
+                ("subsurface_color", &maps.subsurface_color),
+            ] {
+                if image.is_some() {
+                    report.unsupported.push(name);
+                }
+            }
+        }
+        Profile::Gltf if subsurface => {
+            // Color weighted by the weight, as base color by opacity.
+            let mut values = Vec::with_capacity(first.texels() * 4);
+            for i in 0..first.texels() {
+                match &maps.subsurface_color {
+                    Some(c) => values.extend_from_slice(&c.values[i * 3..i * 3 + 3]),
+                    None => values.extend_from_slice(&settings.subsurface_color),
+                }
+                values.push(
+                    maps.subsurface_weight
+                        .as_ref()
+                        .map_or(settings.subsurface_weight, |w| w.values[i]),
+                );
+            }
+            let chain = color_mips(
+                &Image {
+                    channels: 4,
+                    values,
+                    ..first.clone()
+                },
+                settings.filter,
+            );
+            textures.push(encode(
+                "diffuse_transmission",
+                PixelFormat::Rgba8Srgb,
+                level_count,
+                edge,
+                |level, i, out| {
+                    let t = &chain.levels()[level].values[i * 4..i * 4 + 4];
+                    for &c in &t[..3] {
+                        out.push(quantize_unorm8(linear_to_srgb(c)));
+                    }
+                    out.push(quantize_unorm8(t[3]));
+                },
+                size,
+            ));
+        }
+        Profile::Gltf => {}
+        Profile::Raw => {
+            let weight = maps
+                .subsurface_weight
+                .as_ref()
+                .map(|w| data_mips(w, settings.filter));
+            if weight.is_some() {
+                textures.push(encode(
+                    "subsurface_weight",
+                    PixelFormat::R8Unorm,
+                    level_count,
+                    edge,
+                    |level, i, out| out.push(quantize_unorm8(value(&weight, level, i, 0.0))),
+                    size,
+                ));
+            }
+            if let Some(color) = &maps.subsurface_color {
+                let chain = data_mips(color, settings.filter);
+                textures.push(encode(
+                    "subsurface_color",
+                    PixelFormat::Rgba8Unorm,
+                    level_count,
+                    edge,
+                    |level, i, out| {
+                        let t = &chain.levels()[level].values[i * 3..i * 3 + 3];
+                        for &c in t {
+                            out.push(quantize_unorm8(c));
+                        }
+                        out.push(255);
+                    },
+                    size,
+                ));
+            }
+        }
+    }
+    if let Some(transmission) = &maps.transmission_weight {
+        let chain = Some(data_mips(transmission, settings.filter));
+        textures.push(encode(
+            if profile == Profile::Raw {
+                "transmission_weight"
+            } else {
+                "transmission"
+            },
+            PixelFormat::R8Unorm,
+            level_count,
+            edge,
+            |level, i, out| out.push(quantize_unorm8(value(&chain, level, i, 0.0))),
+            size,
+        ));
     }
     if profile != Profile::Raw {
         for texture in &mut textures {
@@ -860,5 +1007,74 @@ mod tests {
         };
         assert_eq!(roughness(false), quantize_unorm8(0.3));
         assert!(roughness(true) > roughness(false) + 50);
+    }
+
+    #[test]
+    fn translucency_packs_per_profile() {
+        let maps = MaterialMaps {
+            subsurface_weight: Some(flat(1, &[0.6])),
+            subsurface_color: Some(flat(3, &[0.5, 0.9, 0.2])),
+            transmission_weight: Some(flat(1, &[0.25])),
+            ..MaterialMaps::default()
+        };
+        let settings = PackSettings::default();
+
+        let gltf = pack(&maps, Profile::Gltf, &settings).unwrap();
+        let names: Vec<_> = gltf.textures.iter().map(|t| t.name).collect();
+        assert_eq!(names, ["diffuse_transmission", "transmission"]);
+        let diffuse = gltf.texture("diffuse_transmission").unwrap();
+        assert_eq!(diffuse.format, PixelFormat::Rgba8Srgb);
+        assert_eq!(diffuse.kind, TextureKind::Color);
+        let texel = &diffuse.levels[0][..4];
+        assert_eq!(texel[0], quantize_unorm8(linear_to_srgb(0.5)));
+        assert_eq!(texel[1], quantize_unorm8(linear_to_srgb(0.9)));
+        assert_eq!(texel[3], quantize_unorm8(0.6));
+        // A uniform color survives its mips unchanged despite the weighting.
+        let last = diffuse.levels.last().unwrap();
+        assert_eq!(&last[..3], &texel[..3]);
+        let transmission = gltf.texture("transmission").unwrap();
+        assert_eq!(transmission.format, PixelFormat::R8Unorm);
+        assert_eq!(transmission.levels[0][0], quantize_unorm8(0.25));
+        assert!(gltf.report.unsupported.is_empty());
+
+        let lightweald = pack(&maps, Profile::Lightweald, &settings).unwrap();
+        let names: Vec<_> = lightweald.textures.iter().map(|t| t.name).collect();
+        assert_eq!(names, ["transmission"]);
+        assert_eq!(
+            lightweald.report.unsupported,
+            ["subsurface_weight", "subsurface_color"]
+        );
+
+        let raw = pack(&maps, Profile::Raw, &settings).unwrap();
+        let names: Vec<_> = raw.textures.iter().map(|t| t.name).collect();
+        assert_eq!(
+            names,
+            [
+                "subsurface_weight",
+                "subsurface_color",
+                "transmission_weight"
+            ]
+        );
+
+        // A color alone uses the default weight, and a bad default is refused.
+        let color_only = MaterialMaps {
+            subsurface_color: Some(flat(3, &[0.5, 0.9, 0.2])),
+            ..MaterialMaps::default()
+        };
+        let packed = pack(&color_only, Profile::Gltf, &settings).unwrap();
+        assert_eq!(
+            packed.texture("diffuse_transmission").unwrap().levels[0][3],
+            0
+        );
+        let bad = PackSettings {
+            subsurface_weight: 2.0,
+            ..settings
+        };
+        assert!(pack(&color_only, Profile::Gltf, &bad).is_err());
+        let mismatched = MaterialMaps {
+            subsurface_color: Some(flat(1, &[0.5])),
+            ..MaterialMaps::default()
+        };
+        assert!(pack(&mismatched, Profile::Gltf, &settings).is_err());
     }
 }

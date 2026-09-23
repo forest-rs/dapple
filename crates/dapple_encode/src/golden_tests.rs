@@ -51,6 +51,9 @@ fn material() -> MaterialMaps {
         occlusion: Some(image(1, occlusion)),
         anisotropy_direction: None,
         specular_roughness_anisotropy: None,
+        subsurface_weight: None,
+        subsurface_color: None,
+        transmission_weight: None,
     }
 }
 

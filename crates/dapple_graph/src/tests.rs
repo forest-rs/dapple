@@ -187,3 +187,167 @@ fn misuse_is_reported() {
         "{error:?}"
     );
 }
+
+/// noise max disk → realize (128² in 16-texel tiles) → blur, normals, and a
+/// distance transform.
+struct Stamped {
+    graph: MaterialGraph,
+    disk: NodeId,
+    noise: NodeId,
+    map: NodeId,
+    soft: NodeId,
+    normals: NodeId,
+    distance: NodeId,
+}
+
+fn disk_op(x: f32) -> Op {
+    Op::Disk {
+        domain: domain(),
+        center: [x, 0.3],
+        radius: 0.05,
+        softness: 0.01,
+    }
+}
+
+fn noise_op(seed: u64) -> Op {
+    Op::Noise {
+        basis: Basis::Gradient,
+        domain: domain(),
+        frequency: [8.0, 8.0],
+        seed,
+    }
+}
+
+fn stamped(x: f32, seed: u64) -> Stamped {
+    let mut g = MaterialGraph::with_tile_size(16);
+    let noise = g.field("noise", noise_op(seed), &[]).unwrap();
+    let disk = g.field("disk", disk_op(x), &[]).unwrap();
+    let height = g
+        .field(
+            "height",
+            Op::Max {
+                a: operand(0),
+                b: operand(1),
+            },
+            &[noise, disk],
+        )
+        .unwrap();
+    let map = g.realize("map", height, 128, 128).unwrap();
+    let soft = g
+        .raster(
+            "soft",
+            RasterParams::Blur(GaussianBlur { sigma: 0.01 }),
+            map,
+        )
+        .unwrap();
+    let normals = g
+        .raster(
+            "normals",
+            RasterParams::HeightToNormal(HeightToNormal { scale: 0.05 }),
+            soft,
+        )
+        .unwrap();
+    let distance = g
+        .raster(
+            "distance",
+            RasterParams::DistanceTransform(DistanceTransform { threshold: 0.9 }),
+            map,
+        )
+        .unwrap();
+    Stamped {
+        graph: g,
+        disk,
+        noise,
+        map,
+        soft,
+        normals,
+        distance,
+    }
+}
+
+fn digests(s: &Stamped) -> [u64; 4] {
+    let digest = |node| match &s.graph.raster_value(node).unwrap().data {
+        RasterData::Scalar(r) => r.digest(),
+        RasterData::Vector3(r) => r.digest(),
+    };
+    [
+        digest(s.map),
+        digest(s.soft),
+        digest(s.normals),
+        digest(s.distance),
+    ]
+}
+
+#[test]
+fn moving_a_disk_recomputes_only_nearby_tiles() {
+    let mut s = stamped(0.2, 1);
+    s.graph.run().unwrap();
+    let first = s.graph.tile_report();
+    // Four rasters of 64 tiles, all computed once.
+    assert_eq!(first.tiles_recomputed, 4 * 64);
+    assert_eq!(first.whole_recomputes, 4);
+
+    s.graph.set_field_op(s.disk, disk_op(0.25)).unwrap();
+    s.graph.run().unwrap();
+    let edit = s.graph.tile_report();
+    assert_eq!(edit.unbounded_changes, 0);
+    // The distance transform is global, so it alone recomputes whole.
+    assert_eq!(edit.whole_recomputes, 1);
+    let local = edit.tiles_recomputed - 64;
+    assert!(local > 0 && local < 3 * 64 / 4, "{edit:?}");
+    assert!(edit.tiles_reused >= 3 * 64 - local, "{edit:?}");
+
+    // Bit-identical to computing the final graph from scratch.
+    let mut fresh = stamped(0.25, 1);
+    fresh.graph.run().unwrap();
+    assert_eq!(digests(&s), digests(&fresh));
+}
+
+#[test]
+fn unbounded_edits_recompute_whole_and_say_so() {
+    let mut s = stamped(0.2, 1);
+    s.graph.run().unwrap();
+    s.graph.set_field_op(s.noise, noise_op(2)).unwrap();
+    s.graph.run().unwrap();
+    let edit = s.graph.tile_report();
+    assert_eq!(edit.unbounded_changes, 1);
+    assert_eq!(edit.tiles_recomputed, 4 * 64);
+    let mut fresh = stamped(0.2, 2);
+    fresh.graph.run().unwrap();
+    assert_eq!(digests(&s), digests(&fresh));
+}
+
+#[test]
+fn unchanged_tiles_stop_propagating() {
+    let mut s = stamped(0.2, 1);
+    s.graph.run().unwrap();
+    // A blur change recomputes the blur and the normals of changed tiles,
+    // not the map or the distance transform.
+    s.graph
+        .set_raster_params(s.soft, RasterParams::Blur(GaussianBlur { sigma: 0.012 }))
+        .unwrap();
+    s.graph.run().unwrap();
+    let edit = s.graph.tile_report();
+    assert_eq!(edit.tiles_recomputed, 2 * 64, "{edit:?}");
+    assert_eq!(s.graph.run_count(s.map), Some(1));
+    assert_eq!(s.graph.run_count(s.distance), Some(1));
+
+    // Moving the disk back and forth by nothing changes no bits.
+    s.graph.set_field_op(s.disk, disk_op(0.2)).unwrap();
+    s.graph.run().unwrap();
+    assert_eq!(s.graph.tile_report().tiles_recomputed, 0);
+}
+
+#[test]
+fn new_resolutions_rebuild_the_tiles() {
+    let mut s = stamped(0.2, 1);
+    s.graph.run().unwrap();
+    s.graph.set_resolution(s.map, 96, 64).unwrap();
+    s.graph.run().unwrap();
+    let edit = s.graph.tile_report();
+    assert_eq!(edit.whole_recomputes, 4);
+    assert_eq!(edit.tiles_recomputed, 4 * 6 * 4);
+    s.graph.set_field_op(s.disk, disk_op(0.21)).unwrap();
+    s.graph.run().unwrap();
+    assert!(s.graph.tile_report().tiles_recomputed < 4 * 24);
+}

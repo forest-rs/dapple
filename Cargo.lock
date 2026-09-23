@@ -184,6 +184,9 @@ dependencies = [
  "dapple_field",
  "dapple_raster",
  "execution_graph",
+ "glam",
+ "invalidation",
+ "libm",
 ]
 
 [[package]]

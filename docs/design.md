@@ -287,6 +287,27 @@ tile granularity with an `invalidation` tracker:
   `deterministic()` ordering, so parallel tile work is scheduled and merged in
   a fixed order.
 
+The first slice (`dapple_graph`) implements this for realize and raster
+nodes at mip level 0:
+
+- Field values carry a `Change` (`Nowhere`, `Within(regions)`, `Everywhere`)
+  relative to the producing node's previous program. `Op::change_from`
+  states an edit's region; the first op that can is `Op::Disk`. Pointwise
+  ops carry their inputs' regions; `Transform`, `Demote` and the warped
+  input of `Warp` make a change unbounded.
+- Realize nodes re-realize the tiles whose texel centers fall in the change
+  grown by half the footprint (`realize_into`); raster ops recompute tiles
+  with `RasterOp::apply_into`. Both equal whole passes bit for bit.
+- Instead of fingerprinting tiles, a node compares each recomputed tile's
+  bits with its previous output and marks only the direct dependents of
+  tiles that changed, so an edit that leaves a tile unchanged stops there.
+- Global ops (no footprint) have no tile edges and recompute whole when
+  their input changed. `TileReport` counts recomputed, reused and changed
+  tiles, whole recomputes, and unbounded changes.
+
+Still to come: the byte-budgeted tile cache, work budgets with partial
+progress, per-level (mip) tiles, and `Sample`'s bounded-warp dependencies.
+
 ### Fingerprints and caches
 
 Every node output has a fingerprint:

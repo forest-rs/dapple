@@ -14,6 +14,9 @@ categories = ["graphics", "no-std"]
 dapple_field.workspace = true
 dapple_raster.workspace = true
 execution_graph.workspace = true
+glam.workspace = true
+invalidation.workspace = true
+libm.workspace = true
 
 [lints]
 workspace = true

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/dapple_field",
+    "examples/field_gallery",
 ]
 
 [workspace.package]
@@ -70,3 +71,4 @@ clippy.allow_attributes = "warn"
 dapple_field = { path = "crates/dapple_field" }
 glam = { default-features = false, features = ["libm"], version = "0.33.8" }
 libm = "0.2.16"
+png = "0.18.1"

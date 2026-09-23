@@ -1,0 +1,11 @@
+# See the configuration reference at
+# https://github.com/crate-ci/typos/blob/master/docs/reference.md
+
+[default]
+# American English spelling (color, normalize, behavior).
+locale = "en-us"
+
+# Match Inside a Word - Case Insensitive
+[default.extend-words]
+# OpenPBR parameter names (`base_metalness`).
+metalness = "metalness"

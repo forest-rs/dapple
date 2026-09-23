@@ -176,6 +176,7 @@ dependencies = [
  "exedra_math",
  "glam",
  "libm",
+ "serde",
 ]
 
 [[package]]
@@ -188,6 +189,7 @@ dependencies = [
  "glam",
  "invalidation",
  "libm",
+ "serde",
 ]
 
 [[package]]
@@ -197,6 +199,7 @@ dependencies = [
  "dapple_field",
  "glam",
  "libm",
+ "serde",
 ]
 
 [[package]]
@@ -322,6 +325,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a0990707078259d76f65619a692e87c82645be66cbee224173cd1af151e54ba2"
 dependencies = [
  "libm",
+ "serde_core",
 ]
 
 [[package]]
@@ -502,6 +506,36 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "serde"
+version = "1.0.229"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
+dependencies = [
+ "serde_core",
+ "serde_derive",
+]
+
+[[package]]
+name = "serde_core"
+version = "1.0.229"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
+dependencies = [
+ "serde_derive",
+]
+
+[[package]]
+name = "serde_derive"
+version = "1.0.229"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
 
 [[package]]
 name = "shlex"

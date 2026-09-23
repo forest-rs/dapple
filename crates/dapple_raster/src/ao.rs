@@ -25,6 +25,7 @@ const MAX_DIRECTIONS: u32 = 64;
 /// Sample offsets are computed once, relative to the texel, so the result
 /// commutes exactly with rolling a wrapping raster.
 #[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AmbientOcclusion {
     /// Search radius in domain units; finite and positive.
     pub radius: f32,

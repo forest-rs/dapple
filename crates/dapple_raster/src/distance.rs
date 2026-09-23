@@ -21,6 +21,7 @@ use crate::{Edge, Raster, RasterError, RasterOp};
 ///
 /// The footprint is unbounded: any feature can be the nearest.
 #[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DistanceTransform {
     /// Values at or above this are features.
     pub threshold: f32,

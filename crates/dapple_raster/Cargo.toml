@@ -14,12 +14,15 @@ categories = ["graphics", "no-std"]
 dapple_field.workspace = true
 glam.workspace = true
 libm.workspace = true
+serde = { optional = true, workspace = true }
 
 [lints]
 workspace = true
 
 [features]
 default = []
+# Serialize operation parameters.
+serde = ["dep:serde", "dapple_field/serde"]
 
 [package.metadata.docs.rs]
 all-features = true

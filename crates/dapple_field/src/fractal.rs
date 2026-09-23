@@ -22,6 +22,8 @@ pub const MAX_OCTAVES: u8 = 24;
 
 /// How octaves combine.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum FractalKind {
     /// Fractional Brownian motion: the amplitude-weighted sum of octaves, in
     /// about `[-1, 1]` with mean zero.
@@ -33,6 +35,7 @@ pub enum FractalKind {
 
 /// Octave structure of a [`Fractal`].
 #[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FractalParams {
     /// How octaves combine.
     pub kind: FractalKind,

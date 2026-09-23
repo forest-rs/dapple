@@ -14,6 +14,8 @@ const LATTICE_TAG: u64 = 0x006c_6174_7469_6365; // "lattice"
 
 /// Lattice noise flavor, shared by single-octave noise and fractals.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Basis {
     /// Random values at lattice corners, blended with a quintic fade.
     Value,

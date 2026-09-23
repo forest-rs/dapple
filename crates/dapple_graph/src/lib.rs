@@ -96,8 +96,12 @@ use execution_graph::{ExecutionGraph, Executor, GraphError, NodeAccess, NodeId, 
 use glam::Vec2;
 use invalidation::intern::InternId;
 
+mod recipe;
 mod tiles;
 
+pub use recipe::{
+    NodeFingerprint, RECIPE_VERSION, Recipe, RecipeError, RecipeNode, RecipeOutput, Step,
+};
 pub use tiles::{DEFAULT_TILE_SIZE, TileReport};
 use tiles::{Grid, Tiles};
 
@@ -110,6 +114,8 @@ pub const fn operand(index: u32) -> FieldNode {
 
 /// A raster operation and its parameters.
 #[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "op", rename_all = "snake_case"))]
 pub enum RasterParams {
     /// [`GaussianBlur`].
     Blur(GaussianBlur),
@@ -456,6 +462,31 @@ fn run_field(
     })))
 }
 
+/// Content fingerprint of a realization of the program `program`.
+fn realize_fingerprint(program: Fingerprint, width: u32, height: u32) -> u64 {
+    let [lo, hi] = fingerprint_words(program);
+    hash(
+        0x0072_6561_6c69_7a65, // "realize"
+        &[lo, hi, u64::from(width), u64::from(height)],
+    )
+}
+
+/// Content fingerprint of `params` applied to a raster fingerprinted `input`.
+fn raster_fingerprint(params: RasterParams, input: u64) -> u64 {
+    let f = |v: f32| u64::from(v.to_bits());
+    let (tag, words) = match params {
+        RasterParams::Blur(op) => (0, vec![f(op.sigma)]),
+        RasterParams::HeightToNormal(op) => (1, vec![f(op.scale)]),
+        RasterParams::AmbientOcclusion(op) => {
+            (2, vec![f(op.radius), u64::from(op.directions), f(op.scale)])
+        }
+        RasterParams::DistanceTransform(op) => (3, vec![f(op.threshold)]),
+    };
+    let mut key = vec![tag, input];
+    key.extend(words);
+    hash(0x7261_7374_6572_6f70, &key)
+}
+
 fn fingerprint_words(fp: Fingerprint) -> [u64; 2] {
     #[expect(
         clippy::cast_possible_truncation,
@@ -623,13 +654,9 @@ fn run_realize(
     )?;
     let data = RasterData::Scalar(raster);
     let changed = settle(tiles, node, state, &data, &recomputed, dirty.is_none());
-    let [lo, hi] = fingerprint_words(fingerprint);
     let value = RasterValue {
         data,
-        fingerprint: hash(
-            0x0072_6561_6c69_7a65, // "realize"
-            &[lo, hi, u64::from(width), u64::from(height)],
-        ),
+        fingerprint: realize_fingerprint(fingerprint, width, height),
         changed,
         tile_space: node,
     };
@@ -731,15 +758,14 @@ fn run_raster(
     } else {
         Some(marked)
     };
-    let f = |v: f32| u64::from(v.to_bits());
     let previous_scalar = match &state.output {
         Some(RasterData::Scalar(r)) if same => Some(r),
         _ => None,
     };
-    let (tag, words, data, recomputed) = match params {
+    let (data, recomputed) = match params {
         RasterParams::Blur(op) => {
             let (r, t) = run_op(&op, raster, grid, &dirty, previous_scalar)?;
-            (0, vec![f(op.sigma)], RasterData::Scalar(r), t)
+            (RasterData::Scalar(r), t)
         }
         RasterParams::HeightToNormal(op) => {
             let previous = match &state.output {
@@ -747,31 +773,24 @@ fn run_raster(
                 _ => None,
             };
             let (r, t) = run_op(&op, raster, grid, &dirty, previous)?;
-            (1, vec![f(op.scale)], RasterData::Vector3(r), t)
+            (RasterData::Vector3(r), t)
         }
         RasterParams::AmbientOcclusion(op) => {
             let (r, t) = run_op(&op, raster, grid, &dirty, previous_scalar)?;
-            (
-                2,
-                vec![f(op.radius), u64::from(op.directions), f(op.scale)],
-                RasterData::Scalar(r),
-                t,
-            )
+            (RasterData::Scalar(r), t)
         }
         RasterParams::DistanceTransform(op) => {
             let (r, t) = run_op(&op, raster, grid, &dirty, previous_scalar)?;
-            (3, vec![f(op.threshold)], RasterData::Scalar(r), t)
+            (RasterData::Scalar(r), t)
         }
     };
     if !same {
         state.output = None;
     }
     let changed = settle(tiles, node, state, &data, &recomputed, dirty.is_none());
-    let mut key = vec![tag, value.fingerprint];
-    key.extend(words);
     let out = RasterValue {
         data,
-        fingerprint: hash(0x7261_7374_6572_6f70, &key),
+        fingerprint: raster_fingerprint(params, value.fingerprint),
         changed,
         tile_space: node,
     };
@@ -835,6 +854,8 @@ const OUT: &str = "out";
 struct Entry {
     kind: NodeKind,
     label: String,
+    params: Params,
+    upstream: Vec<NodeId>,
 }
 
 /// An incremental material graph; see the [crate docs](crate).
@@ -842,6 +863,7 @@ struct Entry {
 pub struct MaterialGraph {
     graph: ExecutionGraph<DappleExecutor>,
     entries: BTreeMap<NodeId, Entry>,
+    order: Vec<NodeId>,
 }
 
 impl Default for MaterialGraph {
@@ -864,6 +886,7 @@ impl MaterialGraph {
         Self {
             graph: ExecutionGraph::new(DappleExecutor::new(tile_size)),
             entries: BTreeMap::new(),
+            order: Vec::new(),
         }
     }
 
@@ -895,8 +918,11 @@ impl MaterialGraph {
         };
         let node = self.graph.add_node(body, inputs, vec![OUT.into()])?;
         self.graph.set_node_label(node, label)?;
-        self.graph
-            .set_input_value(node, params_name, GraphValue::Params(Arc::new(params)))?;
+        self.graph.set_input_value(
+            node,
+            params_name,
+            GraphValue::Params(Arc::new(params.clone())),
+        )?;
         for (i, &from) in upstream.iter().enumerate() {
             self.graph
                 .connect(from, OUT, node, format!("{label}.in{i}"))?;
@@ -906,8 +932,11 @@ impl MaterialGraph {
             Entry {
                 kind,
                 label: label.into(),
+                params,
+                upstream: upstream.to_vec(),
             },
         );
+        self.order.push(node);
         Ok(node)
     }
 
@@ -955,11 +984,15 @@ impl MaterialGraph {
         kind: NodeKind,
         params: Params,
     ) -> Result<(), MaterialError> {
-        let entry = self.entries.get(&node).ok_or(MaterialError::UnknownNode)?;
+        let entry = self
+            .entries
+            .get_mut(&node)
+            .ok_or(MaterialError::UnknownNode)?;
         if entry.kind != kind {
             return Err(MaterialError::UnknownNode);
         }
         let name = Self::params_name(&entry.label);
+        entry.params = params.clone();
         self.graph
             .set_input_value(node, name.clone(), GraphValue::Params(Arc::new(params)))?;
         self.graph.invalidate_input(name);

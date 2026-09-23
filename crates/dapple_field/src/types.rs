@@ -31,6 +31,8 @@ pub enum NormalFrame {
 /// How [`Op::BlendNormals`](crate::program::Op::BlendNormals) combines a
 /// detail normal with a base normal.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum NormalBlend {
     /// Reoriented normal mapping (Barré-Brisebois and Hill, 2012): the detail
     /// is rotated onto the base, preserving both.

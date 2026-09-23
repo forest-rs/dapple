@@ -19,6 +19,7 @@ use crate::{Raster, RasterError, RasterOp, TexelRect, check_into};
 /// `n = normalize(-∂h/∂x, -∂h/∂y, 1)`. `scale` converts raster values to
 /// domain units of height, so the result is resolution-independent.
 #[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HeightToNormal {
     /// Domain units of height per raster value unit; finite.
     pub scale: f32,

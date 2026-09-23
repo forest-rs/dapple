@@ -70,6 +70,7 @@ impl<F: ScalarField + ?Sized> ScalarField for Box<F> {
 
 /// An affine map of domain coordinates: `p' = matrix * p + translation`.
 #[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Affine2 {
     /// Linear part, column-major.
     pub matrix: Mat2,

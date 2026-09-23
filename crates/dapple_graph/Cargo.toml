@@ -17,6 +17,12 @@ execution_graph.workspace = true
 glam.workspace = true
 invalidation.workspace = true
 libm.workspace = true
+serde = { optional = true, workspace = true }
+
+[features]
+default = []
+# Serialize recipes and node parameters.
+serde = ["dep:serde", "dapple_field/serde", "dapple_raster/serde"]
 
 [lints]
 workspace = true

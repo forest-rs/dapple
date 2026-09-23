@@ -36,6 +36,8 @@ pub struct CellSample {
 
 /// Which [`CellSample`] quantity a [`CellularField`] returns.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum CellOutput {
     /// [`CellSample::f1`].
     F1,

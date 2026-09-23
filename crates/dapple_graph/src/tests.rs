@@ -351,3 +351,152 @@ fn new_resolutions_rebuild_the_tiles() {
     s.graph.run().unwrap();
     assert!(s.graph.tile_report().tiles_recomputed < 4 * 24);
 }
+
+fn bark_recipe() -> Recipe {
+    let node = |label: &str, step: Step| RecipeNode {
+        label: label.into(),
+        step,
+    };
+    Recipe {
+        version: RECIPE_VERSION,
+        nodes: vec![
+            node(
+                "noise",
+                Step::Field {
+                    op: noise_op(4),
+                    inputs: vec![],
+                },
+            ),
+            node(
+                "disk",
+                Step::Field {
+                    op: disk_op(0.4),
+                    inputs: vec![],
+                },
+            ),
+            node(
+                "height",
+                Step::Field {
+                    op: Op::Max {
+                        a: operand(1),
+                        b: operand(0),
+                    },
+                    inputs: vec!["noise".into(), "disk".into()],
+                },
+            ),
+            node(
+                "map",
+                Step::Realize {
+                    input: "height".into(),
+                    width: 64,
+                    height: 64,
+                },
+            ),
+            node(
+                "normal",
+                Step::Raster {
+                    input: "map".into(),
+                    params: RasterParams::HeightToNormal(HeightToNormal { scale: 0.05 }),
+                },
+            ),
+        ],
+        outputs: vec![RecipeOutput {
+            role: "normal".into(),
+            channels: vec!["normal".into()],
+        }],
+    }
+}
+
+#[test]
+fn recipes_predict_the_fingerprints_their_graphs_produce() {
+    let recipe = bark_recipe();
+    let predicted = recipe.fingerprints().unwrap();
+    let (mut graph, ids) = recipe.build(16).unwrap();
+    graph.run().unwrap();
+    for (label, id) in &ids {
+        let actual = match graph.value(*id).unwrap() {
+            GraphValue::Field(field) => NodeFingerprint::Field(field.program.fingerprint()),
+            GraphValue::Raster(raster) => NodeFingerprint::Raster(raster.fingerprint),
+            GraphValue::Params(_) => unreachable!(),
+        };
+        assert_eq!(predicted[label], actual, "{label}");
+    }
+}
+
+#[test]
+fn graphs_export_recipes_that_rebuild_them() {
+    let recipe = bark_recipe();
+    let (mut graph, ids) = recipe.build(16).unwrap();
+    graph.run().unwrap();
+    graph.set_field_op(ids["disk"], disk_op(0.45)).unwrap();
+    graph.run().unwrap();
+
+    let mut exported = graph.recipe();
+    assert_eq!(exported.nodes.len(), recipe.nodes.len());
+    exported.outputs = recipe.outputs.clone();
+    let (mut rebuilt, rebuilt_ids) = exported.build(8).unwrap();
+    rebuilt.run().unwrap();
+    let digest = |g: &MaterialGraph, id| match &g.raster_value(id).unwrap().data {
+        RasterData::Vector3(r) => r.digest(),
+        RasterData::Scalar(r) => r.digest(),
+    };
+    assert_eq!(
+        digest(&graph, ids["normal"]),
+        digest(&rebuilt, rebuilt_ids["normal"])
+    );
+    assert_ne!(
+        exported.fingerprint().unwrap(),
+        recipe.fingerprint().unwrap()
+    );
+
+    // Relabeling nodes keeps an output-based fingerprint.
+    let mut relabeled = recipe.clone();
+    for node in &mut relabeled.nodes {
+        node.label.insert_str(0, "x.");
+        match &mut node.step {
+            Step::Field { inputs, .. } => {
+                for i in inputs {
+                    i.insert_str(0, "x.");
+                }
+            }
+            Step::Realize { input, .. } | Step::Raster { input, .. } => {
+                input.insert_str(0, "x.");
+            }
+        }
+    }
+    relabeled.outputs[0].channels[0].insert_str(0, "x.");
+    assert_eq!(
+        relabeled.fingerprint().unwrap(),
+        recipe.fingerprint().unwrap()
+    );
+}
+
+#[test]
+fn malformed_recipes_are_refused() {
+    let recipe = bark_recipe();
+    let with = |f: &dyn Fn(&mut Recipe)| {
+        let mut r = recipe.clone();
+        f(&mut r);
+        r.fingerprint().unwrap_err()
+    };
+    assert!(matches!(
+        with(&|r| r.version = 2),
+        RecipeError::Version { found: 2 }
+    ));
+    assert!(matches!(
+        with(&|r| r.nodes[1].label = "noise".into()),
+        RecipeError::DuplicateLabel(_)
+    ));
+    assert!(matches!(
+        with(&|r| r.outputs[0].channels[0] = "nope".into()),
+        RecipeError::UnknownLabel(_)
+    ));
+    assert!(matches!(
+        with(&|r| r.outputs[0].channels[0] = "height".into()),
+        RecipeError::WrongInput { .. }
+    ));
+    assert!(matches!(
+        with(&|r| r.nodes.swap(2, 3)),
+        RecipeError::UnknownLabel(_)
+    ));
+}

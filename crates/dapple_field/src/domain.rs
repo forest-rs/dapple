@@ -13,6 +13,8 @@ use glam::Vec2;
 /// guaranteed by construction: fields refuse lattices and transforms that would
 /// break it, rather than blending seams afterwards.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Domain {
     /// The unbounded, non-repeating plane.
     Plane,

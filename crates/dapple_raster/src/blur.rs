@@ -17,6 +17,7 @@ use crate::{Raster, RasterError, RasterOp, TexelRect, check_into};
 /// negative offset to the most positive. A `sigma` below 1/1000 of a texel on
 /// an axis leaves that axis unchanged.
 #[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GaussianBlur {
     /// Standard deviation in domain units; finite and non-negative.
     pub sigma: f32,

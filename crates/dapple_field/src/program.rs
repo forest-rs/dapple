@@ -74,6 +74,8 @@ pub const FINGERPRINT_VERSION: u64 = 1;
 
 /// A node in a [`FieldProgram`] or [`ProgramBuilder`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
 pub struct NodeId(u32);
 
 impl NodeId {
@@ -99,6 +101,8 @@ impl NodeId {
 /// inputs. Nodes combining several inputs require equal domains: demote
 /// explicitly with [`Op::Demote`] to combine a periodic field with a plane one.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "op", rename_all = "snake_case"))]
 pub enum Op {
     /// A constant value.
     Constant {
@@ -419,6 +423,129 @@ impl Op {
             }
             _ => Change::Everywhere,
         }
+    }
+
+    /// This op's [`Fingerprint`] with `inputs`, the fingerprints of its
+    /// operands in operand order: the fingerprint a program node computing
+    /// this op over those inputs has.
+    #[must_use]
+    pub fn fingerprint_with(&self, inputs: &[Fingerprint]) -> Fingerprint {
+        let op = self;
+        let mut words = Vec::with_capacity(16);
+        words.push(FINGERPRINT_VERSION);
+        words.push(op_tag(op));
+        let domain = |words: &mut Vec<u64>, domain: Domain| match domain {
+            Domain::Plane => words.push(0),
+            Domain::Periodic { period } => {
+                words.extend([1, u64::from(period[0]), u64::from(period[1])]);
+            }
+        };
+        let float = |v: f32| u64::from(v.to_bits());
+        match *op {
+            Self::Constant { domain: d, value } => {
+                domain(&mut words, d);
+                words.push(float(value));
+            }
+            Self::Noise {
+                basis,
+                domain: d,
+                frequency,
+                seed,
+            } => {
+                words.push(basis_tag(basis));
+                domain(&mut words, d);
+                words.extend([float(frequency[0]), float(frequency[1]), seed]);
+            }
+            Self::Fractal {
+                basis,
+                domain: d,
+                frequency,
+                seed,
+                params,
+            } => {
+                words.push(basis_tag(basis));
+                domain(&mut words, d);
+                words.extend([float(frequency[0]), float(frequency[1]), seed]);
+                words.extend([
+                    match params.kind {
+                        FractalKind::Fbm => 0,
+                        FractalKind::Ridged => 1,
+                    },
+                    u64::from(params.octaves),
+                    u64::from(params.lacunarity),
+                    float(params.gain),
+                ]);
+            }
+            Self::Cellular {
+                domain: d,
+                frequency,
+                jitter,
+                seed,
+                output,
+            } => {
+                domain(&mut words, d);
+                words.extend([
+                    float(frequency[0]),
+                    float(frequency[1]),
+                    float(jitter),
+                    seed,
+                    cell_output_tag(output),
+                ]);
+            }
+            Self::Disk {
+                domain: d,
+                center,
+                radius,
+                softness,
+            } => {
+                domain(&mut words, d);
+                words.extend([
+                    float(center[0]),
+                    float(center[1]),
+                    float(radius),
+                    float(softness),
+                ]);
+            }
+            Self::Transform { transform, .. } => {
+                let m = transform.matrix.to_cols_array();
+                let t = transform.translation.to_array();
+                words.extend(m.iter().chain(&t).map(|v| float(*v)));
+            }
+            Self::Clamp { min, max, .. } => words.extend([float(min), float(max)]),
+            Self::Remap { from, to, .. } => words.extend(from.iter().chain(&to).map(|v| float(*v))),
+            Self::Warp { amount, .. } => words.push(float(amount)),
+            Self::Component { index, .. } => words.push(u64::from(index)),
+            Self::ToId { levels, .. } => words.push(u64::from(levels)),
+            Self::BlendNormals { method, .. } => words.push(match method {
+                NormalBlend::Reoriented => 0,
+                NormalBlend::Udn => 1,
+            }),
+            Self::Vector2 { .. }
+            | Self::Vector3 { .. }
+            | Self::Color { .. }
+            | Self::AsMask { .. }
+            | Self::Normalize { .. }
+            | Self::Direction { .. }
+            | Self::Angle { .. }
+            | Self::Coherence { .. }
+            | Self::Demote { .. }
+            | Self::Add { .. }
+            | Self::Sub { .. }
+            | Self::Mul { .. }
+            | Self::Min { .. }
+            | Self::Max { .. }
+            | Self::Abs { .. }
+            | Self::Mix { .. } => {}
+        }
+        for input in inputs {
+            let fp = input.0;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "splitting the 128-bit fingerprint into its halves"
+            )]
+            words.extend([fp as u64, (fp >> 64) as u64]);
+        }
+        fingerprint_words(&words)
     }
 
     /// Whether this node's value at a point depends on operand `index` only
@@ -1186,121 +1313,12 @@ impl ProgramBuilder {
     }
 
     fn fingerprint(&self, op: &Op) -> Fingerprint {
-        let mut words = Vec::with_capacity(16);
-        words.push(FINGERPRINT_VERSION);
-        words.push(op_tag(op));
-        let domain = |words: &mut Vec<u64>, domain: Domain| match domain {
-            Domain::Plane => words.push(0),
-            Domain::Periodic { period } => {
-                words.extend([1, u64::from(period[0]), u64::from(period[1])]);
-            }
-        };
-        let float = |v: f32| u64::from(v.to_bits());
-        match *op {
-            Op::Constant { domain: d, value } => {
-                domain(&mut words, d);
-                words.push(float(value));
-            }
-            Op::Noise {
-                basis,
-                domain: d,
-                frequency,
-                seed,
-            } => {
-                words.push(basis_tag(basis));
-                domain(&mut words, d);
-                words.extend([float(frequency[0]), float(frequency[1]), seed]);
-            }
-            Op::Fractal {
-                basis,
-                domain: d,
-                frequency,
-                seed,
-                params,
-            } => {
-                words.push(basis_tag(basis));
-                domain(&mut words, d);
-                words.extend([float(frequency[0]), float(frequency[1]), seed]);
-                words.extend([
-                    match params.kind {
-                        FractalKind::Fbm => 0,
-                        FractalKind::Ridged => 1,
-                    },
-                    u64::from(params.octaves),
-                    u64::from(params.lacunarity),
-                    float(params.gain),
-                ]);
-            }
-            Op::Cellular {
-                domain: d,
-                frequency,
-                jitter,
-                seed,
-                output,
-            } => {
-                domain(&mut words, d);
-                words.extend([
-                    float(frequency[0]),
-                    float(frequency[1]),
-                    float(jitter),
-                    seed,
-                    cell_output_tag(output),
-                ]);
-            }
-            Op::Disk {
-                domain: d,
-                center,
-                radius,
-                softness,
-            } => {
-                domain(&mut words, d);
-                words.extend([
-                    float(center[0]),
-                    float(center[1]),
-                    float(radius),
-                    float(softness),
-                ]);
-            }
-            Op::Transform { transform, .. } => {
-                let m = transform.matrix.to_cols_array();
-                let t = transform.translation.to_array();
-                words.extend(m.iter().chain(&t).map(|v| float(*v)));
-            }
-            Op::Clamp { min, max, .. } => words.extend([float(min), float(max)]),
-            Op::Remap { from, to, .. } => words.extend(from.iter().chain(&to).map(|v| float(*v))),
-            Op::Warp { amount, .. } => words.push(float(amount)),
-            Op::Component { index, .. } => words.push(u64::from(index)),
-            Op::ToId { levels, .. } => words.push(u64::from(levels)),
-            Op::BlendNormals { method, .. } => words.push(match method {
-                NormalBlend::Reoriented => 0,
-                NormalBlend::Udn => 1,
-            }),
-            Op::Vector2 { .. }
-            | Op::Vector3 { .. }
-            | Op::Color { .. }
-            | Op::AsMask { .. }
-            | Op::Normalize { .. }
-            | Op::Direction { .. }
-            | Op::Angle { .. }
-            | Op::Coherence { .. }
-            | Op::Demote { .. }
-            | Op::Add { .. }
-            | Op::Sub { .. }
-            | Op::Mul { .. }
-            | Op::Min { .. }
-            | Op::Max { .. }
-            | Op::Abs { .. }
-            | Op::Mix { .. } => {}
-        }
-        for input in op.inputs().iter() {
-            let fp = self.nodes[input.0 as usize].fingerprint.0;
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "splitting the 128-bit fingerprint into its halves"
-            )]
-            words.extend([fp as u64, (fp >> 64) as u64]);
-        }
-        fingerprint_words(&words)
+        let inputs: Vec<Fingerprint> = op
+            .inputs()
+            .iter()
+            .map(|input| self.nodes[input.0 as usize].fingerprint)
+            .collect();
+        op.fingerprint_with(&inputs)
     }
 }
 

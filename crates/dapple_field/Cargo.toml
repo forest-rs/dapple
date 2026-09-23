@@ -14,12 +14,15 @@ categories = ["graphics", "no-std"]
 exedra_math.workspace = true
 glam.workspace = true
 libm.workspace = true
+serde = { optional = true, workspace = true }
 
 [lints]
 workspace = true
 
 [features]
 default = []
+# Serialize field programs' ops and parameters.
+serde = ["dep:serde", "glam/serde"]
 
 [package.metadata.docs.rs]
 all-features = true

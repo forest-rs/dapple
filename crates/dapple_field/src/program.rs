@@ -10,6 +10,17 @@
 //! remain the evaluators behind it. Evaluating a program is bit-identical to
 //! evaluating the same fields directly.
 //!
+//! **Typed ports.** Every node has a [`PortType`], derived when it is added:
+//! scalars, masks, identifiers, vectors, linear colors with declared
+//! primaries, and normals in a declared frame. Type rules reject misuse at
+//! build time: normals combine only through [`Op::BlendNormals`], never by
+//! lerping; identifiers never blend; masks stay masks only through operations
+//! that keep them in `[0, 1]`; and a transform that rotates or scales cannot
+//! move a vector-valued field, whose values it would leave unrotated.
+//! [`ProgramBuilder::finish`] makes a scalar [`FieldProgram`], which is a
+//! [`ScalarField`]; [`ProgramBuilder::finish_value`] makes a
+//! [`ValueProgram`] of any type, evaluated to a [`Value`].
+//!
 //! Every node has a [`Fingerprint`]: a hash of its operation, parameters and
 //! the fingerprints of its inputs, so equal subgraphs have equal fingerprints
 //! wherever they appear and unused nodes never affect a result. See
@@ -40,7 +51,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use glam::Vec2;
+use glam::{Mat2, Vec2, Vec3};
 
 use crate::cellular::{CellOutput, Cellular, CellularField};
 use crate::domain::{Domain, DomainError, Footprint};
@@ -48,6 +59,7 @@ use crate::field::{Affine2, ScalarField, check_transform};
 use crate::fractal::{Fractal, FractalKind, FractalParams};
 use crate::hash::hash;
 use crate::noise::{Basis, Noise};
+use crate::types::{NormalBlend, NormalFrame, PortType, Primaries, Value};
 
 /// Version of the fingerprint encoding. Changing any word the encoding emits
 /// requires a new version, so persisted fingerprints never collide.
@@ -211,6 +223,67 @@ pub enum Op {
         /// Displacement scale in domain units; finite.
         amount: f32,
     },
+    /// A [`PortType::Vector2`] from two scalars.
+    Vector2 {
+        /// First component.
+        x: NodeId,
+        /// Second component.
+        y: NodeId,
+    },
+    /// A [`PortType::Vector3`] from three scalars.
+    Vector3 {
+        /// First component.
+        x: NodeId,
+        /// Second component.
+        y: NodeId,
+        /// Third component.
+        z: NodeId,
+    },
+    /// A linear [`PortType::Color`] with Rec. 709 primaries from three
+    /// scalars.
+    Color {
+        /// Red.
+        r: NodeId,
+        /// Green.
+        g: NodeId,
+        /// Blue.
+        b: NodeId,
+    },
+    /// One component of a vector, color or normal, as a scalar.
+    Component {
+        /// The vector-valued input.
+        input: NodeId,
+        /// Component index: 0 or 1 for a `Vector2`, 0 to 2 otherwise.
+        index: u8,
+    },
+    /// A scalar clamped to `[0, 1]`, as a [`PortType::Mask`].
+    AsMask {
+        /// Operand.
+        input: NodeId,
+    },
+    /// A scalar in `[0, 1]` quantized to `levels` identifiers:
+    /// `floor(clamp(v, 0, 1) * levels)`, at most `levels - 1`.
+    ToId {
+        /// Operand.
+        input: NodeId,
+        /// Number of identifiers; at least 1.
+        levels: u32,
+    },
+    /// A `Vector3` normalized into a [`PortType::Normal`] in the domain frame;
+    /// a zero vector gives `(0, 0, 1)`.
+    Normalize {
+        /// The vector.
+        input: NodeId,
+    },
+    /// A detail normal applied to a base normal, both in the same frame.
+    BlendNormals {
+        /// The base normal.
+        base: NodeId,
+        /// The detail normal.
+        detail: NodeId,
+        /// The blend.
+        method: NormalBlend,
+    },
 }
 
 impl Op {
@@ -227,14 +300,27 @@ impl Op {
             | Self::Demote { input }
             | Self::Abs { input }
             | Self::Clamp { input, .. }
-            | Self::Remap { input, .. } => inputs.push(input),
+            | Self::Remap { input, .. }
+            | Self::Component { input, .. }
+            | Self::AsMask { input }
+            | Self::ToId { input, .. }
+            | Self::Normalize { input } => inputs.push(input),
             Self::Add { a, b }
             | Self::Sub { a, b }
             | Self::Mul { a, b }
             | Self::Min { a, b }
-            | Self::Max { a, b } => {
+            | Self::Max { a, b }
+            | Self::Vector2 { x: a, y: b }
+            | Self::BlendNormals {
+                base: a, detail: b, ..
+            } => {
                 inputs.push(a);
                 inputs.push(b);
+            }
+            Self::Vector3 { x, y, z } | Self::Color { r: x, g: y, b: z } => {
+                inputs.push(x);
+                inputs.push(y);
+                inputs.push(z);
             }
             Self::Mix { a, b, t } => {
                 inputs.push(a);
@@ -270,6 +356,14 @@ impl Op {
             Self::Remap { .. } => "remap",
             Self::Mix { .. } => "mix",
             Self::Warp { .. } => "warp",
+            Self::Vector2 { .. } => "vector2",
+            Self::Vector3 { .. } => "vector3",
+            Self::Color { .. } => "color",
+            Self::Component { .. } => "component",
+            Self::AsMask { .. } => "as-mask",
+            Self::ToId { .. } => "to-id",
+            Self::Normalize { .. } => "normalize",
+            Self::BlendNormals { .. } => "blend-normals",
         }
     }
 }
@@ -305,10 +399,13 @@ impl Inputs {
 ///   ([`Basis`], [`FractalKind`], [`CellOutput`]) as their declaration index;
 /// - [`FractalParams`] as kind, octaves, lacunarity and gain bits;
 /// - an [`Affine2`] as its matrix columns, then its translation;
+/// - a component index or identifier level count as itself, and a
+///   [`NormalBlend`] as its declaration index;
 /// - each input as the two halves of its own fingerprint, in operand order.
 ///
 /// Node identities and creation order are not part of it: equal subgraphs
-/// have equal fingerprints.
+/// have equal fingerprints. Port types are not encoded: they follow from the
+/// operations and inputs, which are.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct Fingerprint(pub u128);
 
@@ -342,6 +439,21 @@ pub enum ProgramError {
         /// A later input's differing domain.
         other: Domain,
     },
+    /// An input's [`PortType`] does not fit the operation.
+    TypeMismatch {
+        /// The operation's [`Op::name`].
+        op: &'static str,
+        /// The offending input's type.
+        found: PortType,
+        /// What the operation needs, or why the input cannot be used.
+        reason: &'static str,
+    },
+    /// [`ProgramBuilder::finish`] needs a scalar or mask output; use
+    /// [`ProgramBuilder::finish_value`] for other types.
+    OutputType {
+        /// The output node's type.
+        found: PortType,
+    },
 }
 
 impl From<DomainError> for ProgramError {
@@ -357,6 +469,12 @@ impl fmt::Display for ProgramError {
             Self::UnknownNode { node } => write!(f, "unknown node {}", node.index()),
             Self::DomainMismatch { first, other } => {
                 write!(f, "inputs mix domains {first:?} and {other:?}")
+            }
+            Self::TypeMismatch { op, found, reason } => {
+                write!(f, "{op} cannot take a {found} input: {reason}")
+            }
+            Self::OutputType { found } => {
+                write!(f, "a scalar field program cannot output a {found}")
             }
         }
     }
@@ -393,6 +511,13 @@ enum Kernel {
         dy: NodeId,
         amount: f32,
     },
+    Vector2(NodeId, NodeId),
+    Vector3(NodeId, NodeId, NodeId),
+    Component(NodeId, usize),
+    AsMask(NodeId),
+    ToId(NodeId, u32),
+    Normalize(NodeId),
+    BlendNormals(NodeId, NodeId, NormalBlend),
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -408,6 +533,7 @@ enum BinaryOp {
 struct Node {
     op: Op,
     domain: Domain,
+    port: PortType,
     fingerprint: Fingerprint,
     kernel: Kernel,
 }
@@ -434,12 +560,14 @@ impl ProgramBuilder {
             self.node(input)?;
         }
         let domain = self.derive_domain(&op)?;
+        let port = self.derive_type(&op)?;
         let kernel = self.kernel(&op)?;
         let fingerprint = self.fingerprint(&op);
         let id = NodeId(u32::try_from(self.nodes.len()).expect("fewer than 2^32 nodes"));
         self.nodes.push(Node {
             op,
             domain,
+            port,
             fingerprint,
             kernel,
         });
@@ -451,15 +579,36 @@ impl ProgramBuilder {
         Ok(self.node(id)?.domain)
     }
 
-    /// Finishes the program with `output` as its result.
+    /// The type of an existing node.
+    pub fn port_type(&self, id: NodeId) -> Result<PortType, ProgramError> {
+        Ok(self.node(id)?.port)
+    }
+
+    /// Finishes a scalar-valued program with `output` as its result.
     ///
-    /// Nodes that `output` does not depend on are kept for inspection but
-    /// never evaluated, and do not affect [`FieldProgram::fingerprint`].
+    /// `output` must be a [`PortType::Scalar`] or [`PortType::Mask`], so the
+    /// program is a [`ScalarField`]; use [`Self::finish_value`] for other
+    /// types. Nodes that `output` does not depend on are kept for inspection
+    /// but never evaluated, and do not affect [`FieldProgram::fingerprint`].
     pub fn finish(self, output: NodeId) -> Result<FieldProgram, ProgramError> {
-        self.node(output)?;
+        let found = self.node(output)?.port;
+        if !found.is_scalar() {
+            return Err(ProgramError::OutputType { found });
+        }
         Ok(FieldProgram {
             nodes: self.nodes,
             output,
+        })
+    }
+
+    /// Finishes a program whose output may have any [`PortType`].
+    pub fn finish_value(self, output: NodeId) -> Result<ValueProgram, ProgramError> {
+        self.node(output)?;
+        Ok(ValueProgram {
+            program: FieldProgram {
+                nodes: self.nodes,
+                output,
+            },
         })
     }
 
@@ -486,6 +635,160 @@ impl ProgramBuilder {
                     return Err(ProgramError::DomainMismatch { first, other });
                 }
                 first
+            }
+        })
+    }
+
+    fn derive_type(&self, op: &Op) -> Result<PortType, ProgramError> {
+        let name = op.name();
+        let port = |id: NodeId| self.nodes[id.0 as usize].port;
+        let mismatch = |found: PortType, reason: &'static str| ProgramError::TypeMismatch {
+            op: name,
+            found,
+            reason,
+        };
+        let scalar = |id: NodeId| {
+            let found = port(id);
+            if found.is_scalar() {
+                Ok(found)
+            } else {
+                Err(mismatch(found, "needs a scalar or mask"))
+            }
+        };
+        // Values that componentwise arithmetic treats as plain numbers.
+        let arithmetic = |found: PortType| match found {
+            PortType::Normal(_) => Err(mismatch(
+                found,
+                "normals combine only through blend-normals",
+            )),
+            PortType::Id => Err(mismatch(found, "identifiers are never combined")),
+            _ => Ok(found),
+        };
+        let both_masks = |a: PortType, b: PortType| {
+            if a == PortType::Mask && b == PortType::Mask {
+                PortType::Mask
+            } else {
+                PortType::Scalar
+            }
+        };
+        Ok(match *op {
+            Op::Constant { .. } | Op::Noise { .. } | Op::Fractal { .. } | Op::Cellular { .. } => {
+                PortType::Scalar
+            }
+            Op::Transform { input, transform } => {
+                let found = port(input);
+                let directional = matches!(
+                    found,
+                    PortType::Vector2 | PortType::Vector3 | PortType::Normal(_)
+                );
+                if directional && transform.matrix != Mat2::IDENTITY {
+                    return Err(mismatch(
+                        found,
+                        "a rotating or scaling transform would leave directions unrotated",
+                    ));
+                }
+                found
+            }
+            Op::Demote { input } => port(input),
+            Op::Add { a, b } | Op::Sub { a, b } => {
+                let (ta, tb) = (arithmetic(port(a))?, arithmetic(port(b))?);
+                if ta.is_scalar() && tb.is_scalar() {
+                    PortType::Scalar
+                } else if ta == tb {
+                    ta
+                } else {
+                    return Err(mismatch(tb, "operands must have the same type"));
+                }
+            }
+            Op::Mul { a, b } | Op::Min { a, b } | Op::Max { a, b } => {
+                let (ta, tb) = (arithmetic(port(a))?, arithmetic(port(b))?);
+                if ta.is_scalar() && tb.is_scalar() {
+                    both_masks(ta, tb)
+                } else if ta == tb {
+                    ta
+                } else if matches!(op, Op::Mul { .. }) && ta.is_scalar() {
+                    tb
+                } else if matches!(op, Op::Mul { .. }) && tb.is_scalar() {
+                    ta
+                } else {
+                    return Err(mismatch(tb, "operands must have the same type"));
+                }
+            }
+            Op::Abs { input } | Op::Clamp { input, .. } | Op::Remap { input, .. } => {
+                scalar(input)?;
+                PortType::Scalar
+            }
+            Op::Mix { a, b, t } => {
+                let tt = scalar(t)?;
+                let (ta, tb) = (arithmetic(port(a))?, arithmetic(port(b))?);
+                if ta.is_scalar() && tb.is_scalar() {
+                    if tt == PortType::Mask {
+                        both_masks(ta, tb)
+                    } else {
+                        PortType::Scalar
+                    }
+                } else if ta == tb {
+                    ta
+                } else {
+                    return Err(mismatch(tb, "operands must have the same type"));
+                }
+            }
+            Op::Warp { input, dx, dy, .. } => {
+                scalar(dx)?;
+                scalar(dy)?;
+                port(input)
+            }
+            Op::Vector2 { x, y } => {
+                scalar(x)?;
+                scalar(y)?;
+                PortType::Vector2
+            }
+            Op::Vector3 { x, y, z } => {
+                scalar(x)?;
+                scalar(y)?;
+                scalar(z)?;
+                PortType::Vector3
+            }
+            Op::Color { r, g, b } => {
+                scalar(r)?;
+                scalar(g)?;
+                scalar(b)?;
+                PortType::Color(Primaries::Rec709)
+            }
+            Op::Component { input, index } => {
+                let found = port(input);
+                if found.components() < 2 {
+                    return Err(mismatch(found, "needs a vector, color or normal"));
+                }
+                if usize::from(index) >= found.components() {
+                    return Err(mismatch(found, "component index out of range"));
+                }
+                PortType::Scalar
+            }
+            Op::AsMask { input } => {
+                scalar(input)?;
+                PortType::Mask
+            }
+            Op::ToId { input, .. } => {
+                scalar(input)?;
+                PortType::Id
+            }
+            Op::Normalize { input } => {
+                let found = port(input);
+                if found != PortType::Vector3 {
+                    return Err(mismatch(found, "needs a vector3"));
+                }
+                PortType::Normal(NormalFrame::Domain)
+            }
+            Op::BlendNormals { base, detail, .. } => {
+                let (tb, td) = (port(base), port(detail));
+                if !matches!(tb, PortType::Normal(_)) {
+                    return Err(mismatch(tb, "needs normals"));
+                }
+                if td != tb {
+                    return Err(mismatch(td, "needs a normal in the base's frame"));
+                }
+                tb
             }
         })
     }
@@ -581,6 +884,23 @@ impl ProgramBuilder {
                     amount,
                 }
             }
+            Op::Vector2 { x, y } => Kernel::Vector2(x, y),
+            Op::Vector3 { x, y, z } => Kernel::Vector3(x, y, z),
+            Op::Color { r, g, b } => Kernel::Vector3(r, g, b),
+            Op::Component { input, index } => Kernel::Component(input, usize::from(index)),
+            Op::AsMask { input } => Kernel::AsMask(input),
+            Op::ToId { input, levels } => {
+                if levels == 0 {
+                    return Err(DomainError::InvalidParameter { name: "levels" }.into());
+                }
+                Kernel::ToId(input, levels)
+            }
+            Op::Normalize { input } => Kernel::Normalize(input),
+            Op::BlendNormals {
+                base,
+                detail,
+                method,
+            } => Kernel::BlendNormals(base, detail, method),
         })
     }
 
@@ -654,7 +974,18 @@ impl ProgramBuilder {
             Op::Clamp { min, max, .. } => words.extend([float(min), float(max)]),
             Op::Remap { from, to, .. } => words.extend(from.iter().chain(&to).map(|v| float(*v))),
             Op::Warp { amount, .. } => words.push(float(amount)),
-            Op::Demote { .. }
+            Op::Component { index, .. } => words.push(u64::from(index)),
+            Op::ToId { levels, .. } => words.push(u64::from(levels)),
+            Op::BlendNormals { method, .. } => words.push(match method {
+                NormalBlend::Reoriented => 0,
+                NormalBlend::Udn => 1,
+            }),
+            Op::Vector2 { .. }
+            | Op::Vector3 { .. }
+            | Op::Color { .. }
+            | Op::AsMask { .. }
+            | Op::Normalize { .. }
+            | Op::Demote { .. }
             | Op::Add { .. }
             | Op::Sub { .. }
             | Op::Mul { .. }
@@ -693,6 +1024,14 @@ fn op_tag(op: &Op) -> u64 {
         Op::Remap { .. } => 13,
         Op::Mix { .. } => 14,
         Op::Warp { .. } => 15,
+        Op::Vector2 { .. } => 16,
+        Op::Vector3 { .. } => 17,
+        Op::Color { .. } => 18,
+        Op::Component { .. } => 19,
+        Op::AsMask { .. } => 20,
+        Op::ToId { .. } => 21,
+        Op::Normalize { .. } => 22,
+        Op::BlendNormals { .. } => 23,
     }
 }
 
@@ -776,48 +1115,67 @@ impl FieldProgram {
         })
     }
 
-    /// Evaluates node `id` at `p`.
+    /// The type of `id`, if it exists.
+    #[must_use]
+    pub fn node_type(&self, id: NodeId) -> Option<PortType> {
+        self.nodes.get(id.0 as usize).map(|node| node.port)
+    }
+
+    /// Evaluates scalar node `id` at `p`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` is not a scalar or mask node of this program.
+    #[must_use]
+    pub fn eval_node(&self, id: NodeId, p: Vec2, footprint: Footprint) -> f32 {
+        self.eval_value(id, p, footprint)
+            .scalar()
+            .expect("eval_node needs a scalar or mask node")
+    }
+
+    /// Evaluates node `id` at `p`, whatever its type.
     ///
     /// # Panics
     ///
     /// Panics if `id` is not a node of this program.
     #[must_use]
-    pub fn eval_node(&self, id: NodeId, p: Vec2, footprint: Footprint) -> f32 {
+    pub fn eval_value(&self, id: NodeId, p: Vec2, footprint: Footprint) -> Value {
+        let scalar = |id: NodeId| self.eval_node(id, p, footprint);
         match self.nodes[id.0 as usize].kernel {
-            Kernel::Constant(value) => value,
-            Kernel::Noise(ref noise) => noise.eval(p, footprint),
-            Kernel::Fractal(ref fractal) => fractal.eval(p, footprint),
-            Kernel::Cellular(ref cellular) => cellular.eval(p, footprint),
+            Kernel::Constant(value) => Value::Scalar(value),
+            Kernel::Noise(ref noise) => Value::Scalar(noise.eval(p, footprint)),
+            Kernel::Fractal(ref fractal) => Value::Scalar(fractal.eval(p, footprint)),
+            Kernel::Cellular(ref cellular) => Value::Scalar(cellular.eval(p, footprint)),
             Kernel::Transform {
                 input,
                 transform,
                 stretch,
-            } => self.eval_node(input, transform.apply(p), footprint.scaled(stretch)),
-            Kernel::Pass(input) => self.eval_node(input, p, footprint),
+            } => self.eval_value(input, transform.apply(p), footprint.scaled(stretch)),
+            Kernel::Pass(input) => self.eval_value(input, p, footprint),
             Kernel::Binary(op, a, b) => {
-                let a = self.eval_node(a, p, footprint);
-                let b = self.eval_node(b, p, footprint);
-                match op {
+                let a = self.eval_value(a, p, footprint);
+                let b = self.eval_value(b, p, footprint);
+                componentwise(a, b, |a, b| match op {
                     BinaryOp::Add => a + b,
                     BinaryOp::Sub => a - b,
                     BinaryOp::Mul => a * b,
                     BinaryOp::Min => a.min(b),
                     BinaryOp::Max => a.max(b),
-                }
+                })
             }
-            Kernel::Abs(input) => self.eval_node(input, p, footprint).abs(),
-            Kernel::Clamp(input, min, max) => self.eval_node(input, p, footprint).clamp(min, max),
+            Kernel::Abs(input) => Value::Scalar(scalar(input).abs()),
+            Kernel::Clamp(input, min, max) => Value::Scalar(scalar(input).clamp(min, max)),
             Kernel::Remap {
                 input,
                 scale,
                 from,
                 to,
-            } => to + (self.eval_node(input, p, footprint) - from) * scale,
+            } => Value::Scalar(to + (scalar(input) - from) * scale),
             Kernel::Mix(a, b, t) => {
-                let a = self.eval_node(a, p, footprint);
-                let b = self.eval_node(b, p, footprint);
-                let t = self.eval_node(t, p, footprint);
-                a + (b - a) * t
+                let a = self.eval_value(a, p, footprint);
+                let b = self.eval_value(b, p, footprint);
+                let t = scalar(t);
+                componentwise(a, b, |a, b| a + (b - a) * t)
             }
             Kernel::Warp {
                 input,
@@ -825,14 +1183,81 @@ impl FieldProgram {
                 dy,
                 amount,
             } => {
-                let offset = Vec2::new(
-                    self.eval_node(dx, p, footprint),
-                    self.eval_node(dy, p, footprint),
-                ) * amount;
-                self.eval_node(input, p + offset, footprint)
+                let offset = Vec2::new(scalar(dx), scalar(dy)) * amount;
+                self.eval_value(input, p + offset, footprint)
+            }
+            Kernel::Vector2(x, y) => Value::Vector2(Vec2::new(scalar(x), scalar(y))),
+            Kernel::Vector3(x, y, z) => Value::Vector3(Vec3::new(scalar(x), scalar(y), scalar(z))),
+            Kernel::Component(input, index) => Value::Scalar(
+                self.eval_value(input, p, footprint)
+                    .component(index)
+                    .expect("component index was checked"),
+            ),
+            Kernel::AsMask(input) => Value::Scalar(scalar(input).clamp(0.0, 1.0)),
+            Kernel::ToId(input, levels) => {
+                let v = scalar(input);
+                let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "v is in [0, 1], so the product is in [0, levels]"
+                )]
+                let id = libm::floorf(v * levels as f32) as u32;
+                Value::Id(id.min(levels - 1))
+            }
+            Kernel::Normalize(input) => {
+                let Value::Vector3(v) = self.eval_value(input, p, footprint) else {
+                    unreachable!("normalize input was type-checked");
+                };
+                Value::Vector3(v.try_normalize().unwrap_or(Vec3::Z))
+            }
+            Kernel::BlendNormals(base, detail, method) => {
+                let (Value::Vector3(n1), Value::Vector3(n2)) = (
+                    self.eval_value(base, p, footprint),
+                    self.eval_value(detail, p, footprint),
+                ) else {
+                    unreachable!("blend inputs were type-checked");
+                };
+                Value::Vector3(blend_normals(n1, n2, method))
             }
         }
     }
+}
+
+/// Applies `f` per component; a scalar operand broadcasts over a vector.
+fn componentwise(a: Value, b: Value, f: impl Fn(f32, f32) -> f32) -> Value {
+    match (a, b) {
+        (Value::Scalar(a), Value::Scalar(b)) => Value::Scalar(f(a, b)),
+        (Value::Vector2(a), Value::Vector2(b)) => {
+            Value::Vector2(Vec2::new(f(a.x, b.x), f(a.y, b.y)))
+        }
+        (Value::Vector3(a), Value::Vector3(b)) => {
+            Value::Vector3(Vec3::new(f(a.x, b.x), f(a.y, b.y), f(a.z, b.z)))
+        }
+        (Value::Scalar(s), Value::Vector2(v)) => Value::Vector2(Vec2::new(f(s, v.x), f(s, v.y))),
+        (Value::Vector2(v), Value::Scalar(s)) => Value::Vector2(Vec2::new(f(v.x, s), f(v.y, s))),
+        (Value::Scalar(s), Value::Vector3(v)) => {
+            Value::Vector3(Vec3::new(f(s, v.x), f(s, v.y), f(s, v.z)))
+        }
+        (Value::Vector3(v), Value::Scalar(s)) => {
+            Value::Vector3(Vec3::new(f(v.x, s), f(v.y, s), f(v.z, s)))
+        }
+        _ => unreachable!("operand types were checked"),
+    }
+}
+
+/// `detail` applied to `base`; both unit normals in one frame.
+fn blend_normals(base: Vec3, detail: Vec3, method: NormalBlend) -> Vec3 {
+    let n = match method {
+        NormalBlend::Reoriented => {
+            // Barré-Brisebois and Hill: rotate `detail` from +Z onto `base`.
+            let t = base + Vec3::Z;
+            let u = detail * Vec3::new(-1.0, -1.0, 1.0);
+            t * t.dot(u) / t.z - u
+        }
+        NormalBlend::Udn => Vec3::new(base.x + detail.x, base.y + detail.y, base.z),
+    };
+    n.try_normalize().unwrap_or(Vec3::Z)
 }
 
 impl ScalarField for FieldProgram {
@@ -842,6 +1267,67 @@ impl ScalarField for FieldProgram {
 
     fn eval(&self, p: Vec2, footprint: Footprint) -> f32 {
         self.eval_node(self.output, p, footprint)
+    }
+}
+
+/// A finished program whose output may have any [`PortType`].
+///
+/// Built with [`ProgramBuilder::finish_value`]. [`Self::channel`] gives one
+/// component as a scalar [`FieldProgram`], for realizing colors and normals
+/// channel by channel.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValueProgram {
+    program: FieldProgram,
+}
+
+impl ValueProgram {
+    /// The program's nodes, fingerprints and per-node evaluation.
+    #[must_use]
+    pub const fn program(&self) -> &FieldProgram {
+        &self.program
+    }
+
+    /// The output's type.
+    #[must_use]
+    pub fn output_type(&self) -> PortType {
+        self.program.nodes[self.program.output.0 as usize].port
+    }
+
+    /// The output's domain.
+    #[must_use]
+    pub fn domain(&self) -> Domain {
+        self.program.nodes[self.program.output.0 as usize].domain
+    }
+
+    /// The program's content fingerprint: its output node's.
+    #[must_use]
+    pub fn fingerprint(&self) -> Fingerprint {
+        self.program.fingerprint()
+    }
+
+    /// Evaluates the output at `p`.
+    #[must_use]
+    pub fn eval(&self, p: Vec2, footprint: Footprint) -> Value {
+        self.program.eval_value(self.program.output, p, footprint)
+    }
+
+    /// Component `index` of the output as a scalar program: the output
+    /// itself for a scalar or mask (index 0), or a new
+    /// [`Op::Component`] node.
+    pub fn channel(&self, index: u8) -> Result<FieldProgram, ProgramError> {
+        let output = self.program.output;
+        let found = self.output_type();
+        if found.is_scalar() && index == 0 {
+            return Ok(self.program.clone());
+        }
+        let mut builder = ProgramBuilder {
+            nodes: self.program.nodes.clone(),
+        };
+        let component = builder.add(Op::Component {
+            input: output,
+            index,
+        })?;
+        builder.finish(component)
     }
 }
 
@@ -1175,5 +1661,275 @@ mod tests {
             assert!(names.contains(&name), "{name} missing from {names:?}");
         }
         assert_eq!(program.node_domain(out), Some(torus()));
+    }
+
+    fn noise(b: &mut ProgramBuilder, seed: u64) -> NodeId {
+        b.add(Op::Noise {
+            basis: Basis::Gradient,
+            domain: torus(),
+            frequency: [4.0, 4.0],
+            seed,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn colors_and_components_round_trip() {
+        let mut b = ProgramBuilder::new();
+        let (r, g, bl) = (noise(&mut b, 1), noise(&mut b, 2), noise(&mut b, 3));
+        let color = b.add(Op::Color { r, g, b: bl }).unwrap();
+        assert_eq!(b.port_type(color), Ok(PortType::Color(Primaries::Rec709)));
+        let vector = b.add(Op::Vector3 { x: r, y: g, z: bl }).unwrap();
+        assert_ne!(
+            b.nodes[color.0 as usize].fingerprint, b.nodes[vector.0 as usize].fingerprint,
+            "a color is not a vector"
+        );
+        let direct = Noise::new(Basis::Gradient, torus(), Vec2::splat(4.0), 2).unwrap();
+        let program = b.finish_value(color).unwrap();
+        assert_eq!(program.output_type(), PortType::Color(Primaries::Rec709));
+        let green = program.channel(1).unwrap();
+        for p in [Vec2::new(0.1, 0.2), Vec2::new(1.7, 0.4)] {
+            assert_eq!(
+                green.eval(p, Footprint::POINT).to_bits(),
+                direct.eval(p, Footprint::POINT).to_bits()
+            );
+            let Value::Vector3(c) = program.eval(p, Footprint::POINT) else {
+                panic!("colors evaluate to three components");
+            };
+            assert_eq!(c.y.to_bits(), direct.eval(p, Footprint::POINT).to_bits());
+        }
+        assert!(matches!(
+            program.channel(3),
+            Err(ProgramError::TypeMismatch {
+                op: "component",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn type_rules_reject_misuse() {
+        let mut b = ProgramBuilder::new();
+        let n = noise(&mut b, 1);
+        let half = b
+            .add(Op::Constant {
+                domain: torus(),
+                value: 0.5,
+            })
+            .unwrap();
+        let v = b
+            .add(Op::Vector3 {
+                x: n,
+                y: n,
+                z: half,
+            })
+            .unwrap();
+        let normal = b.add(Op::Normalize { input: v }).unwrap();
+        assert_eq!(
+            b.port_type(normal),
+            Ok(PortType::Normal(NormalFrame::Domain))
+        );
+        // Normals never lerp.
+        assert!(matches!(
+            b.add(Op::Mix {
+                a: normal,
+                b: normal,
+                t: half
+            }),
+            Err(ProgramError::TypeMismatch { op: "mix", .. })
+        ));
+        // A vector is not a blend weight.
+        assert!(matches!(
+            b.add(Op::Mix {
+                a: n,
+                b: half,
+                t: v
+            }),
+            Err(ProgramError::TypeMismatch { op: "mix", .. })
+        ));
+        // Rotating a directional field would leave its values unrotated.
+        let rotate = Affine2 {
+            matrix: Mat2::from_cols(Vec2::Y, -Vec2::X),
+            translation: Vec2::ZERO,
+        };
+        assert!(matches!(
+            b.add(Op::Transform {
+                input: normal,
+                transform: rotate
+            }),
+            Err(ProgramError::TypeMismatch {
+                op: "transform",
+                ..
+            })
+        ));
+        let shift = Affine2 {
+            matrix: Mat2::IDENTITY,
+            translation: Vec2::new(0.5, 0.0),
+        };
+        assert!(
+            b.add(Op::Transform {
+                input: normal,
+                transform: shift
+            })
+            .is_ok()
+        );
+        // Identifiers never blend.
+        let id = b
+            .add(Op::ToId {
+                input: half,
+                levels: 4,
+            })
+            .unwrap();
+        assert_eq!(b.port_type(id), Ok(PortType::Id));
+        assert!(matches!(
+            b.add(Op::Add { a: id, b: id }),
+            Err(ProgramError::TypeMismatch { op: "add", .. })
+        ));
+        assert!(
+            b.add(Op::ToId {
+                input: half,
+                levels: 0
+            })
+            .is_err()
+        );
+        // Mismatched vectors do not add; a scalar scales a vector.
+        let v2 = b.add(Op::Vector2 { x: n, y: n }).unwrap();
+        assert!(b.add(Op::Add { a: v, b: v2 }).is_err());
+        let scaled = b.add(Op::Mul { a: half, b: v }).unwrap();
+        assert_eq!(b.port_type(scaled), Ok(PortType::Vector3));
+        assert!(b.add(Op::Min { a: half, b: v }).is_err());
+        // Scalar programs need a scalar output.
+        assert_eq!(
+            b.clone().finish(v),
+            Err(ProgramError::OutputType {
+                found: PortType::Vector3
+            })
+        );
+    }
+
+    #[test]
+    fn masks_stay_masks_only_when_in_range() {
+        let mut b = ProgramBuilder::new();
+        let n = noise(&mut b, 1);
+        let m = b.add(Op::AsMask { input: n }).unwrap();
+        let product = b.add(Op::Mul { a: m, b: m }).unwrap();
+        assert_eq!(b.port_type(product), Ok(PortType::Mask));
+        let sum = b.add(Op::Add { a: m, b: m }).unwrap();
+        assert_eq!(b.port_type(sum), Ok(PortType::Scalar));
+        let mixed = b.add(Op::Mix { a: m, b: m, t: m }).unwrap();
+        assert_eq!(b.port_type(mixed), Ok(PortType::Mask));
+        let loose = b.add(Op::Mix { a: m, b: m, t: n }).unwrap();
+        assert_eq!(b.port_type(loose), Ok(PortType::Scalar));
+        let program = b.finish(product).unwrap();
+        for i in 0..32 {
+            let v = program.eval(Vec2::new(i as f32 * 0.13, 0.4), Footprint::POINT);
+            assert!((0.0..=1.0).contains(&v));
+        }
+    }
+
+    #[test]
+    fn identifiers_quantize() {
+        let mut b = ProgramBuilder::new();
+        let d = torus();
+        let ids: Vec<_> = [-1.0, 0.0, 0.49, 0.5, 1.0, 7.0]
+            .into_iter()
+            .map(|value| {
+                let c = b.add(Op::Constant { domain: d, value }).unwrap();
+                b.add(Op::ToId {
+                    input: c,
+                    levels: 2,
+                })
+                .unwrap()
+            })
+            .collect();
+        let program = b.finish_value(ids[0]).unwrap();
+        let values: Vec<_> = ids
+            .iter()
+            .map(|&id| {
+                program
+                    .program()
+                    .eval_value(id, Vec2::ZERO, Footprint::POINT)
+            })
+            .collect();
+        assert_eq!(values, [0, 0, 0, 1, 1, 1].map(Value::Id));
+    }
+
+    #[test]
+    fn normal_blends_keep_detail_on_a_flat_base() {
+        let d = torus();
+        let mut b = ProgramBuilder::new();
+        let constant =
+            |b: &mut ProgramBuilder, value| b.add(Op::Constant { domain: d, value }).unwrap();
+        let (zero, one, tilt) = (
+            constant(&mut b, 0.0),
+            constant(&mut b, 1.0),
+            constant(&mut b, 0.6),
+        );
+        let flat_v = b
+            .add(Op::Vector3 {
+                x: zero,
+                y: zero,
+                z: one,
+            })
+            .unwrap();
+        let flat = b.add(Op::Normalize { input: flat_v }).unwrap();
+        let detail_v = b
+            .add(Op::Vector3 {
+                x: tilt,
+                y: zero,
+                z: one,
+            })
+            .unwrap();
+        let detail = b.add(Op::Normalize { input: detail_v }).unwrap();
+        let expected = Vec3::new(0.6, 0.0, 1.0).normalize();
+        // Reoriented blending reproduces the detail exactly; UDN keeps the
+        // base's z, so it flattens the detail slightly.
+        let udn = Vec3::new(expected.x, 0.0, 1.0).normalize();
+        for (method, expected) in [(NormalBlend::Reoriented, expected), (NormalBlend::Udn, udn)] {
+            let blended = b
+                .add(Op::BlendNormals {
+                    base: flat,
+                    detail,
+                    method,
+                })
+                .unwrap();
+            let Value::Vector3(n) = b
+                .clone()
+                .finish_value(blended)
+                .unwrap()
+                .eval(Vec2::ZERO, Footprint::POINT)
+            else {
+                panic!("normals are vectors");
+            };
+            assert!((n - expected).length() < 1e-6, "{method:?}: {n}");
+        }
+        // Reoriented blending of a tilted base and tilted detail tilts further.
+        let tilted = b
+            .add(Op::BlendNormals {
+                base: detail,
+                detail,
+                method: NormalBlend::Reoriented,
+            })
+            .unwrap();
+        let Value::Vector3(n) = b
+            .clone()
+            .finish_value(tilted)
+            .unwrap()
+            .eval(Vec2::ZERO, Footprint::POINT)
+        else {
+            panic!("normals are vectors");
+        };
+        assert!(n.x > expected.x && (n.length() - 1.0).abs() < 1e-6, "{n}");
+        assert!(matches!(
+            b.add(Op::BlendNormals {
+                base: flat,
+                detail: flat_v,
+                method: NormalBlend::Udn
+            }),
+            Err(ProgramError::TypeMismatch {
+                op: "blend-normals",
+                ..
+            })
+        ));
     }
 }

@@ -60,12 +60,14 @@ pub mod hash;
 mod noise;
 pub mod program;
 pub mod raster;
+mod types;
 
 pub use cellular::{CellOutput, CellSample, Cellular, CellularField};
 pub use domain::{Domain, DomainError, Footprint, MAX_LATTICE_CELLS};
 pub use field::{Affine2, PlaneField, ScalarField, Transformed};
 pub use fractal::{Fractal, FractalKind, FractalParams, MAX_OCTAVES};
 pub use noise::{Basis, Noise};
+pub use types::{NormalBlend, NormalFrame, PortType, Primaries, Value};
 
 #[cfg(test)]
 mod golden_tests;

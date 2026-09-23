@@ -579,3 +579,94 @@ fn tile_budgets_spread_work_and_converge_exactly() {
     // Settled: nothing left to run.
     assert_eq!(s.graph.run().unwrap().executed_nodes, 0);
 }
+
+#[test]
+fn unchanged_outputs_cut_off_their_dependents() {
+    let mut f = fixture();
+    f.graph.run().unwrap();
+    let before = f.graph.raster_value(f.soft).unwrap().fingerprint;
+
+    // Re-setting fbm's op to its current value re-runs fbm only; everything
+    // downstream sees an equal program and is cut off.
+    f.graph
+        .set_field_op(
+            f.fbm,
+            Op::Fractal {
+                basis: Basis::Value,
+                domain: domain(),
+                frequency: [4.0, 4.0],
+                seed: 2,
+                params: FractalParams::default(),
+            },
+        )
+        .unwrap();
+    let summary = f.graph.run().unwrap();
+    assert_eq!(summary.executed_nodes, 1);
+    assert_eq!(summary.cut_off_nodes, 4, "height, map, normals, soft");
+    assert_eq!(f.graph.run_count(f.fbm), Some(2));
+    for node in [f.height, f.map, f.normals, f.soft] {
+        assert_eq!(f.graph.run_count(node), Some(1));
+    }
+    assert_eq!(f.graph.raster_value(f.soft).unwrap().fingerprint, before);
+
+    // Re-setting a raster's parameters re-runs just that raster.
+    f.graph
+        .set_raster_params(f.soft, RasterParams::Blur(GaussianBlur { sigma: 0.02 }))
+        .unwrap();
+    let summary = f.graph.run().unwrap();
+    assert_eq!((summary.executed_nodes, summary.cut_off_nodes), (1, 0));
+    assert_eq!(f.graph.raster_value(f.soft).unwrap().fingerprint, before);
+}
+
+#[test]
+fn derivation_changes_with_equal_texels_rerun_without_recomputing_tiles() {
+    let d = domain();
+    let mut g = MaterialGraph::with_tile_size(8);
+    let noise = g
+        .field(
+            "noise",
+            Op::Noise {
+                basis: Basis::Gradient,
+                domain: d,
+                frequency: [8.0, 8.0],
+                seed: 1,
+            },
+            &[],
+        )
+        .unwrap();
+    let clamp = |max: f32| Op::Clamp {
+        input: operand(0),
+        min: -10.0,
+        max,
+    };
+    let clamped = g.field("clamped", clamp(10.0), &[noise]).unwrap();
+    let map = g.realize("map", clamped, 32, 32).unwrap();
+    let soft = g
+        .raster(
+            "soft",
+            RasterParams::Blur(GaussianBlur { sigma: 0.02 }),
+            map,
+        )
+        .unwrap();
+    g.run().unwrap();
+    let texels = |g: &MaterialGraph| match &g.raster_value(soft).unwrap().data {
+        RasterData::Scalar(r) => r.digest(),
+        RasterData::Vector3(r) => r.digest(),
+    };
+    let (before, fingerprint) = (texels(&g), g.raster_value(soft).unwrap().fingerprint);
+
+    // No noise value reaches either bound, so the texels cannot change, but
+    // the derivation does: the dependents re-run to keep their fingerprints
+    // exact, and recompute no tiles.
+    g.set_field_op(clamped, clamp(11.0)).unwrap();
+    let summary = g.run().unwrap();
+    assert_eq!((summary.executed_nodes, summary.cut_off_nodes), (3, 0));
+    let report = g.tile_report();
+    assert_eq!(report.tiles_changed, 0);
+    assert_eq!(
+        report.tiles_recomputed, 16,
+        "the map re-realizes, the blur reuses"
+    );
+    assert_eq!(texels(&g), before);
+    assert_ne!(g.raster_value(soft).unwrap().fingerprint, fingerprint);
+}

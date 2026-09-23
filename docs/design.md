@@ -262,12 +262,18 @@ execution repo:
   read. Examples are an exedra chart layout, an imaging scene, or a sample
   image; changing one of them dirties exactly its readers.
 
-`execution_graph` currently has **no early cutoff**: a node re-run with
-unchanged output still re-runs its dependents. Dapple will produce many such
-cases (a parameter nudged within a clamp, or a mask whose covered region did
-not change). Dapple values carry fingerprints, so the fix is a small upstream
-addition: an executor-supplied value equality or fingerprint that stops
-propagation. That is **the one upstream request** to the execution repo.
+**Early cutoff** works at two levels:
+
+- **Graph level.** `execution_graph`'s `Executor::values_equal` hook
+  (execution #98) stops propagation when a re-run node's output equals its
+  previous one. `DappleExecutor` compares field programs by fingerprint,
+  and rasters by fingerprint plus "no recomputed tile changed", so
+  re-setting parameters to their current value re-runs only that node.
+- **Tile level.** A raster's fingerprint names its derivation, which
+  recipes predict, so an edit that changes the derivation but not the
+  texels (a clamp bound no value reaches, a mask whose covered region did
+  not change) re-runs the dependents to keep their fingerprints exact. They
+  recompute no tiles, because the node marks no tile changed.
 
 ### Tiles with `invalidation`
 
@@ -605,7 +611,7 @@ stubbed.
 2. **The graph and incremental realization.**
    - `dapple_graph` on `execution_graph` (the executor branch, once landed),
      tile invalidation, fingerprints, the cache and reports.
-   - The early-cutoff request upstream.
+   - Early cutoff: `values_equal`, upstream in execution #98.
 3. **Sylva's first sets (unblocks sylva milestone 2).**
    - Rasters: blur, height → normal, AO, distance transform.
    - `dapple_imaging` coverage for leaf contours.
@@ -634,8 +640,9 @@ stubbed.
 2. **Shared hash/random crate:** decided: `exedra_math::keyed`, version 1
    of the keyed-hash contract, frozen by exedra_math's ADR-0001. Dapple
    re-exports it from `dapple_field::hash`; sylva uses the same contract.
-3. **Upstream early cutoff in `execution_graph`:** the shape of the
-   executor-supplied equality or fingerprint.
+3. **Upstream early cutoff in `execution_graph`:** decided: an
+   executor-supplied `values_equal` (execution #98); dapple compares by
+   fingerprint and, for rasters, unchanged tiles.
 4. **How far shapes go through `imaging`:** raster coverage through a CPU
    backend first; whether an exact analytic coverage evaluator belongs in
    imaging, windfoil or dapple.

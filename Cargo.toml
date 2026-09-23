@@ -78,11 +78,11 @@ dapple_encode = { path = "crates/dapple_encode" }
 dapple_field = { path = "crates/dapple_field" }
 dapple_graph = { path = "crates/dapple_graph" }
 dapple_raster = { path = "crates/dapple_raster" }
-# Pinned to forest-rs/execution main at the merge of #97 (the executor
-# seam), which no crates.io release contains yet.
+# Pinned to forest-rs/execution main at the merge of #98 (early cutoff, on
+# top of the executor seam from #97), which no crates.io release contains yet.
+execution_graph = { default-features = false, git = "https://github.com/forest-rs/execution", rev = "da3dd4cd6998480c26a2f8bbfd5dacf4675c9e7a" }
 # Pinned to forest-rs/exedra main at the merge of #91, which added the keyed
 # hash contract; no crates.io release contains it yet.
-execution_graph = { default-features = false, git = "https://github.com/forest-rs/execution", rev = "b5d3d6e08a509d0a0b23c8081d932b71b193e908" }
 exedra_math = { default-features = false, features = ["libm"], git = "https://github.com/forest-rs/exedra", rev = "d959d3dab36ccc50f77817f1a37e2ae4ff73cc23" }
 glam = { default-features = false, features = ["libm"], version = "0.33.8" }
 invalidation = { default-features = false, version = "0.2.0" }

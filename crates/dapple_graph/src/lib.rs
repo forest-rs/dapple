@@ -50,6 +50,17 @@
 //! Tile-wise results equal whole recomputation bit for bit.
 //! [`MaterialGraph::tile_report`] counts the work of the last run.
 //!
+//! ## Early cutoff
+//!
+//! A node that re-runs and produces the same value as before (the same
+//! program, or a raster with the same derivation and texels) stops
+//! propagation: its dependents are cut off instead of re-run, and
+//! [`RunSummary::cut_off_nodes`] counts them. Re-setting a node's parameters
+//! to their current value, for example, re-runs only that node. An edit
+//! that changes a derivation but not the texels, such as a clamp bound that
+//! no value reaches, still re-runs the dependents so their fingerprints stay
+//! exact, but they recompute no tiles.
+//!
 //! ```
 //! use dapple_field::program::Op;
 //! use dapple_field::{Basis, Domain};
@@ -1007,6 +1018,37 @@ impl Executor for DappleExecutor {
         Ok(())
     }
 
+    /// Early cutoff: an output equal to the node's previous one stops its
+    /// dependents from re-running.
+    ///
+    /// A field program is equal when its fingerprint is: fingerprints are
+    /// structural, so equal programs evaluate identically everywhere. A
+    /// raster is equal when its fingerprint is, it lies on the same grid in
+    /// the same tile space, and no recomputed tile's bits changed
+    /// ([`RasterValue::changed`]); tiles not recomputed are copied from the
+    /// previous output, so the texels are identical.
+    ///
+    /// Raster fingerprints identify a raster's derivation, which
+    /// [`Recipe::fingerprints`] predicts, so an edit that changes a
+    /// derivation never cuts off even when the texels come out the same.
+    /// Tile tracking covers that case instead: the node marks no tiles
+    /// changed, so its dependents re-run but recompute no tiles.
+    fn values_equal(&self, previous: &GraphValue, next: &GraphValue) -> bool {
+        match (previous, next) {
+            (GraphValue::Field(a), GraphValue::Field(b)) => {
+                a.program.fingerprint() == b.program.fingerprint()
+            }
+            (GraphValue::Raster(a), GraphValue::Raster(b)) => {
+                a.fingerprint == b.fingerprint
+                    && a.tile_space == b.tile_space
+                    && !b.changed
+                    && a.data.same_grid(&b.data)
+            }
+            (GraphValue::Params(a), GraphValue::Params(b)) => a == b,
+            _ => false,
+        }
+    }
+
     fn describe(&self, node: &DappleNode) -> Option<String> {
         Some(format!("{:?}", node.kind))
     }
@@ -1232,7 +1274,9 @@ impl MaterialGraph {
     /// Runs every node whose inputs changed since the last run.
     ///
     /// Realize and raster nodes recompute only the tiles their input changes
-    /// reach; [`MaterialGraph::tile_report`] counts the work.
+    /// reach; [`MaterialGraph::tile_report`] counts the work. Dependents of a
+    /// node whose output did not change are cut off
+    /// ([`RunSummary::cut_off_nodes`]); see the [crate docs](crate).
     pub fn run(&mut self) -> Result<RunSummary, MaterialError> {
         self.graph.executor_mut().tiles.begin_run();
         let summary = self.graph.run_all()?;

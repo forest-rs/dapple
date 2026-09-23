@@ -12,6 +12,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
+use dapple_encode::{Filter, Image, MaterialMaps, PackSettings, Profile, ktx2, pack};
 use dapple_field::program::{FieldProgram, Op, ProgramBuilder, ProgramError};
 use dapple_field::raster::{Grid, Region};
 use dapple_field::{
@@ -170,6 +171,70 @@ fn bark(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let distance = DistanceTransform { threshold: 0.5 }.apply(&fissures)?;
     write_raster(out, "bark-fissure-distance-2x2", &distance)?;
+
+    bark_set(out, &height, &normals, &ao)
+}
+
+/// Packs the bark study as a material and writes its textures, with full mip
+/// chains, as KTX2 and level 0 as PNG, for Lightweald and glTF.
+fn bark_set(
+    out: &Path,
+    height: &Raster,
+    normals: &Raster<[f32; 3]>,
+    ao: &Raster,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Linear bark colors: dark fissures, lighter plate tops.
+    let (dark, light) = ([0.035, 0.026, 0.02], [0.24, 0.19, 0.15]);
+    let mix = |h: f32| {
+        let t = (h / 0.6).clamp(0.0, 1.0);
+        [0, 1, 2].map(|c| dark[c] + (light[c] - dark[c]) * t)
+    };
+    let edge = height.edge();
+    let base_color: Vec<f32> = height.values().iter().flat_map(|&h| mix(h)).collect();
+    let roughness: Vec<f32> = height
+        .values()
+        .iter()
+        .map(|&h| 0.55 + 0.35 * (1.0 - h.clamp(0.0, 1.0)))
+        .collect();
+    let image = |channels, values| Image::new(SIZE, SIZE, channels, edge, values);
+    let maps = MaterialMaps {
+        base_color: Some(image(3, base_color)?),
+        normal: Some(Image::from(normals)),
+        specular_roughness: Some(image(1, roughness)?),
+        occlusion: Some(Image::from(ao)),
+        ..MaterialMaps::default()
+    };
+    let settings = PackSettings {
+        filter: Filter::Kaiser,
+        ..PackSettings::default()
+    };
+    for (profile, dir) in [(Profile::Lightweald, "lightweald"), (Profile::Gltf, "gltf")] {
+        let bundle = pack(&maps, profile, &settings)?;
+        let dir = out.join("bark-set").join(dir);
+        std::fs::create_dir_all(&dir)?;
+        for texture in &bundle.textures {
+            std::fs::write(
+                dir.join(format!("{}.ktx2", texture.name)),
+                ktx2::write(texture),
+            )?;
+            std::fs::write(
+                dir.join(format!("{}.png", texture.name)),
+                dapple_encode::png::write(texture)?,
+            )?;
+        }
+        let variance: Vec<String> = bundle
+            .report
+            .normal_variance
+            .iter()
+            .map(|v| format!("{v:.3}"))
+            .collect();
+        println!(
+            "bark set ({dir:?}): {} textures, {} levels, normal variance per level [{}]",
+            bundle.textures.len(),
+            bundle.textures[0].levels.len(),
+            variance.join(", ")
+        );
+    }
     Ok(())
 }
 

@@ -9,6 +9,7 @@ description = "Writes preview images of dapple_field fields and dapple_raster op
 publish = false
 
 [dependencies]
+dapple_encode = { features = ["std"], workspace = true }
 dapple_field.workspace = true
 dapple_raster.workspace = true
 glam.workspace = true

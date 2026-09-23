@@ -612,14 +612,11 @@ stubbed.
 
 ## Open decisions
 
-1. **The `openpbr` crate's home:** its own tiny repo, or lightweald's
-   workspace as an independently published crate. I lean lightweald's
-   workspace while it is the main consumer.
-2. **Shared hash/random crate:** sylva and dapple both need the same keyed hash.
-   It could go in exedra_math (exedra gap 12 already plans keyed randomness),
-   a tiny standalone crate, or be duplicated with a shared test vector. I lean
-   exedra_math if it lands soon, since sylva depends on exedra anyway.
-   Otherwise it goes in a tiny crate.
+1. **The `openpbr` crate's home:** decided: its own forest-rs repo,
+   published on crates.io.
+2. **Shared hash/random crate:** decided: `exedra_math::keyed`, version 1
+   of the keyed-hash contract, frozen by exedra_math's ADR-0001. Dapple
+   re-exports it from `dapple_field::hash`; sylva uses the same contract.
 3. **Upstream early cutoff in `execution_graph`:** the shape of the
    executor-supplied equality or fingerprint.
 4. **How far shapes go through `imaging`:** raster coverage through a CPU

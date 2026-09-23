@@ -11,6 +11,7 @@ keywords = ["procedural", "noise", "texture", "no_std"]
 categories = ["graphics", "no-std"]
 
 [dependencies]
+exedra_math.workspace = true
 glam.workspace = true
 libm.workspace = true
 

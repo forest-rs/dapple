@@ -5,7 +5,7 @@
 
 use glam::{Vec2, Vec3};
 
-use crate::{Raster, RasterError, RasterOp};
+use crate::{Raster, RasterError, RasterOp, TexelRect, check_into};
 
 /// Unit surface normals of the height field `scale * input`.
 ///
@@ -32,15 +32,37 @@ impl RasterOp for HeightToNormal {
     }
 
     fn apply(&self, input: &Raster) -> Result<Raster<[f32; 3]>, RasterError> {
-        if !self.scale.is_finite() {
-            return Err(RasterError::InvalidParameter { name: "scale" });
+        self.check()?;
+        Ok(input.map_texels(|x, y| self.texel(input, x, y)))
+    }
+
+    fn apply_into(
+        &self,
+        input: &Raster,
+        rect: TexelRect,
+        output: &mut Raster<[f32; 3]>,
+    ) -> Result<(), RasterError> {
+        self.check()?;
+        check_into(input, rect, output)?;
+        output.map_rect(rect, |x, y| self.texel(input, x, y));
+        Ok(())
+    }
+}
+
+impl HeightToNormal {
+    fn check(&self) -> Result<(), RasterError> {
+        if self.scale.is_finite() {
+            Ok(())
+        } else {
+            Err(RasterError::InvalidParameter { name: "scale" })
         }
+    }
+
+    fn texel(&self, input: &Raster, x: i64, y: i64) -> [f32; 3] {
         let step = input.texel() * 2.0;
-        Ok(input.map_texels(|x, y| {
-            let dx = (input.at(x + 1, y) - input.at(x - 1, y)) * self.scale / step.x;
-            let dy = (input.at(x, y + 1) - input.at(x, y - 1)) * self.scale / step.y;
-            Vec3::new(-dx, -dy, 1.0).normalize().to_array()
-        }))
+        let dx = (input.at(x + 1, y) - input.at(x - 1, y)) * self.scale / step.x;
+        let dy = (input.at(x, y + 1) - input.at(x, y - 1)) * self.scale / step.y;
+        Vec3::new(-dx, -dy, 1.0).normalize().to_array()
     }
 }
 

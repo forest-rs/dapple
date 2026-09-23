@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use glam::Vec2;
 
-use crate::{Raster, RasterError, RasterOp};
+use crate::{Raster, RasterError, RasterOp, TexelRect, check_into};
 
 /// Gaussian blur with standard deviation `sigma` in domain units.
 ///
@@ -65,20 +65,9 @@ impl RasterOp for GaussianBlur {
     }
 
     fn apply(&self, input: &Raster) -> Result<Raster, RasterError> {
-        if !(self.sigma.is_finite() && self.sigma >= 0.0) {
-            return Err(RasterError::InvalidParameter { name: "sigma" });
-        }
-        let texel = input.texel();
-        let limit = i64::from(input.width().max(input.height())) * 64;
-        for t in [texel.x, texel.y] {
-            if radius(self.sigma / t) > limit {
-                return Err(RasterError::InvalidParameter { name: "sigma" });
-            }
-        }
-        let kx = self.kernel(self.sigma / texel.x);
-        let ky = self.kernel(self.sigma / texel.y);
-        let rx = i64::try_from(kx.len() / 2).expect("kernel length fits i64");
-        let ry = i64::try_from(ky.len() / 2).expect("kernel length fits i64");
+        let (kx, ky) = self.prepare(input)?;
+        let rx = half(&kx);
+        let ry = half(&ky);
         let horizontal = input.map_texels(|x, y| {
             kx.iter()
                 .zip(-rx..=rx)
@@ -89,6 +78,73 @@ impl RasterOp for GaussianBlur {
                 .zip(-ry..=ry)
                 .fold(0.0, |sum, (w, i)| sum + w * horizontal.at(x, y + i))
         }))
+    }
+
+    fn apply_into(
+        &self,
+        input: &Raster,
+        rect: TexelRect,
+        output: &mut Raster,
+    ) -> Result<(), RasterError> {
+        let (kx, ky) = self.prepare(input)?;
+        check_into(input, rect, output)?;
+        if rect.is_empty() {
+            return Ok(());
+        }
+        let rx = half(&kx);
+        let ry = half(&ky);
+        // The horizontal pass over just the rows the vertical taps reach.
+        // Reading `input` at an unresolved row resolves it exactly as the full
+        // pass resolves the row it reads back, so the sums are identical.
+        let (x0, y0) = (i64::from(rect.x0), i64::from(rect.y0));
+        let columns = usize::try_from(rect.x1 - rect.x0).expect("columns fit usize");
+        let first = y0 - ry;
+        let last = i64::from(rect.y1) + ry;
+        let mut rows = Vec::with_capacity(columns * usize::try_from(last - first).unwrap_or(0));
+        for y in first..last {
+            for x in x0..i64::from(rect.x1) {
+                rows.push(
+                    kx.iter()
+                        .zip(-rx..=rx)
+                        .fold(0.0, |sum, (w, i)| sum + w * input.at(x + i, y)),
+                );
+            }
+        }
+        let at = |x: i64, y: i64| {
+            let row = usize::try_from(y - first).expect("row within the pass");
+            let column = usize::try_from(x - x0).expect("column within the pass");
+            rows[row * columns + column]
+        };
+        output.map_rect(rect, |x, y| {
+            ky.iter()
+                .zip(-ry..=ry)
+                .fold(0.0, |sum, (w, i)| sum + w * at(x, y + i))
+        });
+        Ok(())
+    }
+}
+
+fn half(kernel: &[f32]) -> i64 {
+    i64::try_from(kernel.len() / 2).expect("kernel length fits i64")
+}
+
+impl GaussianBlur {
+    /// Validates `sigma` against `input` and builds both kernels.
+    fn prepare(&self, input: &Raster) -> Result<(Vec<f32>, Vec<f32>), RasterError> {
+        if !(self.sigma.is_finite() && self.sigma >= 0.0) {
+            return Err(RasterError::InvalidParameter { name: "sigma" });
+        }
+        let texel = input.texel();
+        let limit = i64::from(input.width().max(input.height())) * 64;
+        for t in [texel.x, texel.y] {
+            if radius(self.sigma / t) > limit {
+                return Err(RasterError::InvalidParameter { name: "sigma" });
+            }
+        }
+        Ok((
+            self.kernel(self.sigma / texel.x),
+            self.kernel(self.sigma / texel.y),
+        ))
     }
 }
 

@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use glam::Vec2;
 
-use crate::{Raster, RasterError, RasterOp};
+use crate::{Raster, RasterError, RasterOp, TexelRect, check_into};
 
 /// Largest supported number of directions.
 const MAX_DIRECTIONS: u32 = 64;
@@ -97,6 +97,26 @@ impl RasterOp for AmbientOcclusion {
     }
 
     fn apply(&self, input: &Raster) -> Result<Raster, RasterError> {
+        let taps = self.prepare(input)?;
+        Ok(input.map_texels(|x, y| self.texel(input, &taps, x, y)))
+    }
+
+    fn apply_into(
+        &self,
+        input: &Raster,
+        rect: TexelRect,
+        output: &mut Raster,
+    ) -> Result<(), RasterError> {
+        let taps = self.prepare(input)?;
+        check_into(input, rect, output)?;
+        output.map_rect(rect, |x, y| self.texel(input, &taps, x, y));
+        Ok(())
+    }
+}
+
+impl AmbientOcclusion {
+    /// Validates the parameters against `input` and precomputes the taps.
+    fn prepare(&self, input: &Raster) -> Result<Vec<Vec<Tap>>, RasterError> {
         if !(self.radius.is_finite() && self.radius > 0.0) {
             return Err(RasterError::InvalidParameter { name: "radius" });
         }
@@ -111,28 +131,29 @@ impl RasterOp for AmbientOcclusion {
         if rx > limit || ry > limit {
             return Err(RasterError::InvalidParameter { name: "radius" });
         }
-        let taps = self.taps(input.texel());
-        Ok(input.map_texels(|x, y| {
-            let here = input.at(x, y) * self.scale;
-            let mut occlusion = 0.0;
-            for direction in &taps {
-                let mut slope = 0.0_f32;
-                for tap in direction {
-                    let (px, py) = (x + tap.x, y + tap.y);
-                    let a = input.at(px, py);
-                    let b = input.at(px + 1, py);
-                    let c = input.at(px, py + 1);
-                    let d = input.at(px + 1, py + 1);
-                    let top = a + (b - a) * tap.u;
-                    let bottom = c + (d - c) * tap.u;
-                    let h = (top + (bottom - top) * tap.v) * self.scale;
-                    slope = slope.max((h - here) / tap.distance);
-                }
-                // sin(atan(slope)) without trigonometry.
-                occlusion += slope / libm::sqrtf(1.0 + slope * slope);
+        Ok(self.taps(input.texel()))
+    }
+
+    fn texel(&self, input: &Raster, taps: &[Vec<Tap>], x: i64, y: i64) -> f32 {
+        let here = input.at(x, y) * self.scale;
+        let mut occlusion = 0.0;
+        for direction in taps {
+            let mut slope = 0.0_f32;
+            for tap in direction {
+                let (px, py) = (x + tap.x, y + tap.y);
+                let a = input.at(px, py);
+                let b = input.at(px + 1, py);
+                let c = input.at(px, py + 1);
+                let d = input.at(px + 1, py + 1);
+                let top = a + (b - a) * tap.u;
+                let bottom = c + (d - c) * tap.u;
+                let h = (top + (bottom - top) * tap.v) * self.scale;
+                slope = slope.max((h - here) / tap.distance);
             }
-            1.0 - occlusion / self.directions as f32
-        }))
+            // sin(atan(slope)) without trigonometry.
+            occlusion += slope / libm::sqrtf(1.0 + slope * slope);
+        }
+        1.0 - occlusion / self.directions as f32
     }
 }
 

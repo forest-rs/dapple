@@ -142,6 +142,59 @@ fn check_size(width: u32, height: u32) -> Result<usize, RasterError> {
     Ok(usize::try_from(count).expect("MAX_TEXELS fits usize"))
 }
 
+/// A half-open rectangle of texels: columns `x0..x1`, rows `y0..y1`.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub struct TexelRect {
+    /// First column.
+    pub x0: u32,
+    /// First row.
+    pub y0: u32,
+    /// One past the last column.
+    pub x1: u32,
+    /// One past the last row.
+    pub y1: u32,
+}
+
+impl TexelRect {
+    /// Every texel of a `width` × `height` grid.
+    #[must_use]
+    pub const fn full(width: u32, height: u32) -> Self {
+        Self {
+            x0: 0,
+            y0: 0,
+            x1: width,
+            y1: height,
+        }
+    }
+
+    /// Whether the rectangle holds no texels.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.x0 >= self.x1 || self.y0 >= self.y1
+    }
+
+    /// Number of texels.
+    #[must_use]
+    pub const fn area(&self) -> u64 {
+        if self.is_empty() {
+            0
+        } else {
+            (self.x1 - self.x0) as u64 * (self.y1 - self.y0) as u64
+        }
+    }
+
+    /// The rectangle clipped to a `width` × `height` grid.
+    #[must_use]
+    pub fn clipped(self, width: u32, height: u32) -> Self {
+        Self {
+            x0: self.x0.min(width),
+            y0: self.y0.min(height),
+            x1: self.x1.min(width),
+            y1: self.y1.min(height),
+        }
+    }
+}
+
 /// A row-major grid of texel values over a region of a domain.
 ///
 /// Texel `(x, y)` covers `origin + texel * [x, x + 1) × [y, y + 1)`; its value
@@ -242,6 +295,55 @@ impl<T: Copy> Raster<T> {
         )
     }
 
+    /// Whether `other` has the same size, placement, texel size and edge
+    /// policy, whatever its values.
+    #[must_use]
+    pub fn same_grid<U>(&self, other: &Raster<U>) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && self.origin == other.origin
+            && self.texel == other.texel
+            && self.edge == other.edge
+    }
+
+    fn check_rect(&self, rect: TexelRect) -> Result<(), RasterError> {
+        if rect.x1 > self.width || rect.y1 > self.height {
+            return Err(RasterError::InvalidSize {
+                width: rect.x1,
+                height: rect.y1,
+            });
+        }
+        Ok(())
+    }
+
+    /// Recomputes the texels of `rect` by `f`, leaving the rest.
+    pub(crate) fn map_rect(&mut self, rect: TexelRect, mut f: impl FnMut(i64, i64) -> T) {
+        let w = self.width as usize;
+        for y in rect.y0..rect.y1 {
+            for x in rect.x0..rect.x1 {
+                self.values[y as usize * w + x as usize] = f(i64::from(x), i64::from(y));
+            }
+        }
+    }
+
+    /// Copies the texels of `rect` from `source`, which must share this grid.
+    ///
+    /// # Errors
+    ///
+    /// [`RasterError::LengthMismatch`] when the grids differ, and
+    /// [`RasterError::InvalidSize`] when `rect` leaves the grid.
+    pub fn copy_rect(&mut self, source: &Self, rect: TexelRect) -> Result<(), RasterError> {
+        if !self.same_grid(source) {
+            return Err(RasterError::LengthMismatch {
+                expected: self.values.len(),
+                found: source.values.len(),
+            });
+        }
+        self.check_rect(rect)?;
+        self.map_rect(rect, |x, y| source.at(x, y));
+        Ok(())
+    }
+
     /// A raster with the same grid and `values` computed per texel by `f`.
     pub(crate) fn map_texels<U>(&self, mut f: impl FnMut(i64, i64) -> U) -> Raster<U> {
         let mut values = Vec::with_capacity(self.values.len());
@@ -295,6 +397,30 @@ impl<const N: usize> DigestValue for [f32; N] {
 }
 
 impl<T: DigestValue> Raster<T> {
+    /// Whether the texels of `rect` have the same bits in `self` and
+    /// `other`, which must share this grid.
+    #[must_use]
+    pub fn rect_bits_eq(&self, other: &Self, rect: TexelRect) -> bool {
+        if !self.same_grid(other) || self.check_rect(rect).is_err() {
+            return false;
+        }
+        let w = self.width as usize;
+        (rect.y0..rect.y1).all(|y| {
+            (rect.x0..rect.x1).all(|x| {
+                let i = y as usize * w + x as usize;
+                let words = |value: T| {
+                    let (mut out, mut n) = ([0_u64; 8], 0);
+                    value.words(&mut |v| {
+                        out[n] = v;
+                        n += 1;
+                    });
+                    (out, n)
+                };
+                words(self.values[i]) == words(other.values[i])
+            })
+        })
+    }
+
     /// A 64-bit digest of the grid, edge policy and exact value bits, for
     /// golden tests.
     #[must_use]
@@ -389,6 +515,12 @@ impl Realization {
         self.height
     }
 
+    /// Domain position of texel `(0, 0)`'s minimum corner.
+    #[must_use]
+    pub const fn origin(&self) -> Vec2 {
+        self.region.origin
+    }
+
     /// Texel size in domain units.
     #[must_use]
     pub fn texel(&self) -> Vec2 {
@@ -440,10 +572,68 @@ pub fn realize(field: &impl ScalarField, realization: Realization) -> Result<Ras
     )
 }
 
+/// Evaluates `field` at the texel centers of `rect` in `realization`,
+/// writing them into `output` and leaving its other texels.
+///
+/// Each texel gets exactly the value [`realize`] gives it, bit for bit, so a
+/// raster refreshed rectangle by rectangle equals a full realization.
+///
+/// # Errors
+///
+/// As [`realize`], plus [`RasterError::LengthMismatch`] when `output` is not
+/// on the realization's grid and [`RasterError::InvalidSize`] when `rect`
+/// leaves it.
+pub fn realize_into(
+    field: &impl ScalarField,
+    realization: Realization,
+    rect: TexelRect,
+    output: &mut Raster,
+) -> Result<(), RasterError> {
+    if realization.edge == Edge::Wrap && field.domain() != realization.domain {
+        return Err(RasterError::DomainMismatch {
+            expected: realization.domain,
+            found: field.domain(),
+        });
+    }
+    let texel = realization.texel();
+    if !(texel.is_finite() && texel.x > 0.0 && texel.y > 0.0) {
+        return Err(RasterError::InvalidRegion);
+    }
+    let footprint = Footprint::new(texel.max_element()).ok_or(RasterError::InvalidRegion)?;
+    if output.width != realization.width
+        || output.height != realization.height
+        || output.origin != realization.region.origin
+        || output.texel != texel
+        || output.edge != realization.edge
+    {
+        return Err(RasterError::LengthMismatch {
+            expected: check_size(realization.width, realization.height)?,
+            found: output.values.len(),
+        });
+    }
+    output.check_rect(rect)?;
+    if rect.is_empty() {
+        return Ok(());
+    }
+    let w = realization.width as usize;
+    let span = (rect.x1 - rect.x0) as usize;
+    let mut points = Vec::with_capacity(span);
+    for y in rect.y0..rect.y1 {
+        points.clear();
+        for x in rect.x0..rect.x1 {
+            let center = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+            points.push(realization.region.origin + center * texel);
+        }
+        let start = y as usize * w + rect.x0 as usize;
+        field.eval_batch(&points, footprint, &mut output.values[start..start + span]);
+    }
+    Ok(())
+}
+
 /// An operation on a scalar raster.
 pub trait RasterOp {
     /// The output value type.
-    type Output;
+    type Output: Copy;
 
     /// Texels read on each side of an output texel, per axis, at `texel`
     /// size; `None` when the whole raster may contribute.
@@ -451,6 +641,44 @@ pub trait RasterOp {
 
     /// Applies the operation.
     fn apply(&self, input: &Raster) -> Result<Raster<Self::Output>, RasterError>;
+
+    /// Recomputes the texels of `rect` in `output`, a previous result on
+    /// `input`'s grid, leaving its other texels.
+    ///
+    /// Each recomputed texel equals [`RasterOp::apply`]'s, bit for bit. The
+    /// default applies the whole operation and copies `rect`; local
+    /// operations override it to read only `rect` grown by
+    /// [`RasterOp::footprint`].
+    ///
+    /// # Errors
+    ///
+    /// As [`RasterOp::apply`], plus [`RasterError::LengthMismatch`] when
+    /// `output` is not on `input`'s grid and [`RasterError::InvalidSize`] when
+    /// `rect` leaves it.
+    fn apply_into(
+        &self,
+        input: &Raster,
+        rect: TexelRect,
+        output: &mut Raster<Self::Output>,
+    ) -> Result<(), RasterError> {
+        let full = self.apply(input)?;
+        output.copy_rect(&full, rect)
+    }
+}
+
+/// Checks that `output` shares `input`'s grid and holds `rect`.
+pub(crate) fn check_into<T: Copy>(
+    input: &Raster,
+    rect: TexelRect,
+    output: &Raster<T>,
+) -> Result<(), RasterError> {
+    if !input.same_grid(output) {
+        return Err(RasterError::LengthMismatch {
+            expected: input.values.len(),
+            found: output.values.len(),
+        });
+    }
+    output.check_rect(rect)
 }
 
 /// A scalar raster sampled back into a field with bilinear filtering.
@@ -555,3 +783,5 @@ pub(crate) fn bilinear(raster: &Raster, t: Vec2) -> f32 {
 
 #[cfg(test)]
 mod golden_tests;
+#[cfg(test)]
+mod rect_tests;

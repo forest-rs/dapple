@@ -10,6 +10,7 @@ use super::{FieldProgram, NodeId, Op};
 use crate::cellular::CellOutput;
 use crate::fractal::FractalKind;
 use crate::noise::Basis;
+use crate::tiling::{Pattern, TileOutput};
 use crate::types::PortType;
 
 /// Bounds of a scalar or mask node that hold at every point and footprint.
@@ -312,6 +313,27 @@ fn node_bounds(op: &Op, all: &[Bounds]) -> Bounds {
                 }
                 CellOutput::F2MinusF1 => ([0.0, CELL_DISTANCE_BOUND], Some(2.0 * cells)),
                 CellOutput::CellValue => ([0.0, 1.0], None),
+            };
+            Bounds {
+                range: Some(range),
+                slope,
+            }
+        }
+        Op::Tiling {
+            pattern, output, ..
+        } => {
+            // Tiles are at least one lattice cell wide.
+            let frequency = match pattern {
+                Pattern::Bond { frequency, .. } => frequency[0].max(frequency[1]),
+                Pattern::Herringbone { frequency, .. } => frequency,
+            };
+            let (range, slope) = match output {
+                // Half the narrowest tile side, moving at unit speed.
+                TileOutput::Edge => ([0.0, 0.5 / f64::from(frequency)], Some(1.0)),
+                // The rest jump at joints.
+                TileOutput::U | TileOutput::V | TileOutput::Vertical | TileOutput::TileValue => {
+                    ([0.0, 1.0], None)
+                }
             };
             Bounds {
                 range: Some(range),

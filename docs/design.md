@@ -512,6 +512,20 @@ digest pins the output.
 - scatter (Poisson-disc splats of a sub-field) with bounded overlap, so tile
   dependencies stay local.
 
+**As built** (`Op::Tiling`, `dapple_field::Tiling`): two layouts, both of
+axis-aligned rectangles. A bond is rows of equal tiles with a row-to-row
+shift (0 for a stack bond, 0.5 running, 1/3 or 1/4 raking); herringbone lays
+tiles `ratio` widths long alternately along x and y in stairs, repeating
+every `2 · ratio` widths. Each lookup gives the exact distance to the tile's
+nearest joint in domain units, the position along and across the tile, its
+orientation, and a per-tile value keyed by the tile's wrapped lattice
+anchor, so periodic layouts repeat their tiles exactly. Periodic domains
+refuse layouts that would not tile: whole tiles per period, whole row turns
+of the shift, whole herringbone repeats. Bevels, mortar and per-tile tone
+are built from these in the graph (`dapple_library`'s `brick` and
+`parquet`), not baked into the op; per-orientation grain mixes two
+anisotropic fields by the orientation output.
+
 **Tone:**
 - levels, curves (monotone cubic), clamp, remap, gradient map (a color ramp
   evaluated in linear space);

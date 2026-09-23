@@ -13,6 +13,9 @@ categories = ["graphics", "no-std"]
 [dependencies]
 dapple_field.workspace = true
 
+[dev-dependencies]
+glam.workspace = true
+
 [lints]
 workspace = true
 

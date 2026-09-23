@@ -64,6 +64,7 @@ use crate::noise::{Basis, Noise};
 use crate::raster::Region;
 use crate::shape::Disk;
 use crate::solid::{Cellular3, CellularField3, Fractal3, Noise3, SolidField};
+use crate::tiling::{Pattern, TileOutput, Tiling, TilingField};
 use crate::types::{NormalBlend, NormalFrame, PortType, Primaries, Value};
 
 mod bounds;
@@ -187,6 +188,17 @@ pub enum Op {
         seed: u64,
         /// The quantity returned.
         output: CellOutput,
+    },
+    /// One quantity of a tile layout ([`Tiling`]): bonds and herringbone.
+    Tiling {
+        /// Domain.
+        domain: Domain,
+        /// The layout.
+        pattern: Pattern,
+        /// Seed for per-tile values.
+        seed: u64,
+        /// The quantity returned.
+        output: TileOutput,
     },
     /// A filled [`Disk`] mask, zero outside its support.
     Disk {
@@ -723,6 +735,23 @@ impl Op {
                     cell_output_tag(output),
                 ]);
             }
+            Self::Tiling {
+                domain: d,
+                pattern,
+                seed,
+                output,
+            } => {
+                domain(&mut words, d);
+                match pattern {
+                    Pattern::Bond { frequency, shift } => {
+                        words.extend([0, float(frequency[0]), float(frequency[1]), float(shift)]);
+                    }
+                    Pattern::Herringbone { frequency, ratio } => {
+                        words.extend([1, float(frequency), u64::from(ratio)]);
+                    }
+                }
+                words.extend([seed, tile_output_tag(output)]);
+            }
             Self::Disk {
                 domain: d,
                 center,
@@ -875,6 +904,7 @@ impl Op {
             | Self::Noise { .. }
             | Self::Fractal { .. }
             | Self::Cellular { .. }
+            | Self::Tiling { .. }
             | Self::Disk { .. }
             | Self::Sample { .. }
             | Self::Constant3 { .. }
@@ -940,6 +970,7 @@ impl Op {
             | Self::Noise { .. }
             | Self::Fractal { .. }
             | Self::Cellular { .. }
+            | Self::Tiling { .. }
             | Self::Disk { .. }
             | Self::Sample { .. }
             | Self::Constant3 { .. }
@@ -1003,6 +1034,7 @@ impl Op {
             Self::Noise { .. } => "noise",
             Self::Fractal { .. } => "fractal",
             Self::Cellular { .. } => "cellular",
+            Self::Tiling { .. } => "tiling",
             Self::Disk { .. } => "disk",
             Self::Transform { .. } => "transform",
             Self::Demote { .. } => "demote",
@@ -1201,6 +1233,7 @@ enum Kernel {
     Noise(Noise),
     Fractal(Fractal),
     Cellular(CellularField),
+    Tiling(TilingField),
     Disk(Disk),
     Sample(SampleImage),
     Transform {
@@ -1439,6 +1472,7 @@ impl ProgramBuilder {
             | Op::Noise { domain, .. }
             | Op::Fractal { domain, .. }
             | Op::Cellular { domain, .. }
+            | Op::Tiling { domain, .. }
             | Op::Disk { domain, .. } => Space::Planar(domain),
             Op::Sample { ref image } => Space::Planar(image.domain()),
             Op::Constant3 { domain, .. }
@@ -1521,6 +1555,7 @@ impl ProgramBuilder {
             | Op::Noise { .. }
             | Op::Fractal { .. }
             | Op::Cellular { .. }
+            | Op::Tiling { .. }
             | Op::Constant3 { .. }
             | Op::Noise3 { .. }
             | Op::Fractal3 { .. }
@@ -1754,6 +1789,12 @@ impl ProgramBuilder {
             } => Kernel::Cellular(
                 Cellular::new(domain, Vec2::from(frequency), jitter, seed)?.output(output),
             ),
+            Op::Tiling {
+                domain,
+                pattern,
+                seed,
+                output,
+            } => Kernel::Tiling(Tiling::new(domain, pattern, seed)?.output(output)),
             Op::Disk {
                 domain,
                 center,
@@ -1959,6 +2000,7 @@ fn op_tag(op: &Op) -> u64 {
         Op::Length { .. } => 36,
         Op::Fract { .. } => 37,
         Op::Atan2 { .. } => 38,
+        Op::Tiling { .. } => 39,
     }
 }
 
@@ -2005,6 +2047,16 @@ const fn basis_tag(basis: Basis) -> u64 {
     match basis {
         Basis::Value => 0,
         Basis::Gradient => 1,
+    }
+}
+
+const fn tile_output_tag(output: TileOutput) -> u64 {
+    match output {
+        TileOutput::Edge => 0,
+        TileOutput::U => 1,
+        TileOutput::V => 2,
+        TileOutput::Vertical => 3,
+        TileOutput::TileValue => 4,
     }
 }
 
@@ -2423,6 +2475,7 @@ impl Kernel {
             Self::Fractal(ref fractal) => fractal.eval_gradient(q, footprint).1.extend(0.0),
             Self::Disk(ref disk) => disk.eval_gradient(q, footprint).1.extend(0.0),
             Self::Cellular(ref cellular) => cellular.eval_gradient(q, footprint).1.extend(0.0),
+            Self::Tiling(ref tiling) => tiling.eval_gradient(q, footprint).1.extend(0.0),
             Self::Sample(ref image) => image.sample_gradient(q, footprint).1.extend(0.0),
             Self::Noise3(ref noise) => noise.eval_gradient(p, footprint).1,
             Self::Fractal3(ref fractal) => fractal.eval_gradient(p, footprint).1,
@@ -2505,6 +2558,7 @@ impl Kernel {
             Self::Noise(ref noise) => Value::Scalar(noise.eval(q, footprint)),
             Self::Fractal(ref fractal) => Value::Scalar(fractal.eval(q, footprint)),
             Self::Cellular(ref cellular) => Value::Scalar(cellular.eval(q, footprint)),
+            Self::Tiling(ref tiling) => Value::Scalar(tiling.eval(q, footprint)),
             Self::Disk(ref disk) => Value::Scalar(disk.eval(q, footprint)),
             Self::Sample(ref image) => Value::Scalar(image.sample(q, footprint)),
             Self::Noise3(ref noise) => Value::Scalar(noise.eval(p, footprint)),

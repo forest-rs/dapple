@@ -32,6 +32,9 @@
 //!   periodic fractals tile.
 //! - [`Cellular`]: Worley F1, F2, exact cell-border distance, and per-cell IDs
 //!   and values, selected as a field with [`Cellular::output`].
+//! - [`Tiling`]: tile layouts (stack and running bonds, herringbone) with
+//!   exact joint distances, in-tile coordinates, orientation and per-tile
+//!   values, selected as a field with [`Tiling::output`].
 //! - [`Disk`]: a filled, antialiased disk mask, zero outside its support.
 //! - [`Transformed`]: domain-checked affine coordinate maps.
 //!
@@ -80,6 +83,7 @@ pub mod program;
 pub mod raster;
 mod shape;
 mod solid;
+mod tiling;
 mod types;
 
 pub use cellular::{CellOutput, CellSample, Cellular, CellularField};
@@ -90,6 +94,7 @@ pub use image::{Edge, ImageLevel, SampleImage};
 pub use noise::{Basis, Noise};
 pub use shape::Disk;
 pub use solid::{Cellular3, CellularField3, Fractal3, Noise3, SolidField, central_difference3};
+pub use tiling::{MAX_HERRINGBONE_RATIO, Pattern, TileOutput, TileSample, Tiling, TilingField};
 pub use types::{NormalBlend, NormalFrame, PortType, Primaries, Value};
 
 #[cfg(test)]

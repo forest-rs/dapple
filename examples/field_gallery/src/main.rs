@@ -30,7 +30,7 @@ use dapple_raster::{
 };
 use glam::{Vec2, Vec3};
 
-use dapple_library::oak;
+use dapple_library::{brick, oak, parquet};
 
 const SIZE: u32 = 256;
 const SEED: u64 = 7;
@@ -131,6 +131,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     bark(&out)?;
     wood(&out)?;
+    patterns(&out)?;
+    Ok(())
+}
+
+/// Tile-layout materials from `dapple_library`, one 1 m period each: the
+/// base color, and the base color lit by a low raking light over the
+/// height's normals, so relief and joints read.
+fn patterns(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    const PATTERN_SIZE: u32 = 1024;
+    let torus = Domain::periodic(1, 1).expect("valid period");
+    let materials = [
+        ("brick", brick::height(torus)?, brick::color(torus)?, 0.012),
+        (
+            "parquet",
+            parquet::height(torus)?,
+            parquet::color(torus)?,
+            0.001,
+        ),
+    ];
+    for (name, height, color, relief) in materials {
+        let at = Realization::period(torus, PATTERN_SIZE, PATTERN_SIZE)?;
+        let height = realize(&height, at)?;
+        let channels = (0..3)
+            .map(|c| Ok(realize(&color.channel(c)?, at)?))
+            .collect::<Result<Vec<Raster>, Box<dyn std::error::Error>>>()?;
+        let base: Vec<[f32; 3]> = (0..height.values().len())
+            .map(|i| [0, 1, 2].map(|c| channels[c].values()[i]))
+            .collect();
+        write_color(
+            out,
+            &format!("{name}-base-color"),
+            PATTERN_SIZE,
+            PATTERN_SIZE,
+            &base,
+        )?;
+        let normals = HeightToNormal { scale: relief }.apply(&height)?;
+        let light = Vec3::new(-0.6, 0.5, 0.62).normalize();
+        let lit: Vec<[f32; 3]> = base
+            .iter()
+            .zip(normals.values())
+            .map(|(c, n)| {
+                let shade = 0.15 + 1.1 * Vec3::from(*n).dot(light).max(0.0);
+                c.map(|v| v * shade)
+            })
+            .collect();
+        write_color(
+            out,
+            &format!("{name}-lit"),
+            PATTERN_SIZE,
+            PATTERN_SIZE,
+            &lit,
+        )?;
+    }
     Ok(())
 }
 

@@ -1524,8 +1524,7 @@ impl FieldProgram {
     /// the chain rule through every op with a closed-form derivative, and
     /// through transforms and warps; any other node's gradient, such as a
     /// vector component's, is taken by central differences of that node
-    /// (see [`central_difference`](crate::central_difference)), as are
-    /// cellular noise's.
+    /// (see [`central_difference`](crate::central_difference)).
     ///
     /// # Panics
     ///
@@ -1683,6 +1682,7 @@ impl Kernel {
             Self::Noise(ref noise) => noise.eval_gradient(p, footprint).1,
             Self::Fractal(ref fractal) => fractal.eval_gradient(p, footprint).1,
             Self::Disk(ref disk) => disk.eval_gradient(p, footprint).1,
+            Self::Cellular(ref cellular) => cellular.eval_gradient(p, footprint).1,
             Self::Binary(op, ..) => {
                 let (a, b) = (s(0)?, s(1)?);
                 let (ga, gb) = (gradients[0], gradients[1]);
@@ -3003,7 +3003,16 @@ mod tests {
     fn primitive_gradients_keep_their_values() {
         let d = torus();
         let footprint = Footprint::new(0.01).unwrap();
-        let fields: [&dyn ScalarField; 4] = [
+        let cells = Cellular::new(d, Vec2::new(4.0, 2.0), 0.8, 5).unwrap();
+        let (f1, edges, border) = (
+            cells.output(CellOutput::F1),
+            cells.output(CellOutput::F2MinusF1),
+            cells.output(CellOutput::Border),
+        );
+        let fields: [&dyn ScalarField; 7] = [
+            &f1,
+            &edges,
+            &border,
             &Noise::new(Basis::Gradient, d, Vec2::new(4.0, 6.0), 9).unwrap(),
             &Noise::new(Basis::Value, d, Vec2::new(4.0, 6.0), 9).unwrap(),
             &Fractal::new(

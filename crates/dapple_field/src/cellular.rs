@@ -155,12 +155,19 @@ impl Cellular {
     /// Looks up the nearest feature points around `p`.
     #[must_use]
     pub fn sample(&self, p: Vec2) -> CellSample {
+        self.sample_gradient::<false>(p).0
+    }
+
+    /// [`Cellular::sample`], and when `GRADIENT` the gradients of `f1`,
+    /// `f2` and `border` with respect to the in-cell position.
+    fn sample_gradient<const GRADIENT: bool>(&self, p: Vec2) -> (CellSample, [Vec2; 3]) {
         let at = self.lattice.locate(p);
         let q = at.frac;
 
         let mut points = [(Vec2::ZERO, 0_u64); 25];
         let mut nearest = (f32::INFINITY, 0);
         let mut second = f32::INFINITY;
+        let mut second_index = 0;
         for (slot, (dy, dx)) in points
             .iter_mut()
             .zip((-2..=2).flat_map(|dy| (-2..=2).map(move |dx| (dy, dx))))
@@ -171,13 +178,16 @@ impl Cellular {
             let d = (*point - q).length_squared();
             if d < nearest.0 {
                 second = nearest.0;
+                second_index = nearest.1;
                 nearest = (d, index);
             } else if d < second {
                 second = d;
+                second_index = index;
             }
         }
         let (near_point, id) = points[nearest.1];
         let mut border = f32::INFINITY;
+        let mut border_axis = Vec2::ZERO;
         for (index, (point, _)) in points.iter().enumerate() {
             if index == nearest.1 {
                 continue;
@@ -187,16 +197,39 @@ impl Cellular {
             let length = axis.length();
             if length > 0.0 {
                 let midpoint = (*point + near_point) * 0.5;
-                border = border.min((midpoint - q).dot(axis) / length);
+                let distance = (midpoint - q).dot(axis) / length;
+                if GRADIENT && distance < border {
+                    border_axis = axis / length;
+                }
+                border = border.min(distance);
             }
         }
-        CellSample {
+        let sample = CellSample {
             f1: libm::sqrtf(nearest.0),
             f2: libm::sqrtf(second),
             border,
             id,
             value: unit_f32(hash(id, &[VALUE_TAG])),
+        };
+        if !GRADIENT {
+            return (sample, [Vec2::ZERO; 3]);
         }
+        // A distance's gradient is the unit vector away from its point.
+        let away = |point: Vec2, distance: f32| {
+            if distance > 0.0 {
+                (q - point) / distance
+            } else {
+                Vec2::ZERO
+            }
+        };
+        (
+            sample,
+            [
+                away(near_point, sample.f1),
+                away(points[second_index].0, sample.f2),
+                -border_axis,
+            ],
+        )
     }
 }
 
@@ -219,8 +252,11 @@ fn select(output: CellOutput, s: &CellSample) -> f32 {
 /// weight the value is returned exactly, and at zero weight the noise is not
 /// sampled. Detail within a cell (its edges) is not filtered separately.
 ///
-/// Its gradient ([`ScalarField::eval_gradient`]) is numerical, by
-/// [`central_difference`](crate::central_difference).
+/// Its gradient ([`ScalarField::eval_gradient`]) is analytic: F1 and F2
+/// move with the unit vector away from their feature points, the border
+/// distance against the normal of its nearest bisector, and cell values not
+/// at all. On a cell border itself the gradient is that of the side the
+/// sample picked.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct CellularField {
     cellular: Cellular,
@@ -251,6 +287,27 @@ impl ScalarField for CellularField {
             value
         } else {
             self.mean + (value - self.mean) * weight
+        }
+    }
+
+    fn eval_gradient(&self, p: Vec2, footprint: Footprint) -> (f32, Vec2) {
+        let weight = footprint.band_weight(self.cellular.lattice.max_frequency());
+        if weight == 0.0 {
+            return (self.mean, Vec2::ZERO);
+        }
+        let (sample, [df1, df2, dborder]) = self.cellular.sample_gradient::<true>(p);
+        let value = select(self.output, &sample);
+        let gradient = match self.output {
+            CellOutput::F1 => df1,
+            CellOutput::F2 => df2,
+            CellOutput::F2MinusF1 => df2 - df1,
+            CellOutput::Border => dborder,
+            CellOutput::CellValue => Vec2::ZERO,
+        } * self.cellular.lattice.frequency;
+        if weight == 1.0 {
+            (value, gradient)
+        } else {
+            (self.mean + (value - self.mean) * weight, gradient * weight)
         }
     }
 }

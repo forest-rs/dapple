@@ -16,8 +16,9 @@
 //!   textures and their mips do not alias. Cellular noise fades to its mean
 //!   as cells shrink below a few footprints.
 //! - **Gradients.** [`ScalarField::eval_gradient`] returns a field's value and
-//!   its gradient, analytic for noise, fractals, disks, transforms and
-//!   programs built from them, numerical ([`central_difference`]) otherwise.
+//!   its gradient, analytic for noise, fractals, cellular noise, disks,
+//!   transforms and programs built from them, numerical
+//!   ([`central_difference`]) otherwise.
 //!   Warps size their footprints from it.
 //! - **Results are bit-exact.** All randomness is keyed hashing ([`hash`]), with
 //!   no sequential streams. The math is plain IEEE `f32` add, multiply, and

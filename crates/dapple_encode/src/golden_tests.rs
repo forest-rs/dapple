@@ -74,7 +74,7 @@ fn lightweald_box_ktx2_is_pinned() {
         digests(Profile::Lightweald, Filter::Box),
         [
             ("base_color", 13_986_416_310_451_596_289),
-            ("normal", 12_308_086_410_141_009_585),
+            ("normal", 14_446_010_263_683_254_402),
             ("orm", 8_832_060_144_503_095_627),
         ]
     );
@@ -86,7 +86,7 @@ fn gltf_kaiser_ktx2_is_pinned() {
         digests(Profile::Gltf, Filter::Kaiser),
         [
             ("base_color", 16_338_841_297_191_050_071),
-            ("normal", 4_645_354_817_319_585_816),
+            ("normal", 6_860_539_956_111_657_120),
             ("orm", 12_241_470_466_670_387_981),
         ]
     );

@@ -76,11 +76,16 @@ pub struct PackSettings {
     /// `specular_roughness_anisotropy` where a direction map is given but no
     /// strength map.
     pub specular_roughness_anisotropy: f32,
+    /// Widen roughness mips by the variance of the normals they cover
+    /// (Toksvig). Off, roughness is filtered alone and the textures match a
+    /// plain bake of the same maps.
+    pub fold_normal_variance: bool,
 }
 
 impl Default for PackSettings {
-    /// Box filtering, no coverage preservation, and OpenPBR's defaults:
-    /// roughness 0.3, base color 0.8, metalness 0, anisotropy 0.
+    /// Box filtering, no coverage preservation, normal variance folded into
+    /// roughness, and OpenPBR's defaults: roughness 0.3, base color 0.8,
+    /// metalness 0, anisotropy 0.
     fn default() -> Self {
         Self {
             filter: Filter::Box,
@@ -89,8 +94,22 @@ impl Default for PackSettings {
             base_color: [0.8; 3],
             base_metalness: 0.0,
             specular_roughness_anisotropy: 0.0,
+            fold_normal_variance: true,
         }
     }
+}
+
+/// How a texture is sampled, which decides its pool format and mip rule in a
+/// renderer; the same three kinds as `lightweald_material::TextureKind`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum TextureKind {
+    /// Color, stored sRGB-encoded and decoded before filtering.
+    Color,
+    /// Linear data, each channel independent.
+    Data,
+    /// A tangent-space normal, glTF convention (+Y toward the image top);
+    /// renderers may keep only X and Y and rebuild Z.
+    Normal,
 }
 
 /// One encoded texture with its full mip chain.
@@ -98,6 +117,8 @@ impl Default for PackSettings {
 pub struct EncodedTexture {
     /// The texture's role, for example `"base_color"`, `"normal"` or `"orm"`.
     pub name: &'static str,
+    /// How the texture is sampled.
+    pub kind: TextureKind,
     /// The texel format of every level.
     pub format: PixelFormat,
     /// Width of level 0.
@@ -209,6 +230,11 @@ fn encode(
         .collect();
     EncodedTexture {
         name,
+        kind: if format.is_srgb() {
+            TextureKind::Color
+        } else {
+            TextureKind::Data
+        },
         format,
         width,
         height,
@@ -319,7 +345,14 @@ pub fn pack(
                 settings.filter,
             )?;
             report.normal_variance = chain.max_variance.clone();
-            (Some(chain.normals), Some(chain.roughness))
+            let roughness = if settings.fold_normal_variance {
+                Some(chain.roughness)
+            } else {
+                maps.specular_roughness
+                    .as_ref()
+                    .map(|r| roughness_mips(r, settings.filter))
+            };
+            (Some(chain.normals), roughness)
         }
         None => (
             None,
@@ -530,6 +563,13 @@ pub fn pack(
             }
         }
     }
+    if profile != Profile::Raw {
+        for texture in &mut textures {
+            if texture.name == "normal" {
+                texture.kind = TextureKind::Normal;
+            }
+        }
+    }
     Ok(Bundle {
         profile,
         textures,
@@ -543,7 +583,9 @@ pub fn pack(
 /// Values are written as they are: clamped and quantized for unsigned
 /// normalized formats (sRGB-encoded RGB for [`PixelFormat::Rgba8Srgb`]), and
 /// as little-endian IEEE bits for [`PixelFormat::R32Float`]. The chain's
-/// channel count must match the format's.
+/// channel count must match the format's. The texture's kind is
+/// [`TextureKind::Color`] for sRGB formats and [`TextureKind::Data`]
+/// otherwise.
 pub fn encode_data(
     name: &'static str,
     chain: &MipChain,
@@ -583,6 +625,11 @@ pub fn encode_data(
         .collect();
     Ok(EncodedTexture {
         name,
+        kind: if format.is_srgb() {
+            TextureKind::Color
+        } else {
+            TextureKind::Data
+        },
         format,
         width: base.width,
         height: base.height,
@@ -784,5 +831,34 @@ mod tests {
                 PixelFormat::R32Float
             ))
         ));
+    }
+
+    #[test]
+    fn variance_folding_can_be_turned_off() {
+        let s = core::f32::consts::FRAC_1_SQRT_2;
+        let values: Vec<f32> = (0..16)
+            .flat_map(|i| {
+                if i % 2 == 0 {
+                    [s, 0.0, s]
+                } else {
+                    [-s, 0.0, s]
+                }
+            })
+            .collect();
+        let maps = MaterialMaps {
+            normal: Some(Image::new(4, 4, 3, Edge::Wrap, values).unwrap()),
+            specular_roughness: Some(flat(1, &[0.3])),
+            ..MaterialMaps::default()
+        };
+        let roughness = |fold| {
+            let settings = PackSettings {
+                fold_normal_variance: fold,
+                ..PackSettings::default()
+            };
+            let bundle = pack(&maps, Profile::Lightweald, &settings).unwrap();
+            bundle.texture("orm").unwrap().levels[1][1]
+        };
+        assert_eq!(roughness(false), quantize_unorm8(0.3));
+        assert!(roughness(true) > roughness(false) + 50);
     }
 }

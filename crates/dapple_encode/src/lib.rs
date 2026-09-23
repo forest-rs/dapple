@@ -82,7 +82,8 @@ pub use mips::{
     id_mips, normal_mips, preserve_coverage,
 };
 pub use pack::{
-    Bundle, EncodedTexture, MaterialMaps, PackReport, PackSettings, Profile, encode_data, pack,
+    Bundle, EncodedTexture, MaterialMaps, PackReport, PackSettings, Profile, TextureKind,
+    encode_data, pack,
 };
 pub use quantize::{PixelFormat, linear_to_srgb, quantize_unorm8, quantize_unorm16};
 

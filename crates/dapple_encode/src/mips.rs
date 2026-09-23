@@ -260,11 +260,14 @@ pub struct NormalChain {
 
 /// Normal mips with the normals' variance moved into roughness.
 ///
-/// Levels filter the *unnormalized* averages down the chain, so each level
-/// holds the average of the level-0 unit normals it covers. That average's
-/// length `L ≤ 1` shrinks as the normals disagree. The stored normal is the
-/// average renormalized, and the lost length becomes variance by Toksvig's
-/// estimate
+/// Stored normals follow GPU mip generation: each level averages the level
+/// above's unit normals and renormalizes. With [`Filter::Box`] on
+/// power-of-two sizes that is exactly Lightweald's `texture_bake` chain.
+///
+/// Variance is measured separately, from the *unnormalized* average of the
+/// level-0 unit normals each texel covers. That average's length `L ≤ 1`
+/// shrinks as the normals disagree, and the lost length becomes variance by
+/// Toksvig's estimate
 /// `σ² = (1 − L) / L`, added to the GGX `α²` of the roughness:
 /// `α′² = min(α² + σ², 1)`, with OpenPBR's `α = specular_roughness²`.
 /// Roughness itself is filtered in `α²`, the space in which widths add, so
@@ -327,33 +330,48 @@ pub fn normal_mips(
     let mut normal_levels = Vec::with_capacity(raw.levels.len());
     let mut roughness_levels = Vec::with_capacity(raw.levels.len());
     let mut max_variance = Vec::with_capacity(raw.levels.len());
+    let renormalize = |image: &Image| Image {
+        values: image
+            .values
+            .chunks_exact(3)
+            .flat_map(|t| {
+                let len = libm::sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
+                if len > 1e-6 {
+                    let inv = 1.0 / len;
+                    [t[0] * inv, t[1] * inv, t[2] * inv]
+                } else {
+                    [0.0, 0.0, 1.0]
+                }
+            })
+            .collect(),
+        ..image.clone()
+    };
     for (index, (n, a2)) in raw.levels.iter().zip(&alpha_sq_chain.levels).enumerate() {
-        let mut unit = Vec::with_capacity(n.values.len());
+        // Stored normals: each level averages the level above's unit normals
+        // and renormalizes, as GPU mip generation does.
+        let stored = match normal_levels.last() {
+            None => renormalize(n),
+            Some(above) => renormalize(&downsample(above, filter)),
+        };
         let mut rough = Vec::with_capacity(a2.values.len());
         let mut level_max = 0.0_f32;
         for (t, &a2) in n.values.chunks_exact(3).zip(&a2.values) {
             let len = libm::sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
-            let (normal, variance) = if index == 0 {
-                // Level 0 is the input: its own spread is not measured here.
-                let inv = if len > 0.0 { 1.0 / len } else { 0.0 };
-                ([t[0] * inv, t[1] * inv, t[2] * inv], 0.0)
+            // Level 0 is the input: its own spread is not measured here.
+            let variance = if index == 0 {
+                0.0
             } else if len > 1e-6 {
-                let inv = 1.0 / len;
                 let l = len.min(1.0);
-                ([t[0] * inv, t[1] * inv, t[2] * inv], (1.0 - l) / l)
+                (1.0 - l) / l
             } else {
-                ([0.0, 0.0, 1.0], 1.0)
+                1.0
             };
-            unit.extend_from_slice(&normal);
             level_max = level_max.max(variance);
             let widened = (a2 + variance).clamp(0.0, 1.0);
             rough.push(libm::sqrtf(libm::sqrtf(widened)));
         }
         max_variance.push(level_max);
-        normal_levels.push(Image {
-            values: unit,
-            ..n.clone()
-        });
+        normal_levels.push(stored);
         roughness_levels.push(Image {
             values: rough,
             ..a2.clone()
@@ -375,6 +393,7 @@ pub fn normal_mips(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::quantize_unorm8;
     use alloc::vec;
     use dapple_raster::Edge;
 
@@ -551,5 +570,90 @@ mod tests {
         );
         let ids = Image::new(2, 2, 1, Edge::Wrap, vec![4.0, 4.0, 1.0, 4.0]).unwrap();
         assert_eq!(id_mips(&ids).unwrap().levels()[1].values, [4.0]);
+    }
+
+    /// Lightweald `texture_bake`'s normal chain, transcribed: 2 × 2 averages
+    /// of unit normals, renormalized, falling back to +Z.
+    fn texture_bake_chain(width: u32, height: u32, xy: &[[u8; 2]]) -> Vec<Vec<[u8; 2]>> {
+        let decode = |b: u8| f32::from(b) / 255.0 * 2.0 - 1.0;
+        let encode = |v: f32| quantize_unorm8(v * 0.5 + 0.5);
+        let mut normals: Vec<[f32; 3]> = xy
+            .iter()
+            .map(|t| {
+                let (x, y) = (decode(t[0]), decode(t[1]));
+                [x, y, (1.0 - x * x - y * y).max(0.0).sqrt()]
+            })
+            .collect();
+        let (mut w, mut h) = (width, height);
+        let mut levels = vec![xy.to_vec()];
+        while w > 1 || h > 1 {
+            let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+            let at = |x: u32, y: u32| normals[(y.min(h - 1) * w + x.min(w - 1)) as usize];
+            let mut next = Vec::new();
+            for y in 0..nh {
+                for x in 0..nw {
+                    let s = [
+                        at(2 * x, 2 * y),
+                        at(2 * x + 1, 2 * y),
+                        at(2 * x, 2 * y + 1),
+                        at(2 * x + 1, 2 * y + 1),
+                    ]
+                    .iter()
+                    .fold([0.0; 3], |a, n| [a[0] + n[0], a[1] + n[1], a[2] + n[2]]);
+                    let l = (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt();
+                    next.push(if l > 1e-6 {
+                        [s[0] / l, s[1] / l, s[2] / l]
+                    } else {
+                        [0.0, 0.0, 1.0]
+                    });
+                }
+            }
+            normals = next;
+            (w, h) = (nw, nh);
+            levels.push(
+                normals
+                    .iter()
+                    .map(|n| [encode(n[0]), encode(n[1])])
+                    .collect(),
+            );
+        }
+        levels
+    }
+
+    #[test]
+    fn normal_chain_matches_texture_bake() {
+        let (w, h) = (16_u32, 8_u32);
+        let xy: Vec<[u8; 2]> = (0..w * h)
+            .map(|i| {
+                [
+                    u8::try_from((i * 37 + 11) % 180 + 38).unwrap(),
+                    u8::try_from((i * 53 + 7) % 180 + 38).unwrap(),
+                ]
+            })
+            .collect();
+        let decode = |b: u8| f32::from(b) / 255.0 * 2.0 - 1.0;
+        let values: Vec<f32> = xy
+            .iter()
+            .flat_map(|t| {
+                let (x, y) = (decode(t[0]), decode(t[1]));
+                [x, y, (1.0 - x * x - y * y).max(0.0).sqrt()]
+            })
+            .collect();
+        let image = Image::new(w, h, 3, Edge::Clamp, values).unwrap();
+        let ours = normal_mips(&image, None, 0.5, Filter::Box).unwrap();
+        let theirs = texture_bake_chain(w, h, &xy);
+        assert_eq!(ours.normals.levels().len(), theirs.len());
+        for (level, (a, b)) in ours.normals.levels().iter().zip(&theirs).enumerate() {
+            for (i, (n, t)) in a.values.chunks_exact(3).zip(b).enumerate() {
+                let q = [
+                    quantize_unorm8(n[0] * 0.5 + 0.5),
+                    quantize_unorm8(n[1] * 0.5 + 0.5),
+                ];
+                assert!(
+                    q[0].abs_diff(t[0]) <= 1 && q[1].abs_diff(t[1]) <= 1,
+                    "level {level} texel {i}: {q:?} vs {t:?}"
+                );
+            }
+        }
     }
 }

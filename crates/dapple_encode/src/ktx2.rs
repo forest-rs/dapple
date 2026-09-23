@@ -235,6 +235,7 @@ mod tests {
         }
         EncodedTexture {
             name: "test",
+            kind: crate::TextureKind::Data,
             format,
             width,
             height,
@@ -317,6 +318,7 @@ mod tests {
     fn single_level_textures_write() {
         let tex = EncodedTexture {
             name: "one",
+            kind: crate::TextureKind::Data,
             format: PixelFormat::R8Unorm,
             width: 1,
             height: 1,

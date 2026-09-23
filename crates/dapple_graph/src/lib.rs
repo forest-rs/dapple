@@ -42,11 +42,14 @@
 //! - A field value carries [`FieldValue::change`]: where it can differ from
 //!   the producing node's previous program. Ops that can state their edit's
 //!   region ([`Op::change_from`], such as a moved [`Op::Disk`]) start one;
-//!   pointwise ops carry their inputs' regions through; anything else makes
-//!   the change unbounded.
+//!   pointwise ops carry their inputs' regions through; a warp grows its
+//!   warped input's regions by its displacements' static reach and footprint
+//!   stretch, or makes them unbounded when the displacements have no static
+//!   bounds ([`TileReport::unbounded_warps`]); transforms make the change
+//!   unbounded.
 //! - A realize node re-realizes the tiles whose texel centers fall in the
-//!   change, grown by half its footprint, and recomputes whole on an
-//!   unbounded change ([`TileReport::unbounded_changes`]).
+//!   change, grown by the change's footprint growth, and recomputes whole on
+//!   an unbounded change ([`TileReport::unbounded_changes`]).
 //! - Each raster-node tile depends, through an `invalidation` tracker, on
 //!   the input tiles its kernel footprint reads; each mip-node tile on the
 //!   level-above tiles its filter taps read. A node compares every
@@ -468,6 +471,7 @@ fn raster_input(value: &GraphValue) -> Result<&Arc<RasterValue>, NodeError> {
 
 fn run_field(
     state: &mut FieldState,
+    report: &mut TileReport,
     op: &Op,
     inputs: &[GraphValue],
 ) -> Result<GraphValue, NodeError> {
@@ -501,7 +505,7 @@ fn run_field(
 
     // Where the new program can differ from this node's previous one: the op
     // edit's own region, plus each changed input's region where the op reads
-    // that input pointwise.
+    // that input pointwise, or grown by a warp's static reach.
     let mut change = match &state.op {
         Some(previous) => op.change_from(previous),
         None => Change::Everywhere,
@@ -516,10 +520,17 @@ fn run_field(
         } else {
             Change::Everywhere
         };
-        let input_change = if input_change != Change::Nowhere && !op.operand_is_pointwise(i) {
-            Change::Everywhere
-        } else {
-            input_change
+        let input_change = match (input_change, op) {
+            (Change::Nowhere, _) => Change::Nowhere,
+            (change, Op::Warp { input, .. }) if input.index() as usize == i => {
+                let warped = warp_change(op, &fields, change.clone());
+                if matches!(change, Change::Within { .. }) && warped == Change::Everywhere {
+                    report.unbounded_warps += 1;
+                }
+                warped
+            }
+            (_, Op::Transform { .. } | Op::Demote { .. }) => Change::Everywhere,
+            (change, _) => change,
         };
         change = change.union(input_change);
     }
@@ -539,6 +550,38 @@ fn run_field(
             Change::Everywhere
         },
     })))
+}
+
+/// The change a warp's output makes of its warped input's `change`.
+///
+/// The warp reads its input at `p + amount · (dx, dy)`, so a changed input
+/// region reaches output points up to `|amount| · max|dx|` (and `dy`) away,
+/// and at a footprint up to `1 + |amount| · max(slope)` times wider (see
+/// [`Op::Warp`]). Both come from the displacements' static bounds
+/// ([`FieldProgram::bounds`](dapple_field::program::FieldProgram::bounds));
+/// without them the change is `Everywhere`.
+fn warp_change(op: &Op, fields: &[&Arc<FieldValue>], change: Change) -> Change {
+    let Op::Warp { dx, dy, amount, .. } = *op else {
+        return Change::Everywhere;
+    };
+    let bounds = |id: FieldNode| {
+        fields
+            .get(id.index() as usize)
+            .map(|field| field.program.program().bounds())
+    };
+    let (Some(x), Some(y)) = (bounds(dx), bounds(dy)) else {
+        return Change::Everywhere;
+    };
+    match (x.max_abs(), y.max_abs(), x.slope, y.slope) {
+        (Some(mx), Some(my), Some(sx), Some(sy)) => {
+            // Rounded outward so the f32 products cannot fall short.
+            let a = amount.abs();
+            let reach = Vec2::new((a * mx).next_up(), (a * my).next_up());
+            let stretch = (1.0 + a * sx.max(sy)).next_up();
+            change.warped(reach, stretch)
+        }
+        _ => Change::Everywhere,
+    }
 }
 
 /// Content fingerprint of a realization of the program `program`.
@@ -670,8 +713,13 @@ fn field_dirty(
     } else if field.previous == Some(last) {
         match &field.change {
             Change::Nowhere => Some(Vec::new()),
-            Change::Within(regions) => {
-                let pad = realization.texel().max_element() * 0.5;
+            Change::Within {
+                regions,
+                footprint_scale,
+            } => {
+                // A warp widens the footprint its input sees, so a region
+                // grows by that many half texels.
+                let pad = realization.texel().max_element() * 0.5 * footprint_scale;
                 let mut dirty = Vec::new();
                 let mut bounded = true;
                 for region in regions {
@@ -1256,7 +1304,7 @@ fn run_sample(
             })
             .collect();
         if !regions.is_empty() {
-            change = change.union(Change::Within(regions));
+            change = change.union(Change::within(regions));
         }
     }
     let previous = state.output;
@@ -1285,7 +1333,9 @@ impl Executor for DappleExecutor {
         };
         let upstream = &inputs[1..];
         let value = match (node.kind, params.as_ref()) {
-            (NodeKind::Field, Params::Field(op)) => run_field(&mut node.field, op, upstream)?,
+            (NodeKind::Field, Params::Field(op)) => {
+                run_field(&mut node.field, &mut self.tiles.report, op, upstream)?
+            }
             (NodeKind::Realize, Params::Realize { width, height }) => run_realize(
                 &mut self.tiles,
                 node.key,

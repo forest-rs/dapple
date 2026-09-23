@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 use glam::Vec2;
 
 use crate::domain::{Domain, DomainError, Footprint};
-use crate::program::Fingerprint;
+use crate::program::{Fingerprint, StaticBounds};
 
 /// How texels continue past their border.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -208,6 +208,7 @@ pub struct SampleImage {
     edge: Edge,
     levels: Arc<[ImageLevel]>,
     derivation: Fingerprint,
+    bounds: StaticBounds,
 }
 
 impl PartialEq for SampleImage {
@@ -280,12 +281,14 @@ impl SampleImage {
                 return Err(invalid);
             }
         }
+        let bounds = image_bounds(&levels, edge);
         Ok(Self {
             domain,
             origin,
             edge,
             levels: levels.into(),
             derivation,
+            bounds,
         })
     }
 
@@ -317,6 +320,20 @@ impl SampleImage {
     #[must_use]
     pub const fn derivation(&self) -> Fingerprint {
         self.derivation
+    }
+
+    /// Bounds on the image's values and slope at every point and footprint,
+    /// computed once from the texels of every level.
+    ///
+    /// Bilinear sampling stays within the texels' range, and along each axis
+    /// changes no faster than the largest step between neighboring texels
+    /// (wrapping across the period on a periodic image) over a texel's
+    /// width. Blending two mip levels by footprint mixes their values with
+    /// weights constant in the point, so the bounds over all levels hold.
+    /// Any non-finite texel leaves both bounds unknown.
+    #[must_use]
+    pub const fn static_bounds(&self) -> StaticBounds {
+        self.bounds
     }
 
     /// The levels a footprint reads and the weight of the coarser one.
@@ -386,5 +403,58 @@ impl SampleImage {
         }
         let (b, gb) = self.level_sample(coarse, p);
         (a + (b - a) * weight, ga + (gb - ga) * weight)
+    }
+}
+
+/// [`SampleImage::static_bounds`] of `levels`.
+fn image_bounds(levels: &[ImageLevel], edge: Edge) -> StaticBounds {
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    let mut slope = 0.0_f64;
+    for level in levels {
+        let (w, h) = (level.width as usize, level.height as usize);
+        let v = level.values();
+        if v.iter().any(|x| !x.is_finite()) {
+            return StaticBounds::default();
+        }
+        for &x in v {
+            lo = lo.min(x);
+            hi = hi.max(x);
+        }
+        let wrap = matches!(edge, Edge::Wrap);
+        let mut step = [0.0_f64; 2];
+        for y in 0..h {
+            for x in 0..w {
+                let here = f64::from(v[y * w + x]);
+                let right = if x + 1 < w {
+                    Some(x + 1)
+                } else if wrap {
+                    Some(0)
+                } else {
+                    None
+                };
+                let below = if y + 1 < h {
+                    Some(y + 1)
+                } else if wrap {
+                    Some(0)
+                } else {
+                    None
+                };
+                if let Some(r) = right {
+                    step[0] = step[0].max((f64::from(v[y * w + r]) - here).abs());
+                }
+                if let Some(b) = below {
+                    step[1] = step[1].max((f64::from(v[b * w + x]) - here).abs());
+                }
+            }
+        }
+        let texel = level.texel();
+        slope = slope.max(step[0] / f64::from(texel.x) + step[1] / f64::from(texel.y));
+    }
+    #[expect(clippy::cast_possible_truncation, reason = "rounded up after widening")]
+    let slope = (slope * (1.0 + 1e-5)) as f32;
+    StaticBounds {
+        range: Some([lo, hi]),
+        slope: Some(slope.next_up()).filter(|s| s.is_finite()),
     }
 }

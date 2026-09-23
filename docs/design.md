@@ -299,20 +299,34 @@ tile granularity with an `invalidation` tracker:
 The first slice (`dapple_graph`) implements this for realize and raster
 nodes at mip level 0:
 
-- Field values carry a `Change` (`Nowhere`, `Within(regions)`, `Everywhere`)
-  relative to the producing node's previous program. `Op::change_from`
-  states an edit's region; the first op that can is `Op::Disk`. Pointwise
-  ops carry their inputs' regions; `Transform`, `Demote` and the warped
-  input of `Warp` make a change unbounded.
+- Field values carry a `Change` (`Nowhere`, `Within { regions,
+  footprint_scale }`, `Everywhere`) relative to the producing node's
+  previous program. `Op::change_from` states an edit's region; the first op
+  that can is `Op::Disk`. Pointwise ops carry their inputs' regions;
+  `Transform` and `Demote` make a change unbounded.
+- A warp keeps its warped input's change local when its displacements have
+  static bounds. Every scalar node reports `StaticBounds`
+  (`FieldProgram::bounds`): a value range and a slope bound on
+  `|∂f/∂x| + |∂f/∂y|` that hold at every point and footprint. Noise, fractals
+  and cellular distances are bounded by construction (with provable
+  constants, not the measured ranges their docs quote); arithmetic, clamps,
+  remaps, mixes, transforms and warps propagate bounds; a sample image
+  bounds its texels and their steps once when built. A warp then reads its
+  input at most `|amount| · max|d|` away per axis and at a footprint at most
+  `1 + |amount| · max(slope)` times wider, so the input's regions grow by
+  that reach and their footprint growth (`footprint_scale`) by that factor.
+  Displacements without bounds (cell values, a hard disk, vector
+  components) leave the change unbounded, and `TileReport::unbounded_warps`
+  counts it.
 - Realize nodes re-realize the tiles whose texel centers fall in the change
-  grown by half the footprint (`realize_into`); raster ops recompute tiles
+  grown by `footprint_scale` half footprints (`realize_into`); raster ops recompute tiles
   with `RasterOp::apply_into`. Both equal whole passes bit for bit.
 - Instead of fingerprinting tiles, a node compares each recomputed tile's
   bits with its previous output and marks only the direct dependents of
   tiles that changed, so an edit that leaves a tile unchanged stops there.
 - Global ops (no footprint) have no tile edges and recompute whole when
   their input changed. `TileReport` counts recomputed, reused and changed
-  tiles, whole recomputes, and unbounded changes.
+  tiles, whole recomputes, unbounded changes and unbounded warps.
 
 - Tile budgets (`MaterialGraph::set_tile_budget`) cap the tiles one run
   recomputes. The rest stay pending in their node, which runs again, so

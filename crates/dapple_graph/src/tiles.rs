@@ -49,6 +49,11 @@ pub struct TileReport {
     /// Realizations recomputed whole only because their field changed with
     /// no stated region, although a previous raster existed.
     pub unbounded_changes: u64,
+    /// Field changes a warp widened to everywhere because its displacements
+    /// have no static bound (see
+    /// [`StaticBounds`](dapple_field::program::StaticBounds)): a warped
+    /// input's local change that could not stay local.
+    pub unbounded_warps: u64,
     /// Tiles a tile budget left for later runs, over all nodes. Their nodes'
     /// rasters mix recomputed and stale tiles until this is zero.
     pub pending_tiles: u64,

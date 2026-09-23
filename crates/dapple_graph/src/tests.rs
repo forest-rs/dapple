@@ -964,3 +964,91 @@ fn recipes_carry_sample_nodes() {
         Err(RecipeError::EmbeddedImage(_))
     ));
 }
+
+/// A disk over noise, realized, sampled back, warped by `dx`/`dy`, and
+/// realized again.
+fn warped(x: f32, displacement: impl Fn(u64) -> Op) -> (MaterialGraph, NodeId, NodeId) {
+    let mut g = MaterialGraph::with_tile_size(16);
+    let noise = g.field("noise", noise_op(1), &[]).unwrap();
+    let disk = g.field("disk", disk_op(x), &[]).unwrap();
+    let height = g
+        .field(
+            "height",
+            Op::Max {
+                a: operand(0),
+                b: operand(1),
+            },
+            &[noise, disk],
+        )
+        .unwrap();
+    let map = g.realize("map", height, 64, 64).unwrap();
+    let sample = g.sample("sampled", &[map]).unwrap();
+    let dx = g.field("dx", displacement(7), &[]).unwrap();
+    let dy = g.field("dy", displacement(8), &[]).unwrap();
+    let warp = g
+        .field(
+            "warp",
+            Op::Warp {
+                input: operand(0),
+                dx: operand(1),
+                dy: operand(2),
+                amount: 0.02,
+            },
+            &[sample, dx, dy],
+        )
+        .unwrap();
+    let again = g.realize("again", warp, 64, 64).unwrap();
+    (g, disk, again)
+}
+
+#[test]
+fn bounded_warps_keep_changes_local() {
+    let smooth = |seed| Op::Noise {
+        basis: Basis::Gradient,
+        domain: domain(),
+        frequency: [4.0, 4.0],
+        seed,
+    };
+    let (mut g, disk, again) = warped(0.2, smooth);
+    g.run().unwrap();
+    g.set_field_op(disk, disk_op(0.25)).unwrap();
+    g.run().unwrap();
+    let report = g.tile_report();
+    assert_eq!(report.unbounded_warps, 0, "{report:?}");
+    assert_eq!(report.unbounded_changes, 0, "{report:?}");
+    // The warped realization recomputes only tiles the move reaches, grown by
+    // the warp's reach.
+    assert_eq!(report.whole_recomputes, 0, "{report:?}");
+    assert!(report.tiles_reused > 0, "{report:?}");
+    let (mut fresh, _, fresh_again) = warped(0.25, smooth);
+    fresh.run().unwrap();
+    assert_eq!(
+        scalar(&g, again).digest(),
+        scalar(&fresh, fresh_again).digest()
+    );
+}
+
+#[test]
+fn unbounded_warps_recompute_whole_and_say_so() {
+    // Cell values jump between cells, so the warp's stretch has no bound.
+    let jumpy = |seed| Op::Cellular {
+        domain: domain(),
+        frequency: [4.0, 4.0],
+        jitter: 1.0,
+        seed,
+        output: dapple_field::CellOutput::CellValue,
+    };
+    let (mut g, disk, again) = warped(0.2, jumpy);
+    g.run().unwrap();
+    g.set_field_op(disk, disk_op(0.25)).unwrap();
+    g.run().unwrap();
+    let report = g.tile_report();
+    assert_eq!(report.unbounded_warps, 1, "{report:?}");
+    assert_eq!(report.unbounded_changes, 1, "{report:?}");
+    let (mut fresh, _, fresh_again) = warped(0.25, jumpy);
+    fresh.run().unwrap();
+    assert_eq!(
+        scalar(&g, again).digest(),
+        scalar(&fresh, fresh_again).digest()
+    );
+}

@@ -65,7 +65,10 @@ use crate::raster::Region;
 use crate::shape::Disk;
 use crate::types::{NormalBlend, NormalFrame, PortType, Primaries, Value};
 
+mod bounds;
 mod flat;
+
+pub use bounds::StaticBounds;
 
 pub use flat::{EvaluationStats, Evaluator};
 
@@ -361,14 +364,22 @@ pub enum Op {
 /// node's value.
 ///
 /// Regions are stated at a point footprint. Evaluating with a footprint `w`
-/// wide grows each region by `w / 2` on every side. On a periodic domain the
+/// wide grows each region by `footprint_scale · w / 2` on every side:
+/// `footprint_scale` is 1 unless a warp downstream of the change widens the
+/// footprint its input sees (see [`Op::Warp`]). On a periodic domain the
 /// regions also repeat with the period.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
     /// Nowhere: the value is unchanged.
     Nowhere,
     /// Only inside these regions.
-    Within(Vec<Region>),
+    Within {
+        /// The regions, at a point footprint.
+        regions: Vec<Region>,
+        /// How many half footprints each region grows by at a footprint;
+        /// at least 1.
+        footprint_scale: f32,
+    },
     /// Possibly anywhere.
     Everywhere,
 }
@@ -377,13 +388,65 @@ impl Change {
     /// Largest number of regions kept before they merge into their bounds.
     pub const MAX_REGIONS: usize = 16;
 
+    /// A change within `regions`, growing by half a footprint.
+    #[must_use]
+    pub fn within(regions: Vec<Region>) -> Self {
+        Self::Within {
+            regions,
+            footprint_scale: 1.0,
+        }
+    }
+
+    /// The change a warp makes of its input's change: a warp reading its
+    /// input at most `reach` away per axis, with its input's footprint
+    /// widened at most `stretch` times.
+    ///
+    /// Each region grows by `reach`, and its footprint growth by `stretch`,
+    /// since an output point reads the input `reach` away at a footprint up
+    /// to `stretch` times its own. `Everywhere` when either is not finite.
+    #[must_use]
+    pub fn warped(self, reach: Vec2, stretch: f32) -> Self {
+        match self {
+            Self::Within {
+                regions,
+                footprint_scale,
+            } if reach.is_finite() && stretch.is_finite() && stretch >= 1.0 => {
+                let scale = footprint_scale * stretch;
+                if !scale.is_finite() {
+                    return Self::Everywhere;
+                }
+                Self::Within {
+                    regions: regions
+                        .into_iter()
+                        .map(|r| Region {
+                            origin: r.origin - reach,
+                            size: r.size + reach * 2.0,
+                        })
+                        .collect(),
+                    footprint_scale: scale,
+                }
+            }
+            Self::Within { .. } => Self::Everywhere,
+            change => change,
+        }
+    }
+
     /// The union of `self` and `other`.
     #[must_use]
     pub fn union(self, other: Self) -> Self {
         match (self, other) {
             (Self::Everywhere, _) | (_, Self::Everywhere) => Self::Everywhere,
             (Self::Nowhere, change) | (change, Self::Nowhere) => change,
-            (Self::Within(mut a), Self::Within(b)) => {
+            (
+                Self::Within {
+                    regions: mut a,
+                    footprint_scale: sa,
+                },
+                Self::Within {
+                    regions: b,
+                    footprint_scale: sb,
+                },
+            ) => {
                 a.extend(b);
                 if a.len() > Self::MAX_REGIONS {
                     let min = a.iter().fold(Vec2::INFINITY, |m, r| m.min(r.origin));
@@ -395,7 +458,10 @@ impl Change {
                         size: max - min,
                     }];
                 }
-                Self::Within(a)
+                Self::Within {
+                    regions: a,
+                    footprint_scale: sa.max(sb),
+                }
             }
         }
     }
@@ -432,7 +498,7 @@ impl Op {
                     Disk::new(*domain, Vec2::from(*center), *radius, *softness),
                     Disk::new(*d0, Vec2::from(*c0), *r0, *s0),
                 ) {
-                    (Ok(a), Ok(b)) => Change::Within(alloc::vec![b.support(), a.support()]),
+                    (Ok(a), Ok(b)) => Change::within(alloc::vec![b.support(), a.support()]),
                     _ => Change::Everywhere,
                 }
             }
@@ -2914,7 +2980,7 @@ mod tests {
             softness: 0.0,
         };
         assert_eq!(disk(0.3).change_from(&disk(0.3)), Change::Nowhere);
-        let Change::Within(regions) = disk(0.6).change_from(&disk(0.3)) else {
+        let Change::Within { regions, .. } = disk(0.6).change_from(&disk(0.3)) else {
             panic!("a moved disk changes locally");
         };
         assert_eq!(regions.len(), 2);
@@ -2937,12 +3003,15 @@ mod tests {
             .operand_is_pointwise(0)
         );
         let many = (0..20).fold(Change::Nowhere, |c, i| {
-            c.union(Change::Within(alloc::vec![Region {
+            c.union(Change::within(alloc::vec![Region {
                 origin: Vec2::splat(i as f32),
                 size: Vec2::ONE,
             }]))
         });
-        let Change::Within(merged) = many else {
+        let Change::Within {
+            regions: merged, ..
+        } = many
+        else {
             panic!("regions stay local");
         };
         assert!(merged.len() <= Change::MAX_REGIONS);

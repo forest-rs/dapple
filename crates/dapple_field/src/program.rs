@@ -1686,7 +1686,7 @@ mod tests {
     }
 
     const GOLDEN_FINGERPRINT: u128 = 0x9f47_5e28_e73d_17cf_d6eb_c799_c751_d5a4;
-    const GOLDEN_DIGEST: u64 = 0x90f6_27f1_c5e8_d386;
+    const GOLDEN_DIGEST: u64 = 0x90ff_6a69_e1da_9f83;
 
     #[test]
     fn listing_shows_every_node() {

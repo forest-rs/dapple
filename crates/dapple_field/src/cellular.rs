@@ -92,11 +92,41 @@ impl Cellular {
     }
 
     /// Selects one quantity as a scalar field.
+    ///
+    /// The field's band-limiting mean (see [`CellularField`]) is computed
+    /// here: 0.5 for [`CellOutput::CellValue`], and otherwise the average of
+    /// a fixed 32 × 32 stratified sample over an 8 × 8-cell block of this
+    /// noise, accumulated in `f64`, so it is deterministic.
     #[must_use]
-    pub const fn output(self, output: CellOutput) -> CellularField {
+    pub fn output(self, output: CellOutput) -> CellularField {
+        let mean = match output {
+            CellOutput::CellValue => 0.5,
+            _ => {
+                const SIDE: u32 = 32;
+                const CELLS: f32 = 8.0;
+                let frequency = self.lattice.frequency;
+                let mut sum = 0.0_f64;
+                for j in 0..SIDE {
+                    for i in 0..SIDE {
+                        let cell = Vec2::new(
+                            (i as f32 + 0.5) * CELLS / SIDE as f32,
+                            (j as f32 + 0.5) * CELLS / SIDE as f32,
+                        );
+                        sum += f64::from(select(output, &self.sample(cell / frequency)));
+                    }
+                }
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "the mean is narrowed back to the field's f32"
+                )]
+                let mean = (sum / f64::from(SIDE * SIDE)) as f32;
+                mean
+            }
+        };
         CellularField {
             cellular: self,
             output,
+            mean,
         }
     }
 
@@ -168,14 +198,37 @@ impl Cellular {
     }
 }
 
+fn select(output: CellOutput, s: &CellSample) -> f32 {
+    match output {
+        CellOutput::F1 => s.f1,
+        CellOutput::F2 => s.f2,
+        CellOutput::F2MinusF1 => s.f2 - s.f1,
+        CellOutput::Border => s.border,
+        CellOutput::CellValue => s.value,
+    }
+}
+
 /// One [`CellOutput`] of a [`Cellular`] noise, as a scalar field.
 ///
-/// Cellular quantities are not band-limited yet: the footprint is ignored, so
-/// realize them at a resolution finer than the cells.
+/// **Band limiting.** The pattern repeats at the cell frequency, so cells
+/// smaller than a few footprints alias. The field fades toward the output's
+/// mean with [`Footprint::band_weight`] of the cell frequency: full detail
+/// while cells span at least four footprints, only the mean below two. At full
+/// weight the value is returned exactly, and at zero weight the noise is not
+/// sampled. Detail within a cell (its edges) is not filtered separately.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct CellularField {
     cellular: Cellular,
     output: CellOutput,
+    mean: f32,
+}
+
+impl CellularField {
+    /// The value coarse footprints fade toward.
+    #[must_use]
+    pub const fn mean(&self) -> f32 {
+        self.mean
+    }
 }
 
 impl ScalarField for CellularField {
@@ -183,14 +236,16 @@ impl ScalarField for CellularField {
         self.cellular.domain
     }
 
-    fn eval(&self, p: Vec2, _footprint: Footprint) -> f32 {
-        let s = self.cellular.sample(p);
-        match self.output {
-            CellOutput::F1 => s.f1,
-            CellOutput::F2 => s.f2,
-            CellOutput::F2MinusF1 => s.f2 - s.f1,
-            CellOutput::Border => s.border,
-            CellOutput::CellValue => s.value,
+    fn eval(&self, p: Vec2, footprint: Footprint) -> f32 {
+        let weight = footprint.band_weight(self.cellular.lattice.max_frequency());
+        if weight == 0.0 {
+            return self.mean;
+        }
+        let value = select(self.output, &self.cellular.sample(p));
+        if weight == 1.0 {
+            value
+        } else {
+            self.mean + (value - self.mean) * weight
         }
     }
 }
@@ -236,5 +291,61 @@ mod tests {
     #[test]
     fn rejects_out_of_range_jitter() {
         assert!(Cellular::new(Domain::Plane, Vec2::ONE, 1.5, 0).is_err());
+    }
+
+    #[test]
+    fn coarse_footprints_fade_to_the_mean() {
+        let cells = Cellular::new(Domain::Plane, Vec2::splat(16.0), 1.0, 3).unwrap();
+        for output in [
+            CellOutput::F1,
+            CellOutput::F2,
+            CellOutput::F2MinusF1,
+            CellOutput::Border,
+            CellOutput::CellValue,
+        ] {
+            let field = cells.output(output);
+            let p = Vec2::new(0.37, 0.61);
+            // Cells of 1/16 unit span four footprints of 1/64: full detail.
+            let sharp = Footprint::new(1.0 / 64.0).unwrap();
+            assert_eq!(
+                field.eval(p, sharp).to_bits(),
+                field.eval(p, Footprint::POINT).to_bits()
+            );
+            // Two footprints per cell or fewer: only the mean.
+            let coarse = Footprint::new(1.0 / 32.0).unwrap();
+            assert_eq!(field.eval(p, coarse), field.mean());
+            // Between: toward the mean.
+            let between = Footprint::new(1.0 / 48.0).unwrap();
+            let (v, m) = (field.eval(p, Footprint::POINT), field.mean());
+            let blended = field.eval(p, between);
+            assert!((blended - m).abs() <= (v - m).abs() + 1e-6, "{output:?}");
+        }
+    }
+
+    #[test]
+    fn means_match_the_sampled_average() {
+        let domain = Domain::periodic(1, 1).unwrap();
+        for jitter in [0.0, 0.5, 1.0] {
+            // 32 × 32 cells, so the per-cell values average out too.
+            let cells = Cellular::new(domain, Vec2::splat(32.0), jitter, 11).unwrap();
+            for output in [CellOutput::F1, CellOutput::Border, CellOutput::CellValue] {
+                let field = cells.output(output);
+                let mut sum = 0.0_f64;
+                let n = 256;
+                for j in 0..n {
+                    for i in 0..n {
+                        let p =
+                            Vec2::new((i as f32 + 0.37) / n as f32, (j as f32 + 0.71) / n as f32);
+                        sum += f64::from(field.eval(p, Footprint::POINT));
+                    }
+                }
+                let measured = sum / f64::from(n * n);
+                assert!(
+                    (measured - f64::from(field.mean())).abs() < 0.03,
+                    "jitter {jitter} {output:?}: {measured} vs {}",
+                    field.mean()
+                );
+            }
+        }
     }
 }

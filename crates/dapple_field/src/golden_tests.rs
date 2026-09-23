@@ -71,8 +71,8 @@ const GOLDEN: [u64; 6] = [
     0xa7a3_ba54_d740_1013,
     0xbec9_2eb7_597f_6e54,
     0xa7b3_cc81_770e_37a3,
-    0xbfa2_07ab_0ec6_f01c,
-    0x17eb_710e_dee6_b7bd,
+    0xca9e_7616_6349_8cc5,
+    0x032a_4f9f_e190_1862,
 ];
 
 #[test]

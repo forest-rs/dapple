@@ -5,7 +5,10 @@
 
 use alloc::vec::Vec;
 
-use crate::filter::{Filter, downsample};
+use dapple_field::ScalarField;
+use dapple_raster::{Realization, realize};
+
+use crate::filter::{Filter, downsample, next_size};
 use crate::{EncodeError, Image};
 
 /// Mip levels of one image, largest first; each level halves the one above
@@ -58,6 +61,49 @@ impl MipChain {
 #[must_use]
 pub fn data_mips(image: &Image, filter: Filter) -> MipChain {
     MipChain::build(image.clone(), |level| downsample(level, filter))
+}
+
+/// Mips realized from fields, one channel per field, instead of filtered.
+///
+/// Level `k` realizes every channel on `realization` resized to the chain's
+/// `k`-th size, so each level is evaluated with its own texel as the
+/// footprint: band-limited fields drop exactly the detail that level cannot
+/// hold, with no filter blur or ringing. Level sizes and the edge policy
+/// match [`data_mips`] of level 0. Channels must number 1 to 4.
+pub fn field_mips<F: ScalarField>(
+    channels: &[F],
+    realization: Realization,
+) -> Result<MipChain, EncodeError> {
+    if !(1..=4).contains(&channels.len()) {
+        return Err(EncodeError::InvalidChannels(channels.len()));
+    }
+    let level = |realization: Realization| -> Result<Image, EncodeError> {
+        let rasters = channels
+            .iter()
+            .map(|field| realize(field, realization))
+            .collect::<Result<Vec<_>, _>>()?;
+        let first = &rasters[0];
+        let texels = first.values().len();
+        let mut values = Vec::with_capacity(texels * rasters.len());
+        for i in 0..texels {
+            values.extend(rasters.iter().map(|r| r.values()[i]));
+        }
+        Image::new(
+            first.width(),
+            first.height(),
+            rasters.len(),
+            first.edge(),
+            values,
+        )
+    };
+    let mut levels = alloc::vec![level(realization)?];
+    let (mut width, mut height) = (realization.width(), realization.height());
+    while width > 1 || height > 1 {
+        width = next_size(width);
+        height = next_size(height);
+        levels.push(level(realization.resized(width, height)?)?);
+    }
+    Ok(MipChain { levels })
 }
 
 /// Mips of a linear color image.
@@ -398,5 +444,49 @@ mod tests {
         }
         let wrong = Image::new(2, 2, 1, Edge::Wrap, vec![0.5; 4]).unwrap();
         assert!(normal_mips(&image, Some(&wrong), 0.0, Filter::Box).is_err());
+    }
+
+    #[test]
+    fn field_levels_are_realized_at_their_own_footprint() {
+        use dapple_field::program::{FieldProgram, Op, ProgramBuilder};
+        use dapple_field::{Basis, Domain, FractalParams};
+
+        let domain = Domain::periodic(1, 1).unwrap();
+        let mut b = ProgramBuilder::new();
+        let node = b
+            .add(Op::Fractal {
+                basis: Basis::Gradient,
+                domain,
+                frequency: [4.0, 4.0],
+                seed: 3,
+                params: FractalParams::default(),
+            })
+            .unwrap();
+        let fbm = b.finish(node).unwrap();
+        let realization = Realization::period(domain, 32, 16).unwrap();
+        let chain = field_mips(core::slice::from_ref(&fbm), realization).unwrap();
+        let sizes: Vec<_> = chain.levels().iter().map(|l| (l.width, l.height)).collect();
+        assert_eq!(sizes, [(32, 16), (16, 8), (8, 4), (4, 2), (2, 1), (1, 1)]);
+        for level in chain.levels() {
+            let direct = realize(
+                &fbm,
+                realization.resized(level.width, level.height).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(level.values, direct.values());
+            assert_eq!(level.edge, Edge::Wrap);
+        }
+        // Coarse levels hold less detail than filtering level 0 would.
+        let spread = |image: &Image| {
+            let mean = image.values.iter().sum::<f32>() / image.values.len() as f32;
+            image
+                .values
+                .iter()
+                .map(|v| (v - mean).abs())
+                .fold(0.0, f32::max)
+        };
+        let filtered = data_mips(chain.base(), Filter::Box);
+        assert!(spread(&chain.levels()[3]) <= spread(&filtered.levels()[3]) + 1e-6);
+        assert!(field_mips::<FieldProgram>(&[], realization).is_err());
     }
 }

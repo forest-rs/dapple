@@ -11,6 +11,8 @@ Each kind of data gets its own mip rule:
 - **Normals:** renormalized, with the lost length moved into roughness as
   variance (Toksvig), so distant bumpy surfaces keep their energy.
 - **Data:** filtered as-is.
+- **Fields:** realized afresh at every level with that level's footprint, so
+  band-limited fields give exact, alias-free mips with no filtering.
 
 Box (exact area, any size) and Kaiser-windowed sinc filters follow the image's
 edge policy, so wrapping textures tile on every level.

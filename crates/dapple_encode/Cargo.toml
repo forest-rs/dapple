@@ -11,6 +11,7 @@ keywords = ["texture", "mipmap", "ktx2", "no_std"]
 categories = ["graphics", "encoding", "no-std"]
 
 [dependencies]
+dapple_field.workspace = true
 dapple_raster.workspace = true
 libm.workspace = true
 png = { optional = true, workspace = true }

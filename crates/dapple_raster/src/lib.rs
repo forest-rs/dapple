@@ -366,6 +366,29 @@ impl Realization {
         })
     }
 
+    /// The same region, domain and edge policy on a `width` × `height` grid,
+    /// for example the next mip level.
+    pub fn resized(&self, width: u32, height: u32) -> Result<Self, RasterError> {
+        check_size(width, height)?;
+        Ok(Self {
+            width,
+            height,
+            ..*self
+        })
+    }
+
+    /// Texels per row.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Rows.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
     /// Texel size in domain units.
     #[must_use]
     pub fn texel(&self) -> Vec2 {

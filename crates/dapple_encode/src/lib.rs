@@ -20,6 +20,9 @@
 //!   (Toksvig), so distant bumpy surfaces widen their highlight instead of
 //!   turning into sparkling mirrors.
 //! - **Data** ([`data_mips`]): filtered as-is.
+//! - **Fields** ([`field_mips`]): a texture made from fields needs no
+//!   filtering at all. Each level is realized afresh with its own texel as
+//!   the footprint, so band-limited fields give exact, alias-free levels.
 //!
 //! [`Filter::Box`] averages each destination texel's exact source area and
 //! handles any size; [`Filter::Kaiser`] is a Kaiser-windowed sinc with less
@@ -71,11 +74,12 @@ mod golden_tests;
 use alloc::vec::Vec;
 use core::fmt;
 
-use dapple_raster::{Edge, Raster};
+use dapple_raster::{Edge, Raster, RasterError};
 
 pub use filter::{Filter, KAISER_BETA, KAISER_RADIUS};
 pub use mips::{
-    CoverageLevel, MipChain, NormalChain, color_mips, data_mips, normal_mips, preserve_coverage,
+    CoverageLevel, MipChain, NormalChain, color_mips, data_mips, field_mips, normal_mips,
+    preserve_coverage,
 };
 pub use pack::{Bundle, EncodedTexture, MaterialMaps, PackReport, PackSettings, Profile, pack};
 pub use quantize::{PixelFormat, linear_to_srgb, quantize_unorm8};
@@ -121,6 +125,14 @@ pub enum EncodeError {
         /// Parameter name.
         name: &'static str,
     },
+    /// Realizing a field failed; see [`RasterError`].
+    Raster(RasterError),
+}
+
+impl From<RasterError> for EncodeError {
+    fn from(error: RasterError) -> Self {
+        Self::Raster(error)
+    }
 }
 
 impl fmt::Display for EncodeError {
@@ -143,6 +155,7 @@ impl fmt::Display for EncodeError {
                 )
             }
             Self::InvalidParameter { name } => write!(f, "parameter {name} is out of range"),
+            Self::Raster(error) => error.fmt(f),
         }
     }
 }

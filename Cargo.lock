@@ -33,6 +33,7 @@ dependencies = [
 name = "dapple_encode"
 version = "0.0.1"
 dependencies = [
+ "dapple_field",
  "dapple_raster",
  "libm",
  "png",

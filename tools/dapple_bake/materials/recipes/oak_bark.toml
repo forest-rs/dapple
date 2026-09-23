@@ -3,13 +3,31 @@
 # relief.
 version = 1
 
+# Plates stretched along y, their sizes varied by a broad warp that compresses
+# some columns and widens others. Border distance is in cell units.
 [[nodes]]
 label = "cells"
 kind = "field"
 inputs = []
-# Cells stretched along y: few rows, many columns. Border distance is in cell
-# units.
-op = { op = "cellular", domain = { periodic = { period = [1, 1] } }, frequency = [9.0, 2.0], jitter = 1.0, seed = 7, output = "border" }
+op = { op = "cellular", domain = { periodic = { period = [1, 1] } }, frequency = [7.0, 2.0], jitter = 1.0, seed = 7, output = "border" }
+
+[[nodes]]
+label = "stretch_x"
+kind = "field"
+inputs = []
+op = { op = "fractal", basis = "gradient", domain = { periodic = { period = [1, 1] } }, frequency = [1.0, 2.0], seed = 29, params = {} }
+
+[[nodes]]
+label = "stretch_y"
+kind = "field"
+inputs = []
+op = { op = "fractal", basis = "gradient", domain = { periodic = { period = [1, 1] } }, frequency = [1.0, 2.0], seed = 30, params = {} }
+
+[[nodes]]
+label = "stretched"
+kind = "field"
+inputs = ["cells", "stretch_x", "stretch_y"]
+op = { op = "warp", input = 0, dx = 1, dy = 2, amount = 0.08 }
 
 [[nodes]]
 label = "wobble_x"
@@ -26,21 +44,89 @@ op = { op = "fractal", basis = "gradient", domain = { periodic = { period = [1, 
 [[nodes]]
 label = "wavy"
 kind = "field"
-inputs = ["cells", "wobble_x", "wobble_y"]
+inputs = ["stretched", "wobble_x", "wobble_y"]
 op = { op = "warp", input = 0, dx = 1, dy = 2, amount = 0.03 }
 
-# Plates flatten 0.25 cells in from the fissures.
+# Plates flatten between 0.14 and 0.32 cells in from their fissures, so fissure
+# width and plate height vary across the tile.
 [[nodes]]
-label = "plates_clamped"
+label = "flat_noise"
 kind = "field"
-inputs = ["wavy"]
-op = { op = "clamp", input = 0, min = 0.0, max = 0.25 }
+inputs = []
+op = { op = "fractal", basis = "gradient", domain = { periodic = { period = [1, 1] } }, frequency = [3.0, 2.0], seed = 31, params = {} }
+
+[[nodes]]
+label = "flat"
+kind = "field"
+inputs = ["flat_noise"]
+op = { op = "remap", input = 0, from = [-1.0, 1.0], to = [0.14, 0.32] }
+
+[[nodes]]
+label = "plates_flattened"
+kind = "field"
+inputs = ["wavy", "flat"]
+op = { op = "min", a = 0, b = 1 }
+
+[[nodes]]
+label = "plates_primary"
+kind = "field"
+inputs = ["plates_flattened"]
+op = { op = "remap", input = 0, from = [0.0, 0.32], to = [0.0, 0.85] }
+
+# Shallow secondary cracks split some plates, in patches.
+[[nodes]]
+label = "crack_cells"
+kind = "field"
+inputs = []
+op = { op = "cellular", domain = { periodic = { period = [1, 1] } }, frequency = [16.0, 5.0], jitter = 1.0, seed = 27, output = "border" }
+
+[[nodes]]
+label = "crack_warped"
+kind = "field"
+inputs = ["crack_cells", "wobble_x", "wobble_y"]
+op = { op = "warp", input = 0, dx = 1, dy = 2, amount = 0.02 }
+
+[[nodes]]
+label = "crack_remapped"
+kind = "field"
+inputs = ["crack_warped"]
+op = { op = "remap", input = 0, from = [0.0, 0.1], to = [0.4, 1.0] }
+
+[[nodes]]
+label = "crack_depth"
+kind = "field"
+inputs = ["crack_remapped"]
+op = { op = "clamp", input = 0, min = 0.4, max = 1.0 }
+
+[[nodes]]
+label = "patch_noise"
+kind = "field"
+inputs = []
+op = { op = "fractal", basis = "gradient", domain = { periodic = { period = [1, 1] } }, frequency = [2.0, 2.0], seed = 28, params = {} }
+
+[[nodes]]
+label = "patch_remapped"
+kind = "field"
+inputs = ["patch_noise"]
+op = { op = "remap", input = 0, from = [0.1, 0.4], to = [1.0, 0.0] }
+
+[[nodes]]
+label = "patches"
+kind = "field"
+inputs = ["patch_remapped"]
+op = { op = "clamp", input = 0, min = 0.0, max = 1.0 }
+
+[[nodes]]
+label = "cracks"
+kind = "field"
+inputs = ["crack_depth", "patches"]
+op = { op = "max", a = 0, b = 1 }
 
 [[nodes]]
 label = "plates"
 kind = "field"
-inputs = ["plates_clamped"]
-op = { op = "remap", input = 0, from = [0.0, 0.25], to = [0.0, 0.85] }
+inputs = ["plates_primary", "cracks"]
+op = { op = "min", a = 0, b = 1 }
 
 [[nodes]]
 label = "grain_noise"

@@ -365,44 +365,79 @@ fn bark_set(
 /// Plates separated by wavy vertical fissures, with fine grain on top.
 fn bark_program(domain: Domain) -> Result<FieldProgram, ProgramError> {
     let mut b = ProgramBuilder::new();
-    // Cells stretched along y: few rows, many columns.
+    let fractal = |b: &mut ProgramBuilder, frequency, seed| {
+        b.add(Op::Fractal {
+            basis: Basis::Gradient,
+            domain,
+            frequency,
+            seed,
+            params: FractalParams::default(),
+        })
+    };
+    // Plates stretched along y, their sizes varied by a broad warp that
+    // compresses some columns and widens others. Border distance is in cell
+    // units.
     let cells = b.add(Op::Cellular {
         domain,
-        frequency: [9.0, 2.0],
+        frequency: [7.0, 2.0],
         jitter: 1.0,
         seed: SEED,
         output: CellOutput::Border,
     })?;
-    let wobble_x = b.add(Op::Fractal {
-        basis: Basis::Gradient,
-        domain,
-        frequency: [3.0, 6.0],
-        seed: SEED + 1,
-        params: FractalParams::default(),
+    let stretch_x = fractal(&mut b, [1.0, 2.0], SEED + 22)?;
+    let stretch_y = fractal(&mut b, [1.0, 2.0], SEED + 23)?;
+    let cells = b.add(Op::Warp {
+        input: cells,
+        dx: stretch_x,
+        dy: stretch_y,
+        amount: 0.08,
     })?;
-    let wobble_y = b.add(Op::Fractal {
-        basis: Basis::Gradient,
-        domain,
-        frequency: [3.0, 6.0],
-        seed: SEED + 2,
-        params: FractalParams::default(),
-    })?;
+    let wobble_x = fractal(&mut b, [3.0, 6.0], SEED + 1)?;
+    let wobble_y = fractal(&mut b, [3.0, 6.0], SEED + 2)?;
     let wavy = b.add(Op::Warp {
         input: cells,
         dx: wobble_x,
         dy: wobble_y,
         amount: 0.03,
     })?;
-    // Border distance is in cell units; plates flatten 0.25 cells in.
-    let plates = b.add(Op::Clamp {
-        input: wavy,
-        min: 0.0,
-        max: 0.25,
+    // Plates flatten between 0.14 and 0.32 cells in from their fissures, so
+    // fissure width and plate height vary across the tile.
+    let flat = fractal(&mut b, [3.0, 2.0], SEED + 24)?;
+    let flat = b.add(Op::Remap {
+        input: flat,
+        from: [-1.0, 1.0],
+        to: [0.14, 0.32],
     })?;
+    let plates = b.add(Op::Min { a: wavy, b: flat })?;
     let plates = b.add(Op::Remap {
         input: plates,
-        from: [0.0, 0.25],
+        from: [0.0, 0.32],
         to: [0.0, 0.85],
+    })?;
+    // Shallow secondary cracks split some plates, in patches.
+    let cracks = b.add(Op::Cellular {
+        domain,
+        frequency: [16.0, 5.0],
+        jitter: 1.0,
+        seed: SEED + 20,
+        output: CellOutput::Border,
+    })?;
+    let cracks = b.add(Op::Warp {
+        input: cracks,
+        dx: wobble_x,
+        dy: wobble_y,
+        amount: 0.02,
+    })?;
+    let cracks = ramp(&mut b, cracks, [0.0, 0.1], [0.4, 1.0])?;
+    let patches = fractal(&mut b, [2.0, 2.0], SEED + 21)?;
+    let patches = ramp(&mut b, patches, [0.1, 0.4], [1.0, 0.0])?;
+    let cracks = b.add(Op::Max {
+        a: cracks,
+        b: patches,
+    })?;
+    let plates = b.add(Op::Min {
+        a: plates,
+        b: cracks,
     })?;
     let grain = b.add(Op::Fractal {
         basis: Basis::Gradient,
@@ -559,13 +594,14 @@ fn wood(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
             [0.12, 0.0, 0.0],
             3,
         ),
-        // Quarter sawn: through the axis, along the rays, which wander in
-        // and out of the face as flecks.
+        // Quarter sawn: nearly through the axis, 6° off radial as real
+        // boards are, so the face crosses rays at a shallow angle and they
+        // show as flecks.
         (
             "wood-quarter-sawn",
-            [0.02, 0.0, 0.0],
+            [0.02, -0.004, 0.0],
             [0.0, 0.0, 0.12],
-            [0.12, 0.0, 0.0],
+            [0.1193, 0.0126, 0.0],
             3,
         ),
     ];
@@ -759,33 +795,91 @@ fn wood_color(b: &mut ProgramBuilder) -> Result<NodeId, ProgramError> {
     let pores = ramp(b, pores, [0.1, 0.5], [0.3, 0.9])?;
     let pores = b.add(Op::Mul { a: pores, b: early })?;
 
-    // Rays: thin radial ribbons, 90 around the trunk, a cm or two tall.
+    // Rays: thin radial ribbons around the trunk. Each set is a sawtooth in
+    // the (swaying) angle with a ribbon at every tooth edge; a noise field
+    // along the ribbon varies its width, so rays pinch off into flecks of
+    // varying length and thickness, and a sparse extent field keeps only
+    // some of them. Broad rays are few and pale; fine rays are many and
+    // faint. Extent varies faster around the trunk than rays are spaced,
+    // so neighboring rays start and stop independently.
     let angle = b.add(Op::Atan2 { y, x })?;
-    let sway = noise(b, Basis::Gradient, [20.0, 20.0, 20.0], SEED + 12, 2)?;
+    let sway = noise(b, Basis::Gradient, [12.0, 12.0, 10.0], SEED + 12, 3)?;
     let sway = b.add(Op::Remap {
         input: sway,
         from: [-1.0, 1.0],
-        to: [-0.05, 0.05],
+        to: [-0.12, 0.12],
     })?;
     let angle = b.add(Op::Add { a: angle, b: sway })?;
-    let sectors = b.add(Op::Remap {
-        input: angle,
-        from: [0.0, core::f32::consts::TAU],
-        to: [0.0, 90.0],
-    })?;
-    let sector = b.add(Op::Fract { input: sectors })?;
     let half = b.add(Op::Constant3 { domain, value: 0.5 })?;
-    let offset = b.add(Op::Sub { a: sector, b: half })?;
-    let offset = b.add(Op::Abs { input: offset })?;
-    let ray = ramp(b, offset, [0.44, 0.47], [0.0, 1.0])?;
-    let extent = b.add(Op::Noise3 {
-        basis: Basis::Value,
+    let rays = |b: &mut ProgramBuilder,
+                count: f32,
+                edge: f32,
+                width_frequency: [f32; 3],
+                extent_frequency: [f32; 3],
+                extent_cut: [f32; 2],
+                seed: u64|
+     -> Result<NodeId, ProgramError> {
+        // A phase keeps the sawn test planes, which pass through angle 0,
+        // off a ray edge.
+        let sectors = b.add(Op::Remap {
+            input: angle,
+            from: [0.0, core::f32::consts::TAU],
+            to: [0.37, count + 0.37],
+        })?;
+        let sector = b.add(Op::Fract { input: sectors })?;
+        let offset = b.add(Op::Sub { a: sector, b: half })?;
+        let offset = b.add(Op::Abs { input: offset })?;
+        // Width varies along each ribbon: the ribbon is `edge` wide at
+        // most, thinning to nothing where the noise is low.
+        let width = b.add(Op::Noise3 {
+            basis: Basis::Gradient,
+            domain,
+            frequency: width_frequency,
+            seed,
+        })?;
+        let width = b.add(Op::Remap {
+            input: width,
+            from: [-1.0, 1.0],
+            to: [-edge, edge],
+        })?;
+        let offset = b.add(Op::Add {
+            a: offset,
+            b: width,
+        })?;
+        let ray = ramp(b, offset, [0.5 - edge, 0.5 - edge * 0.6], [0.0, 1.0])?;
+        let extent = b.add(Op::Noise3 {
+            basis: Basis::Value,
+            domain,
+            frequency: extent_frequency,
+            seed: seed + 1,
+        })?;
+        let extent = ramp(b, extent, extent_cut, [0.0, 1.0])?;
+        b.add(Op::Mul { a: ray, b: extent })
+    };
+    let broad = rays(
+        b,
+        131.0,
+        0.1,
+        [90.0, 90.0, 45.0],
+        [300.0, 300.0, 45.0],
+        [0.1, 0.3],
+        SEED + 16,
+    )?;
+    let fine = rays(
+        b,
+        409.0,
+        0.06,
+        [160.0, 160.0, 90.0],
+        [900.0, 900.0, 80.0],
+        [0.0, 0.2],
+        SEED + 18,
+    )?;
+    let faint = b.add(Op::Constant3 {
         domain,
-        frequency: [30.0, 30.0, 60.0],
-        seed: SEED + 13,
+        value: 0.45,
     })?;
-    let extent = ramp(b, extent, [-0.2, 0.2], [0.0, 0.9])?;
-    let ray = b.add(Op::Mul { a: ray, b: extent })?;
+    let fine = b.add(Op::Mul { a: fine, b: faint })?;
+    let ray = b.add(Op::Max { a: broad, b: fine })?;
 
     let early_color = color(b, [0.42, 0.27, 0.14])?;
     let late_color = color(b, [0.27, 0.16, 0.075])?;

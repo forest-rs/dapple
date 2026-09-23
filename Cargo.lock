@@ -38,6 +38,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dapple_raster"
+version = "0.0.1"
+dependencies = [
+ "dapple_field",
+ "glam",
+ "libm",
+]
+
+[[package]]
 name = "fdeflate"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

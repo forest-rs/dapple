@@ -1,0 +1,27 @@
+[package]
+name = "dapple_raster"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic rasters for dapple: explicit realization of fields, blur, normals, ambient occlusion, and distance transforms"
+readme = "README.md"
+keywords = ["procedural", "texture", "raster", "no_std"]
+categories = ["graphics", "no-std"]
+
+[dependencies]
+dapple_field.workspace = true
+glam.workspace = true
+libm.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[package.metadata.docs.rs]
+all-features = true
+default-target = "x86_64-unknown-linux-gnu"
+targets = []

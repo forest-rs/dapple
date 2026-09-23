@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use glam::Vec2;
 
-use super::{FieldProgram, Kernel, Node, NodeId, warp_offset};
+use super::{FieldProgram, Kernel, Node, NodeId, probe_point, warp_move};
 use crate::domain::Footprint;
 use crate::field::Affine2;
 use crate::types::Value;
@@ -16,8 +16,19 @@ use crate::types::Value;
 /// How a context's point and footprint follow from its parent's.
 #[derive(Clone, Debug, PartialEq)]
 enum Move {
-    Transform { transform: Affine2, stretch: f32 },
-    Warp { dx: usize, dy: usize, amount: f32 },
+    Transform {
+        transform: Affine2,
+        stretch: f32,
+    },
+    /// Probe `k` of a warp: the parent's point one footprint away.
+    Probe(usize),
+    /// A warp: registers of `dx` and `dy` at the parent's point, then at each
+    /// probe in [`super::PROBES`] order.
+    Warp {
+        center: [usize; 2],
+        probes: [[usize; 2]; 4],
+        amount: f32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -55,7 +66,8 @@ pub struct EvaluationStats {
     /// Node evaluations per point with the flat plan: one per instance.
     pub instances: u64,
     /// Node evaluations per point when every consumer evaluates its inputs
-    /// again, as recursive evaluation does.
+    /// again, as recursive evaluation does with a nonzero footprint (a warp
+    /// then also evaluates its displacements at four probes).
     pub tree_evaluations: u64,
     /// Distinct evaluation points per point: the output's, plus one per
     /// distinct transform or warp path.
@@ -67,19 +79,21 @@ struct Compiler<'a> {
     steps: Vec<Step>,
     registers: usize,
     instances: BTreeMap<(NodeId, usize), usize>,
-    contexts: BTreeMap<(usize, NodeId), usize>,
+    /// Contexts by parent, node, and role: 0 for a transform or warp, 1 to
+    /// 4 for a warp's probes.
+    contexts: BTreeMap<(usize, NodeId, usize), usize>,
     context_count: usize,
     counts: BTreeMap<(NodeId, usize), u64>,
 }
 
 impl Compiler<'_> {
-    fn context(&mut self, parent: usize, node: NodeId, by: Move) -> usize {
-        if let Some(&ctx) = self.contexts.get(&(parent, node)) {
+    fn context(&mut self, parent: usize, node: NodeId, role: usize, by: Move) -> usize {
+        if let Some(&ctx) = self.contexts.get(&(parent, node, role)) {
             return ctx;
         }
         let ctx = self.context_count;
         self.context_count += 1;
-        self.contexts.insert((parent, node), ctx);
+        self.contexts.insert((parent, node, role), ctx);
         self.steps.push(Step::Context { ctx, parent, by });
         ctx
     }
@@ -96,7 +110,7 @@ impl Compiler<'_> {
                 transform,
                 stretch,
             } => {
-                let child = self.context(ctx, node, Move::Transform { transform, stretch });
+                let child = self.context(ctx, node, 0, Move::Transform { transform, stretch });
                 self.compile(input, child)
             }
             Kernel::Pass(input) => self.compile(input, ctx),
@@ -106,9 +120,22 @@ impl Compiler<'_> {
                 dy,
                 amount,
             } => {
-                let dx = self.compile(dx, ctx);
-                let dy = self.compile(dy, ctx);
-                let child = self.context(ctx, node, Move::Warp { dx, dy, amount });
+                let center = [self.compile(dx, ctx), self.compile(dy, ctx)];
+                let mut probes = [[0; 2]; 4];
+                for (k, probe) in probes.iter_mut().enumerate() {
+                    let at = self.context(ctx, node, k + 1, Move::Probe(k));
+                    *probe = [self.compile(dx, at), self.compile(dy, at)];
+                }
+                let child = self.context(
+                    ctx,
+                    node,
+                    0,
+                    Move::Warp {
+                        center,
+                        probes,
+                        amount,
+                    },
+                );
                 self.compile(input, child)
             }
             _ => {
@@ -142,12 +169,24 @@ impl Compiler<'_> {
         let entry = &self.nodes[node.0 as usize];
         let count = match entry.kernel {
             Kernel::Transform { input, .. } | Kernel::Warp { input, .. } => {
-                let child = self.contexts[&(ctx, node)];
+                let child = self.contexts[&(ctx, node, 0)];
                 let moved = self.tree_count(input, child);
                 match entry.kernel {
-                    Kernel::Warp { dx, dy, .. } => moved
-                        .saturating_add(self.tree_count(dx, ctx))
-                        .saturating_add(self.tree_count(dy, ctx)),
+                    Kernel::Warp { dx, dy, .. } => {
+                        // The displacements at the point and at four probes.
+                        let mut total = moved;
+                        for role in 0..5 {
+                            let at = if role == 0 {
+                                ctx
+                            } else {
+                                self.contexts[&(ctx, node, role)]
+                            };
+                            total = total
+                                .saturating_add(self.tree_count(dx, at))
+                                .saturating_add(self.tree_count(dy, at));
+                        }
+                        total
+                    }
                     _ => moved,
                 }
             }
@@ -231,10 +270,21 @@ impl<'a> Evaluator<'a> {
                         Move::Transform { transform, stretch } => {
                             (transform.apply(p), footprint.scaled(stretch))
                         }
-                        Move::Warp { dx, dy, amount } => (
-                            p + warp_offset(self.registers[dx], self.registers[dy], amount),
-                            footprint,
-                        ),
+                        Move::Probe(k) => (probe_point(p, footprint, k), footprint),
+                        Move::Warp {
+                            center,
+                            probes,
+                            amount,
+                        } => {
+                            let r = |reg: usize| self.registers[reg];
+                            warp_move(
+                                p,
+                                footprint,
+                                amount,
+                                center.map(r),
+                                probes.map(|pair| pair.map(r)),
+                            )
+                        }
                     };
                 }
                 Step::Eval {

@@ -216,8 +216,14 @@ pub enum Op {
     /// Domain warp: `input(p + amount * (dx(p), dy(p)))`.
     ///
     /// All three fields share a domain, so a periodic warp of a periodic
-    /// field stays periodic. The footprint passes through unchanged, which
-    /// under-filters where the warp compresses the input.
+    /// field stays periodic.
+    ///
+    /// **Footprint.** Where the warp stretches or compresses space, one
+    /// footprint of `p` covers more of `input`. The input's footprint is
+    /// scaled by `1 + |amount| · max_i Σ_j |∂d_i/∂p_j|`, a bound on the warp's
+    /// local stretch, with the derivatives of `dx` and `dy` estimated by
+    /// central differences one footprint away on each axis. That costs four
+    /// more evaluations of `dx` and `dy`; a point footprint skips the scaling.
     Warp {
         /// The warped field.
         input: NodeId,
@@ -1238,12 +1244,22 @@ impl FieldProgram {
                 dy,
                 amount,
             } => {
-                let offset = warp_offset(
+                let center = [
                     self.eval_value(dx, p, footprint),
                     self.eval_value(dy, p, footprint),
-                    amount,
-                );
-                self.eval_value(input, p + offset, footprint)
+                ];
+                let mut probes = [[Value::Scalar(0.0); 2]; 4];
+                if footprint.width() > 0.0 {
+                    for (k, probe) in probes.iter_mut().enumerate() {
+                        let q = probe_point(p, footprint, k);
+                        *probe = [
+                            self.eval_value(dx, q, footprint),
+                            self.eval_value(dy, q, footprint),
+                        ];
+                    }
+                }
+                let (q, footprint) = warp_move(p, footprint, amount, center, probes);
+                self.eval_value(input, q, footprint)
             }
             ref kernel => {
                 let mut args = [Value::Scalar(0.0); 3];
@@ -1258,9 +1274,39 @@ impl FieldProgram {
     }
 }
 
-fn warp_offset(dx: Value, dy: Value, amount: f32) -> Vec2 {
+/// Directions of the warp's finite-difference probes: +x, −x, +y, −y.
+const PROBES: [Vec2; 4] = [Vec2::X, Vec2::NEG_X, Vec2::Y, Vec2::NEG_Y];
+
+/// Probe `k` of a warp at `p`: one footprint away along [`PROBES`]`[k]`.
+fn probe_point(p: Vec2, footprint: Footprint, k: usize) -> Vec2 {
+    p + PROBES[k] * footprint.width()
+}
+
+/// The point and footprint a warp's input is evaluated at, from the
+/// displacements at `p` (`center`) and at its four probes.
+fn warp_move(
+    p: Vec2,
+    footprint: Footprint,
+    amount: f32,
+    center: [Value; 2],
+    probes: [[Value; 2]; 4],
+) -> (Vec2, Footprint) {
     let scalar = |v: Value| v.scalar().expect("warp displacements are scalars");
-    Vec2::new(scalar(dx), scalar(dy)) * amount
+    let q = p + Vec2::new(scalar(center[0]), scalar(center[1])) * amount;
+    let h = footprint.width();
+    if h <= 0.0 {
+        return (q, footprint);
+    }
+    let inv = 1.0 / (2.0 * h);
+    // Row i of the displacement's Jacobian: (∂d_i/∂x, ∂d_i/∂y).
+    let row = |i: usize| {
+        let ddx = (scalar(probes[0][i]) - scalar(probes[1][i])) * inv;
+        let ddy = (scalar(probes[2][i]) - scalar(probes[3][i])) * inv;
+        ddx.abs() + ddy.abs()
+    };
+    let stretch = 1.0 + amount.abs() * row(0).max(row(1));
+    let stretch = if stretch.is_finite() { stretch } else { 1.0 };
+    (q, footprint.scaled(stretch))
 }
 
 impl Kernel {
@@ -2234,5 +2280,71 @@ mod tests {
             Err(ProgramError::TypeMismatch { op: "add", .. })
         ));
         assert!(b.add(Op::Angle { input: half }).is_err());
+    }
+
+    #[test]
+    fn warps_widen_the_footprint_by_their_stretch() {
+        let d = torus();
+        let freq = |f: f32, seed| Op::Fractal {
+            basis: Basis::Gradient,
+            domain: d,
+            frequency: [f, f],
+            seed,
+            params: FractalParams::default(),
+        };
+        let mut b = ProgramBuilder::new();
+        let input = b.add(freq(16.0, 1)).unwrap();
+        let dx = b.add(freq(4.0, 2)).unwrap();
+        let dy = b.add(freq(4.0, 3)).unwrap();
+        let amount = 0.2;
+        let warp = b
+            .add(Op::Warp {
+                input,
+                dx,
+                dy,
+                amount,
+            })
+            .unwrap();
+        let program = b.finish(warp).unwrap();
+
+        let field = |seed, f: f32| {
+            Fractal::new(
+                Basis::Gradient,
+                d,
+                Vec2::splat(f),
+                seed,
+                FractalParams::default(),
+            )
+            .unwrap()
+        };
+        let (fin, fdx, fdy) = (field(1, 16.0), field(2, 4.0), field(3, 4.0));
+        let footprint = Footprint::new(1.0 / 128.0).unwrap();
+        let h = footprint.width();
+        let mut widened = 0;
+        for i in 0..32 {
+            let p = Vec2::new(i as f32 * 0.061, 0.37);
+            let at = |f: &Fractal, q: Vec2| f.eval(q, footprint);
+            let slope = |f: &Fractal| {
+                let gx = (at(f, p + Vec2::X * h) - at(f, p - Vec2::X * h)) * (1.0 / (2.0 * h));
+                let gy = (at(f, p + Vec2::Y * h) - at(f, p - Vec2::Y * h)) * (1.0 / (2.0 * h));
+                gx.abs() + gy.abs()
+            };
+            let stretch = 1.0 + amount * slope(&fdx).max(slope(&fdy));
+            widened += usize::from(stretch > 1.5);
+            let q = p + Vec2::new(at(&fdx, p), at(&fdy, p)) * amount;
+            assert_eq!(
+                program.eval(p, footprint).to_bits(),
+                fin.eval(q, footprint.scaled(stretch)).to_bits(),
+                "at {p}"
+            );
+            // A point footprint is not scaled.
+            let q0 = p + Vec2::new(fdx.eval(p, Footprint::POINT), fdy.eval(p, Footprint::POINT))
+                * amount;
+            assert_eq!(
+                program.eval(p, Footprint::POINT).to_bits(),
+                fin.eval(q0, Footprint::POINT).to_bits()
+            );
+        }
+        assert!(widened > 0, "the fixture should stretch somewhere");
     }
 }

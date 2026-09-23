@@ -5,11 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Writes preview images of dapple_field noise and cellular fields"
+description = "Writes preview images of dapple_field fields and dapple_raster operations"
 publish = false
 
 [dependencies]
 dapple_field.workspace = true
+dapple_raster.workspace = true
 glam.workspace = true
 png.workspace = true
 

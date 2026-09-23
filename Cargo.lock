@@ -60,6 +60,7 @@ name = "field_gallery"
 version = "0.0.0"
 dependencies = [
  "dapple_field",
+ "dapple_raster",
  "glam",
  "png",
 ]

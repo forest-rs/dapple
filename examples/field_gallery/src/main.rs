@@ -1,7 +1,8 @@
 // Copyright 2026 the Dapple Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Writes preview images of `dapple_field` fields as PNG files.
+//! Writes preview images of `dapple_field` fields and `dapple_raster`
+//! operations as PNG files.
 //!
 //! Run with `cargo run -p field_gallery -- [output-dir]`; the default output
 //! directory is `target/field-gallery`. Each image is normalized to its own
@@ -11,10 +12,15 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
+use dapple_field::program::{FieldProgram, Op, ProgramBuilder, ProgramError};
 use dapple_field::raster::{Grid, Region};
 use dapple_field::{
     Basis, CellOutput, Cellular, Domain, DomainError, Footprint, Fractal, FractalKind,
     FractalParams, Noise, ScalarField,
+};
+use dapple_raster::{
+    AmbientOcclusion, DistanceTransform, Edge, GaussianBlur, HeightToNormal, Raster, RasterOp,
+    Realization, realize,
 };
 use glam::Vec2;
 
@@ -34,9 +40,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let gradient = Noise::new(Basis::Gradient, plane, Vec2::splat(8.0), SEED)?;
-    write_grid(&out, "gradient-noise", &Grid::sample(&gradient, square, SIZE, SIZE))?;
+    write_grid(
+        &out,
+        "gradient-noise",
+        &Grid::sample(&gradient, square, SIZE, SIZE),
+    )?;
     let value = Noise::new(Basis::Value, plane, Vec2::splat(8.0), SEED)?;
-    write_grid(&out, "value-noise", &Grid::sample(&value, square, SIZE, SIZE))?;
+    write_grid(
+        &out,
+        "value-noise",
+        &Grid::sample(&value, square, SIZE, SIZE),
+    )?;
 
     let fbm = fractal(plane, FractalKind::Fbm, 4.0, 6)?;
     write_grid(&out, "fbm", &Grid::sample(&fbm, square, SIZE, SIZE))?;
@@ -91,7 +105,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..FractalParams::default()
         },
     )?;
-    write_grid(&out, "fbm-point-sampled", &sample_points(&fine, square, SIZE))?;
+    write_grid(
+        &out,
+        "fbm-point-sampled",
+        &sample_points(&fine, square, SIZE),
+    )?;
     write_grid(
         &out,
         "fbm-footprint-filtered",
@@ -101,6 +119,162 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "fine fBm: {} of 12 octaves active at a {SIZE}-texel footprint",
         fine.active_octaves(Footprint::new(1.0 / SIZE as f32).expect("finite"))
     );
+
+    bark(&out)?;
+    Ok(())
+}
+
+/// A tileable bark study: a field program for height, realized once, then
+/// raster operations on it. Each image shows the tile 2 × 2.
+fn bark(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let torus = Domain::periodic(1, 1).expect("valid period");
+    let program = bark_program(torus)?;
+    println!(
+        "bark program {} ({} nodes)",
+        program.fingerprint(),
+        program.len()
+    );
+    let height = realize(&program, Realization::period(torus, SIZE, SIZE)?)?;
+    write_raster(out, "bark-height-2x2", &height)?;
+
+    // Heights are in [0, 1]; 1 means 15 mm of relief on a 1 m tile.
+    let relief = 0.015;
+    let normals = HeightToNormal { scale: relief }.apply(&height)?;
+    write_normals(out, "bark-normal-2x2", &normals)?;
+    let ao = AmbientOcclusion {
+        radius: 0.02,
+        directions: 12,
+        scale: relief,
+    }
+    .apply(&height)?;
+    write_raster(out, "bark-ao-2x2", &ao)?;
+    let blur = GaussianBlur { sigma: 0.006 };
+    println!(
+        "blur footprint at {SIZE} texels: {:?}",
+        blur.footprint(height.texel())
+    );
+    write_raster(out, "bark-blurred-2x2", &blur.apply(&height)?)?;
+
+    // Distance from the fissure floors, in domain units.
+    let fissures = Raster::from_values(
+        height.width(),
+        height.height(),
+        height.origin(),
+        height.texel(),
+        Edge::Wrap,
+        height
+            .values()
+            .iter()
+            .map(|h| if *h < 0.12 { 1.0 } else { 0.0 })
+            .collect(),
+    )?;
+    let distance = DistanceTransform { threshold: 0.5 }.apply(&fissures)?;
+    write_raster(out, "bark-fissure-distance-2x2", &distance)?;
+    Ok(())
+}
+
+/// Plates separated by wavy vertical fissures, with fine grain on top.
+fn bark_program(domain: Domain) -> Result<FieldProgram, ProgramError> {
+    let mut b = ProgramBuilder::new();
+    // Cells stretched along y: few rows, many columns.
+    let cells = b.add(Op::Cellular {
+        domain,
+        frequency: [9.0, 2.0],
+        jitter: 1.0,
+        seed: SEED,
+        output: CellOutput::Border,
+    })?;
+    let wobble_x = b.add(Op::Fractal {
+        basis: Basis::Gradient,
+        domain,
+        frequency: [3.0, 6.0],
+        seed: SEED + 1,
+        params: FractalParams::default(),
+    })?;
+    let wobble_y = b.add(Op::Fractal {
+        basis: Basis::Gradient,
+        domain,
+        frequency: [3.0, 6.0],
+        seed: SEED + 2,
+        params: FractalParams::default(),
+    })?;
+    let wavy = b.add(Op::Warp {
+        input: cells,
+        dx: wobble_x,
+        dy: wobble_y,
+        amount: 0.03,
+    })?;
+    // Border distance is in cell units; plates flatten 0.25 cells in.
+    let plates = b.add(Op::Clamp {
+        input: wavy,
+        min: 0.0,
+        max: 0.25,
+    })?;
+    let plates = b.add(Op::Remap {
+        input: plates,
+        from: [0.0, 0.25],
+        to: [0.0, 0.85],
+    })?;
+    let grain = b.add(Op::Fractal {
+        basis: Basis::Gradient,
+        domain,
+        frequency: [24.0, 6.0],
+        seed: SEED + 3,
+        params: FractalParams {
+            octaves: 4,
+            ..FractalParams::default()
+        },
+    })?;
+    let grain = b.add(Op::Remap {
+        input: grain,
+        from: [-1.0, 1.0],
+        to: [0.0, 0.15],
+    })?;
+    let height = b.add(Op::Add {
+        a: plates,
+        b: grain,
+    })?;
+    b.finish(height)
+}
+
+fn raster_grid(raster: &Raster) -> Grid {
+    Grid {
+        width: raster.width(),
+        height: raster.height(),
+        values: raster.values().to_vec(),
+    }
+}
+
+fn write_raster(dir: &Path, name: &str, raster: &Raster) -> Result<(), Box<dyn std::error::Error>> {
+    write_grid(dir, name, &tile_2x2(&raster_grid(raster)))
+}
+
+/// Writes normals as RGB, `0.5 + 0.5 * n` per channel, tiled 2 × 2.
+fn write_normals(
+    dir: &Path,
+    name: &str,
+    normals: &Raster<[f32; 3]>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (w, h) = (normals.width(), normals.height());
+    let mut pixels = Vec::with_capacity((4 * w * h * 3) as usize);
+    for y in 0..2 * i64::from(h) {
+        for x in 0..2 * i64::from(w) {
+            for c in normals.at(x, y) {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "clamped to [0, 255]"
+                )]
+                pixels.push(((c * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            }
+        }
+    }
+    let path = dir.join(format!("{name}.png"));
+    let mut encoder = png::Encoder::new(BufWriter::new(File::create(&path)?), 2 * w, 2 * h);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.write_header()?.write_image_data(&pixels)?;
+    println!("{}", path.display());
     Ok(())
 }
 

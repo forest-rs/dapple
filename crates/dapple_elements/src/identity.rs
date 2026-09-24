@@ -110,8 +110,14 @@ impl ElementKey {
     /// identity-derived randomness an element keeps wherever it moves.
     #[must_use]
     pub fn unit(self, stream: u64) -> f32 {
-        unit_f32(hash(RANDOM_TAG, &[self.0, stream]))
+        unit_of_word(self.0, stream)
     }
+}
+
+/// The identity-derived uniform value of the key word `word` for `stream`,
+/// shared by element and region keys.
+pub(crate) fn unit_of_word(word: u64, stream: u64) -> f32 {
+    unit_f32(hash(RANDOM_TAG, &[word, stream]))
 }
 
 impl fmt::Debug for ElementKey {

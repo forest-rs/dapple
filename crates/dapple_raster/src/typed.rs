@@ -182,6 +182,93 @@ impl TypedRaster {
         }
     }
 
+    /// The value at texel index `i`, row-major.
+    ///
+    /// # Panics
+    ///
+    /// When `i` is out of range.
+    #[must_use]
+    pub fn value(&self, i: usize) -> Value {
+        match &self.storage {
+            Storage::F32(r) => Value::Scalar(r.values()[i]),
+            Storage::U32(r) => Value::Id(r.values()[i]),
+            Storage::F32x2(r) => Value::Vector2(Vec2::from_array(r.values()[i])),
+            Storage::F32x3(r) => Value::Vector3(Vec3::from_array(r.values()[i])),
+        }
+    }
+
+    /// Texels in the raster.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.width() as usize * self.height() as usize
+    }
+
+    /// Whether the raster has no texels; never for a valid raster.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Values of type `port` on the grid of `grid`, row-major.
+    ///
+    /// A value of the wrong shape is stored as zero; callers that produce
+    /// values from a checked program never do that.
+    ///
+    /// # Errors
+    ///
+    /// [`TypedError::Raster`] when `values` does not fill the grid.
+    pub fn from_values<T: Copy>(
+        port: PortType,
+        grid: &Raster<T>,
+        values: impl IntoIterator<Item = Value>,
+    ) -> Result<Self, TypedError> {
+        let values = values.into_iter();
+        fn like<T: Copy, U: Copy>(grid: &Raster<T>, v: Vec<U>) -> Result<Raster<U>, TypedError> {
+            Ok(Raster::from_values(
+                grid.width(),
+                grid.height(),
+                grid.origin(),
+                grid.texel(),
+                grid.edge(),
+                v,
+            )?)
+        }
+        let storage = match Storage::kind_for(port) {
+            StorageKind::F32 => Storage::F32(like(
+                grid,
+                values.map(|v| v.component(0).unwrap_or(0.0)).collect(),
+            )?),
+            StorageKind::U32 => Storage::U32(like(
+                grid,
+                values
+                    .map(|v| match v {
+                        Value::Id(id) => id,
+                        _ => 0,
+                    })
+                    .collect(),
+            )?),
+            StorageKind::F32x2 => Storage::F32x2(like(
+                grid,
+                values
+                    .map(|v| match v {
+                        Value::Vector2(v) => v.to_array(),
+                        _ => [0.0; 2],
+                    })
+                    .collect(),
+            )?),
+            StorageKind::F32x3 => Storage::F32x3(like(
+                grid,
+                values
+                    .map(|v| match v {
+                        Value::Vector3(v) => v.to_array(),
+                        _ => [0.0; 3],
+                    })
+                    .collect(),
+            )?),
+        };
+        Self::new(port, storage)
+    }
+
     /// A hash of the type and every texel's bits.
     #[must_use]
     pub fn digest(&self) -> u64 {
@@ -197,18 +284,8 @@ impl TypedRaster {
 
 /// A stable word for a port type, for fingerprints.
 #[must_use]
-pub fn port_word(port: PortType) -> u64 {
-    use dapple_field::{NormalFrame, Primaries};
-    match port {
-        PortType::Scalar => 1,
-        PortType::Mask => 2,
-        PortType::Id => 3,
-        PortType::Vector2 => 4,
-        PortType::Vector3 => 5,
-        PortType::Color(Primaries::Rec709) => 6,
-        PortType::Normal(NormalFrame::Domain) => 7,
-        PortType::Direction => 8,
-    }
+pub const fn port_word(port: PortType) -> u64 {
+    port.word()
 }
 
 /// How a raster is reduced to a coarser level. See the [module

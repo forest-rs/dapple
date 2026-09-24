@@ -13,8 +13,10 @@ use glam::{Vec2, Vec3};
 /// when a texture is encoded, so gamma-space arithmetic cannot be written.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Primaries {
-    /// ITU-R BT.709 (sRGB) primaries with a D65 white point, which OpenPBR
-    /// parameters use by default.
+    /// ITU-R BT.709 (sRGB) primaries with a D65 white point: dapple's
+    /// working space by its own choice. OpenPBR assumes ACEScg when a
+    /// material names no color space, so the primaries travel with every
+    /// color across every boundary.
     Rec709,
 }
 
@@ -80,6 +82,21 @@ impl PortType {
     #[must_use]
     pub const fn is_scalar(self) -> bool {
         matches!(self, Self::Scalar | Self::Mask)
+    }
+
+    /// A stable word for the type, for fingerprints.
+    #[must_use]
+    pub const fn word(self) -> u64 {
+        match self {
+            Self::Scalar => 1,
+            Self::Mask => 2,
+            Self::Id => 3,
+            Self::Vector2 => 4,
+            Self::Vector3 => 5,
+            Self::Color(Primaries::Rec709) => 6,
+            Self::Normal(NormalFrame::Domain) => 7,
+            Self::Direction => 8,
+        }
     }
 
     /// Components per value: 1 for scalars, masks and identifiers.

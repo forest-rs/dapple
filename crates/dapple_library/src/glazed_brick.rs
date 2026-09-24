@@ -47,11 +47,11 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use dapple_elements::{
-    AttributeDecl, Binding, CompositeError, ContractError, ElementError, ElementSet, InstanceId,
-    LayoutId, Node, NodeRef, Placement, ProgramInstance, Realized, RunningBond, Scope,
-    SurfaceBuilder, SurfaceProgram,
+    AttributeDecl, Binding, CompositeError, ElementError, ElementSet, InstanceId, LayoutId,
+    Placement, ProgramInstance, Realized, RunningBond,
 };
 use dapple_field::program::{NodeId, Op, ProgramBuilder, ProgramError, ValueProgram};
+use dapple_field::scoped::{ContractError, Node, NodeRef, Scope, ScopedBuilder, ScopedProgram};
 use dapple_field::{
     Basis, CellOutput, Domain, FractalParams, PortType, Primaries, ScatterOutput, Stamp, Value,
 };
@@ -254,9 +254,9 @@ fn crazing_field() -> Result<ValueProgram, ProgramError> {
     b.finish_value(out)
 }
 
-/// A small expression helper over a [`SurfaceBuilder`].
+/// A small expression helper over a [`ScopedBuilder`].
 struct Body {
-    b: SurfaceBuilder,
+    b: ScopedBuilder,
 }
 
 impl Body {
@@ -269,7 +269,7 @@ impl Body {
     }
 
     fn n(&mut self, node: Node) -> Result<NodeRef, ContractError> {
-        self.b.add(node)
+        self.b.node(node)
     }
 
     fn add(&mut self, a: NodeRef, b: NodeRef) -> Result<NodeRef, ContractError> {
@@ -356,10 +356,10 @@ impl Body {
 /// # Errors
 ///
 /// Never: the program is fixed and satisfies its contract.
-pub fn program() -> Result<SurfaceProgram, ContractError> {
+pub fn program() -> Result<ScopedProgram, ContractError> {
     let fail = |_| ContractError::UnknownReference;
     let mut p = Body {
-        b: SurfaceBuilder::new("dapple_library.glazed_brick"),
+        b: ScopedBuilder::new("dapple_library.glazed_brick"),
     };
     let element = |p: &mut Body, name: &str| p.b.input(name, PortType::Scalar, Scope::Element);
     let tone = element(&mut p, "tone")?;
@@ -619,7 +619,7 @@ pub fn program() -> Result<SurfaceProgram, ContractError> {
 /// # Errors
 ///
 /// Never for [`program`]'s contract.
-pub fn instance(program: Arc<SurfaceProgram>) -> Result<ProgramInstance, ContractError> {
+pub fn instance(program: Arc<ScopedProgram>) -> Result<ProgramInstance, ContractError> {
     let mut bindings = vec![
         Binding::Attribute(String::from("glaze_tone")),
         Binding::Attribute(String::from("glaze_thickness")),

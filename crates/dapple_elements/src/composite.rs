@@ -39,10 +39,9 @@ use dapple_raster::{Raster, TexelRect};
 use glam::Vec2;
 
 use crate::identity::ElementKey;
-use crate::program::{
-    ContractError, Prepared, ProgramInstance, SampleContext, Shape, weighted, zero_like,
-};
+use crate::program::{Prepared, ProgramInstance, SampleContext, weighted, zero_like};
 use crate::set::{Bounds, Correspondence, ElementSet, correspondence, value_fits, value_words};
+use dapple_field::scoped::{ContractError, Shape};
 
 /// What to composite, and at which resolution.
 #[derive(Clone, Copy, Debug)]

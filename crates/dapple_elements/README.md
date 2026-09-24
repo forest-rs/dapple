@@ -10,12 +10,14 @@ tiles, stones, flakes) that exist before they are drawn.
 - **Layout is separate from realization.** A layout (`RunningBond`)
   produces an `ElementSet`, a column table in canonical key order; one set
   drives every output.
-- **Surface programs are inspectable values.** A `SurfaceProgram` declares
-  named typed inputs with an execution scope (material, element, sample),
-  typed outputs, resource dependencies and a body of `Node`s. A
-  `ProgramInstance` binds the inputs with a stable instance identity, and
-  scopes are checked: a per-element value never depends on the sample
-  position.
+- **Programs are inspectable values.** Elements and regions invoke
+  `dapple_field`'s `ScopedProgram`: named typed inputs with an execution
+  scope (material, region, element, sample, raster pass), typed outputs,
+  resources, functions and a body of nodes. A `ProgramInstance` binds the
+  inputs to attributes, region properties or positions with a stable
+  instance identity, and scopes are checked: a per-element value never
+  depends on the sample position. `RegionMap::evaluate` runs region-scope
+  work once per region.
 - **Compositing ownership is explicit.** `composite` writes each output
   under coverage compositing, and a winner label per texel that is a
   *summary*; `Realized::contributors` recomputes every contributor on

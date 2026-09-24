@@ -52,6 +52,14 @@
 //! [`Fingerprint`](program::Fingerprint)s, evaluated bit-identically to the
 //! field types above.
 //!
+//! [`scoped`] is the programmable core above field programs: a
+//! [`ScopedProgram`](scoped::ScopedProgram) is an inspectable expression
+//! with typed inputs and outputs whose execution [`Scope`](scoped::Scope)
+//! (per material, region, element, sample or raster pass) is checked, that
+//! samples field programs as resources and calls other programs as
+//! functions. Elements, regions and materials bind its inputs. [`shaping`]
+//! holds its tone curves and color ramps.
+//!
 //! [`SampleImage`] reads texels back as a field: bilinear, periodic-aware,
 //! and footprint-filtered through its mip chain. Programs sample one with
 //! [`program::Op::Sample`].
@@ -85,7 +93,9 @@ mod noise;
 pub mod program;
 pub mod raster;
 mod scatter;
+pub mod scoped;
 mod shape;
+pub mod shaping;
 mod solid;
 mod tiling;
 mod types;

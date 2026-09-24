@@ -52,7 +52,11 @@ use glam::Vec2;
 
 use crate::composite::{CompositeError, Realized};
 use crate::identity::ElementKey;
+use crate::program::{Binding, ProgramInstance};
 use crate::set::Bounds;
+use dapple_field::scoped::{ContractError, Scope, value_fits};
+use dapple_field::{Footprint, Value};
+use dapple_raster::typed::TypedError;
 
 /// Purpose tag of reconstructed region keys ("regionky").
 const REGION_TAG: u64 = 0x7265_6769_6f6e_6b79;
@@ -159,6 +163,10 @@ pub enum RegionError {
     Raster(RasterError),
     /// Reading a composite failed.
     Composite(CompositeError),
+    /// A program instance does not fit region evaluation.
+    Contract(ContractError),
+    /// Building an output raster failed.
+    Typed(TypedError),
 }
 
 impl fmt::Display for RegionError {
@@ -169,6 +177,8 @@ impl fmt::Display for RegionError {
             Self::KeyCollision(key) => write!(f, "two regions would share {key:?}"),
             Self::Raster(e) => e.fmt(f),
             Self::Composite(e) => e.fmt(f),
+            Self::Contract(e) => e.fmt(f),
+            Self::Typed(e) => e.fmt(f),
         }
     }
 }
@@ -458,6 +468,117 @@ impl RegionMap {
     pub fn label_raster(&self) -> TypedRaster {
         TypedRaster::new(PortType::Id, Storage::U32(self.labels.clone()))
             .expect("identifiers are stored as u32")
+    }
+
+    /// Evaluates `instance` over the map: its region-scope nodes once per
+    /// region, the rest once per texel, and `background` (one value per
+    /// output) where no region is.
+    ///
+    /// Inputs may be bound to constants, region properties
+    /// ([`Binding::RegionRandom`], [`Binding::RegionArea`],
+    /// [`Binding::RegionCentroid`], [`Binding::RegionOrientation`]) and the
+    /// texel center's domain position ([`Binding::Position`]); element
+    /// bindings are refused. Returns one raster per output, in output order.
+    ///
+    /// # Errors
+    ///
+    /// [`RegionError::Contract`] for an element binding or a background
+    /// that does not fit, [`RegionError::Typed`] when building an output
+    /// fails.
+    pub fn evaluate(
+        &self,
+        instance: &ProgramInstance,
+        background: &[Value],
+    ) -> Result<Vec<TypedRaster>, RegionError> {
+        let program = instance.program();
+        let outputs = program.outputs();
+        if background.len() != outputs.len()
+            || outputs
+                .iter()
+                .zip(background)
+                .any(|(o, v)| !value_fits(*v, o.port))
+        {
+            return Err(RegionError::Contract(ContractError::BindingCount));
+        }
+        for (input, binding) in program.inputs().iter().zip(instance.bindings()) {
+            if matches!(
+                binding,
+                Binding::Attribute(_)
+                    | Binding::ElementRandom(_)
+                    | Binding::HalfSize
+                    | Binding::Variant
+                    | Binding::LocalPosition
+                    | Binding::EdgeDistance
+            ) {
+                return Err(RegionError::Contract(ContractError::UnsupportedBinding(
+                    input.name.clone(),
+                )));
+            }
+        }
+        let input = |i: u32, region: Option<&Region>, position: Vec2| -> Value {
+            let r = || region.expect("region scope is evaluated per region");
+            match &instance.bindings()[i as usize] {
+                Binding::Constant(v) => *v,
+                Binding::RegionRandom(stream) => {
+                    Value::Scalar(crate::identity::unit_of_word(r().key.word(), *stream))
+                }
+                Binding::RegionArea => Value::Scalar(r().area),
+                Binding::RegionCentroid => Value::Vector2(r().centroid),
+                Binding::RegionOrientation => Value::Scalar(r().orientation),
+                Binding::Position => Value::Vector2(position),
+                _ => unreachable!("refused above"),
+            }
+        };
+        let hoisted: Vec<Vec<Option<Value>>> = self
+            .regions
+            .iter()
+            .map(|region| {
+                let mut values = vec![None; program.nodes().len()];
+                program.evaluate(
+                    &mut values,
+                    |s| s.within(Scope::Region),
+                    &mut |i| input(i, Some(region), Vec2::ZERO),
+                    Footprint::POINT,
+                );
+                values
+            })
+            .collect();
+        let labels = &self.labels;
+        let (origin, texel) = (labels.origin(), labels.texel());
+        let footprint = Footprint::new(texel.max_element()).unwrap_or(Footprint::POINT);
+        let mut columns: Vec<Vec<Value>> =
+            vec![Vec::with_capacity(labels.values().len()); outputs.len()];
+        for y in 0..labels.height() {
+            for x in 0..labels.width() {
+                let label = labels.values()[(y * labels.width() + x) as usize];
+                if label == 0 {
+                    for (column, v) in columns.iter_mut().zip(background) {
+                        column.push(*v);
+                    }
+                    continue;
+                }
+                let index = label as usize - 1;
+                #[expect(clippy::cast_precision_loss, reason = "texel indices are small")]
+                let position = origin + texel * Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+                let mut values = hoisted[index].clone();
+                program.evaluate(
+                    &mut values,
+                    |_| true,
+                    &mut |i| input(i, Some(&self.regions[index]), position),
+                    footprint,
+                );
+                for (column, o) in columns.iter_mut().zip(outputs) {
+                    column.push(values[o.node.index()].expect("every node evaluated"));
+                }
+            }
+        }
+        outputs
+            .iter()
+            .zip(columns)
+            .map(|(o, column)| {
+                TypedRaster::from_values(o.port, labels, column).map_err(RegionError::Typed)
+            })
+            .collect()
     }
 
     /// The region table, in key order.

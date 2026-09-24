@@ -13,6 +13,7 @@ use dapple_field::{Basis, Domain, PortType, Value};
 use glam::{Vec2, Vec3};
 
 use crate::*;
+use dapple_field::scoped::{ContractError, Node, Scope, ScopedBuilder, ScopedProgram};
 
 fn domain() -> Domain {
     Domain::periodic(1, 1).unwrap()
@@ -48,7 +49,7 @@ fn bricks(joint: f32) -> ElementSet {
 
 /// Outputs: `color` (per sample), `height` (per sample), `material` (glaze
 /// 0 or chipped body 1, per sample), `tint` (per element).
-fn program() -> SurfaceProgram {
+fn program() -> ScopedProgram {
     let mut noise = ProgramBuilder::new();
     let n = noise
         .add(Op::Noise {
@@ -60,7 +61,7 @@ fn program() -> SurfaceProgram {
         .unwrap();
     let noise = noise.finish_value(n).unwrap();
 
-    let mut b = SurfaceBuilder::new("test.glaze");
+    let mut b = ScopedBuilder::new("test.glaze");
     let tone = b.input("tone", PortType::Scalar, Scope::Element).unwrap();
     let local = b.input("local", PortType::Vector2, Scope::Sample).unwrap();
     let edge = b.input("edge", PortType::Scalar, Scope::Sample).unwrap();
@@ -72,23 +73,23 @@ fn program() -> SurfaceProgram {
     let blue = b.constant(Value::Vector3(Vec3::new(0.1, 0.2, 0.8)));
     let body = b.constant(Value::Vector3(Vec3::splat(0.5)));
     let tint = b
-        .add(Node::Mix {
+        .node(Node::Mix {
             a: red,
             b: blue,
             t: tone,
         })
         .unwrap();
     let shape = b
-        .add(Node::SmoothStep {
+        .node(Node::SmoothStep {
             edge0: zero,
             edge1: bevel,
             x: edge,
         })
         .unwrap();
-    let offset = b.add(Node::Vector2(seed, seed)).unwrap();
-    let at = b.add(Node::Add(local, offset)).unwrap();
+    let offset = b.node(Node::Vector2(seed, seed)).unwrap();
+    let at = b.node(Node::Add(local, offset)).unwrap();
     let n = b
-        .add(Node::Sample {
+        .node(Node::Sample {
             resource: chips,
             at,
         })
@@ -96,24 +97,24 @@ fn program() -> SurfaceProgram {
     let lo = b.constant(Value::Scalar(0.3));
     let hi = b.constant(Value::Scalar(0.4));
     let chip = b
-        .add(Node::SmoothStep {
+        .node(Node::SmoothStep {
             edge0: lo,
             edge1: hi,
             x: n,
         })
         .unwrap();
     let color = b
-        .add(Node::Mix {
+        .node(Node::Mix {
             a: tint,
             b: body,
             t: chip,
         })
         .unwrap();
-    let height = b.add(Node::Sub(shape, chip)).unwrap();
+    let height = b.node(Node::Sub(shape, chip)).unwrap();
     let glaze = b.constant(Value::Id(0));
     let exposed = b.constant(Value::Id(1));
     let material = b
-        .add(Node::Select {
+        .node(Node::Select {
             condition: chip,
             a: exposed,
             b: glaze,
@@ -485,10 +486,10 @@ fn mixed_texels_separate_ownership_from_contribution() {
 
 #[test]
 fn contracts_are_checked() {
-    let mut b = SurfaceBuilder::new("bad");
+    let mut b = ScopedBuilder::new("bad");
     let local = b.input("local", PortType::Vector2, Scope::Sample).unwrap();
     let x = b
-        .add(Node::Component {
+        .node(Node::Component {
             input: local,
             index: 0,
         })
@@ -505,11 +506,11 @@ fn contracts_are_checked() {
     // Shapes are checked as nodes are added.
     let id = b.constant(Value::Id(3));
     assert!(matches!(
-        b.add(Node::Add(id, x)),
+        b.node(Node::Add(id, x)),
         Err(ContractError::ShapeMismatch { .. })
     ));
     assert!(matches!(
-        b.add(Node::Component { input: x, index: 0 }),
+        b.node(Node::Component { input: x, index: 0 }),
         Err(ContractError::ShapeMismatch { .. })
     ));
     b.output("x", PortType::Scalar, Scope::Sample, x).unwrap();
@@ -547,7 +548,7 @@ fn contracts_are_checked() {
     assert!(matches!(program.nodes()[tint.index()], Node::Mix { .. }));
     assert_ne!(
         program.fingerprint(),
-        SurfaceBuilder::new("x").finish().fingerprint()
+        ScopedBuilder::new("x").finish().fingerprint()
     );
 }
 
@@ -851,14 +852,14 @@ fn scatter(density: f32) -> dapple_field::Scatter {
 /// A program whose outputs are a sub-material chosen by the element's
 /// variant (0 or 1) and full coverage.
 fn variant_instance() -> ProgramInstance {
-    let mut b = SurfaceBuilder::new("test.variant");
+    let mut b = ScopedBuilder::new("test.variant");
     let variant = b
         .input("variant", PortType::Scalar, Scope::Element)
         .unwrap();
     let one = b.constant(Value::Scalar(1.0));
     let (stone, flake) = (b.constant(Value::Id(0)), b.constant(Value::Id(1)));
     let material = b
-        .add(Node::Select {
+        .node(Node::Select {
             condition: variant,
             a: flake,
             b: stone,
@@ -1012,4 +1013,89 @@ fn disks_set() -> ElementSet {
     }
     .elements(Vec::new(), |_, _| Vec::new())
     .unwrap()
+}
+
+#[test]
+fn region_scope_runs_once_per_region_and_keeps_its_identity() {
+    use dapple_raster::{Edge, Raster};
+    // Two blobs on an 8 × 4 grid.
+    let mut values = vec![0.0_f32; 32];
+    for (x, y) in [(1, 1), (2, 1), (1, 2), (5, 1), (6, 1), (6, 2)] {
+        values[y * 8 + x] = 1.0;
+    }
+    let mask =
+        Raster::from_values(8, 4, Vec2::ZERO, Vec2::splat(0.125), Edge::Clamp, values).unwrap();
+    let map = RegionMap::reconstruct(&mask, 0.5, Connectivity::Four).unwrap();
+    assert_eq!(map.regions().len(), 2, "two regions");
+
+    let mut b = ScopedBuilder::new("test.region");
+    let tone = b.input("tone", PortType::Scalar, Scope::Region).unwrap();
+    let area = b.input("area", PortType::Scalar, Scope::Region).unwrap();
+    let at = b.input("at", PortType::Vector2, Scope::Sample).unwrap();
+    let x = b.component(at, 0).unwrap();
+    let shade = b.add(tone, x).unwrap();
+    b.output("tone", PortType::Scalar, Scope::Region, tone)
+        .unwrap();
+    b.output("area", PortType::Scalar, Scope::Region, area)
+        .unwrap();
+    b.output("shade", PortType::Scalar, Scope::Sample, shade)
+        .unwrap();
+    let program = Arc::new(b.finish());
+    let instance = ProgramInstance::new(
+        InstanceId::named("test.region"),
+        Arc::clone(&program),
+        vec![
+            Binding::RegionRandom(7),
+            Binding::RegionArea,
+            Binding::Position,
+        ],
+    )
+    .unwrap();
+    let background = [Value::Scalar(-1.0), Value::Scalar(0.0), Value::Scalar(-1.0)];
+    let out = map.evaluate(&instance, &background).unwrap();
+    for region in map.regions() {
+        let expected = ElementKey::from_word(region.key.word()).unit(7);
+        for y in 0..4 {
+            for x in 0..8 {
+                if map.key_at(x, y) == Some(region.key) {
+                    assert_eq!(out[0].value_at(x, y), Value::Scalar(expected), "tone");
+                    assert_eq!(out[1].value_at(x, y), Value::Scalar(region.area), "area");
+                }
+            }
+        }
+    }
+    assert_eq!(out[0].value_at(0, 0), Value::Scalar(-1.0), "background");
+
+    assert!(
+        matches!(
+            ProgramInstance::new(
+                InstanceId::named("test.region"),
+                Arc::clone(&program),
+                vec![
+                    Binding::ElementRandom(7),
+                    Binding::RegionArea,
+                    Binding::Position
+                ],
+            ),
+            Err(ContractError::ScopeViolation { .. })
+        ),
+        "an element value cannot stand for a region input"
+    );
+    let local = ProgramInstance::new(
+        InstanceId::named("test.region"),
+        program,
+        vec![
+            Binding::RegionRandom(7),
+            Binding::RegionArea,
+            Binding::LocalPosition,
+        ],
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            map.evaluate(&local, &background),
+            Err(RegionError::Contract(ContractError::UnsupportedBinding(_)))
+        ),
+        "regions cannot supply element bindings"
+    );
 }

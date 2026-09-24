@@ -19,12 +19,13 @@
 //!   produce them; [`ElementSet::filter`],
 //!   [`ElementSet::set_placement`] and [`ElementSet::set_attribute`] edit
 //!   them.
-//! - **Surface programs** ([`program`]): the callable contract an element
-//!   invokes. A [`SurfaceProgram`] is an inspectable value with typed,
-//!   scoped inputs and outputs, resource dependencies and a body of
-//!   [`Node`]s; a [`ProgramInstance`] binds it under a stable
-//!   [`InstanceId`]. Scopes are checked, and per-element work runs once per
-//!   element.
+//! - **Program bindings** ([`program`]): the callable contract an element
+//!   or region invokes is `dapple_field`'s scoped program (typed, scoped
+//!   inputs and outputs, resources, functions and an inspectable body); a
+//!   [`ProgramInstance`] binds its inputs to element attributes, region
+//!   properties or sample positions under a stable [`InstanceId`]. Scopes
+//!   are checked, and per-element work runs once per element, per-region
+//!   work once per region ([`RegionMap::evaluate`]).
 //! - **Compositing** ([`composite`]): [`Realized::composite`] writes every
 //!   program output under coverage compositing plus a winner owner label,
 //!   which is a summary; [`Realized::contributors`] recomputes the full
@@ -63,10 +64,7 @@ pub use curve::{
 };
 pub use identity::{Anchor, ElementKey, LayoutId};
 pub use layout::{RunningBond, ScatterLayout, ScatterVariant};
-pub use program::{
-    Binding, ContractError, InstanceId, Node, NodeRef, ProgramInstance, Scope, SurfaceBuilder,
-    SurfaceProgram,
-};
+pub use program::{Binding, InstanceId, ProgramInstance};
 pub use region::{
     Connectivity, Merge, Overlap, Provenance, Region, RegionCorrespondence, RegionError, RegionKey,
     RegionMap, RegionStatistics, Regroup, Split,

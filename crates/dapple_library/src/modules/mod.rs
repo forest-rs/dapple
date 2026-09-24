@@ -17,6 +17,9 @@
 //! | [`Grime`] | Dirt settled where ambient occlusion and cavities trap it. |
 //! | [`Streaks`] | Grime washed down from upward-facing ledges. |
 //! | [`Efflorescence`] | Salts blooming on one surface (mortar), rising from the foot. |
+//! | [`EdgeWear`] | Wear through to the material beneath on convex edges, from curvature. |
+//! | [`Moss`] | Moss where the surface faces up, is hollow or damp, with a fuzz sheen. |
+//! | [`ByExample`] | A material tiled from a host-supplied exemplar by histogram-preserving blending. |
 //!
 //! Assets compose them without copying their graphs:
 //! [`GlazedBrickWall`] (ceramic body, glaze finish, mortar, weathering),
@@ -45,6 +48,7 @@ mod ceramic;
 mod finish;
 mod mortar;
 mod stone;
+mod wear;
 mod weathering;
 mod wood;
 
@@ -53,6 +57,7 @@ pub use ceramic::CeramicBody;
 pub use finish::Finish;
 pub use mortar::Mortar;
 pub use stone::Stone;
+pub use wear::{ByExample, EdgeWear, Moss};
 pub use weathering::{Efflorescence, Grime, Streaks};
 pub use wood::Wood;
 

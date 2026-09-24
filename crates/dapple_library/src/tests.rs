@@ -144,7 +144,7 @@ mod glazed {
             )
             .unwrap();
         let inward = DistanceTransform { threshold: 0.5 }.apply(&mortar).unwrap();
-        let (mut body, mut near_edge, mut glazed) = (0_u32, 0_u32, 0_u32);
+        let (mut body, mut near_edge, mut glazed, mut coated) = (0_u32, 0_u32, 0_u32, 0_u32);
         let (mut body_rough, mut coat_rough) = (0.0_f64, 0.0_f64);
         for (i, &s) in ids.iter().enumerate() {
             match s {
@@ -157,10 +157,7 @@ mod glazed {
                 GLAZE => {
                     glazed += 1;
                     coat_rough += f64::from(scalar(&m, ChannelId::Param(Param::CoatRoughness), i));
-                    assert!(
-                        scalar(&m, ChannelId::Param(Param::CoatWeight), i) > 0.5,
-                        "glaze is coated"
-                    );
+                    coated += u32::from(scalar(&m, ChannelId::Param(Param::CoatWeight), i) > 0.5);
                 }
                 MORTAR => {}
                 other => panic!("unknown surface {other}"),
@@ -169,6 +166,10 @@ mod glazed {
         let (body_rough, coat_rough) =
             (body_rough / f64::from(body), coat_rough / f64::from(glazed));
         assert!(body_rough > 0.65, "exposed body is rough: {body_rough}");
+        assert!(
+            coated * 100 >= glazed * 97,
+            "glaze is coated: {coated} of {glazed}"
+        );
         assert!(coat_rough < 0.15, "glaze is glossy: {coat_rough}");
         let share = f64::from(body) / f64::from(SIZE * SIZE);
         assert!(share > 0.002 && share < 0.1, "chipped share {share}");
@@ -204,7 +205,7 @@ mod glazed {
         let (lo, hi) = mortar
             .iter()
             .fold((f32::MAX, f32::MIN), |(a, b), m| (a.min(m.1), b.max(m.1)));
-        assert!(hi - lo > 0.05, "mortar red from {lo} to {hi}");
+        assert!(hi - lo > 0.03, "mortar red from {lo} to {hi}");
 
         let weathered = wall(true);
         let mean = |m: &Material| {
@@ -318,5 +319,161 @@ mod gate {
             }
         }
         assert!(maps >= 6, "a rich material: {maps} maps");
+    }
+}
+
+mod wear {
+    use alloc::vec::Vec;
+
+    use dapple_field::hash::{hash, unit_f32};
+    use dapple_field::program::Fingerprint;
+    use dapple_field::{Domain, ImageLevel, PortType, Primaries, SampleImage, SamplePolicy, Value};
+    use dapple_material::module::{Bind, Context, Input};
+    use dapple_material::resource::{
+        NoResources, Resolved, ResourceError, ResourceHost, ResourceRef,
+    };
+    use dapple_material::{Aux, Channel, ChannelId, Material, Param};
+    use dapple_raster::typed::ReductionPolicy;
+    use glam::{Vec2, Vec3};
+
+    use crate::modules::{ByExample, EdgeWear, Moss};
+
+    /// A raised square on a flat ground, 64² over one meter.
+    fn block() -> Material {
+        let grid = super::glazed::tile(64);
+        let mut m = Material::new(grid);
+        let h: Vec<Value> = (0..grid.len())
+            .map(|i| {
+                let (x, y) = (i % 64, i / 64);
+                let inside = (16..48).contains(&x) && (16..48).contains(&y);
+                Value::Scalar(if inside { 0.005 } else { 0.0 })
+            })
+            .collect();
+        m.set_aux(
+            Aux::Height,
+            Channel::Map(grid.typed(PortType::Scalar, h).unwrap()),
+        )
+        .unwrap();
+        m.set_param(
+            Param::BaseColor,
+            Channel::Constant(Value::Vector3(Vec3::splat(0.2))),
+        )
+        .unwrap();
+        m.set_param(Param::CoatWeight, Channel::Constant(Value::Scalar(1.0)))
+            .unwrap();
+        m
+    }
+
+    fn value(m: &Material, p: Param, x: usize, y: usize) -> Value {
+        m.value(ChannelId::Param(p), y * 64 + x)
+    }
+
+    #[test]
+    fn edge_wear_takes_the_arrises_and_moss_the_ledges() {
+        let mut cx = Context::new(super::glazed::tile(64), &NoResources);
+        let mut out = cx
+            .instantiate(
+                &EdgeWear,
+                "wear",
+                Bind::new()
+                    .material("base", block())
+                    .scalar("coverage", 0.05)
+                    .scalar("radius", 0.02),
+            )
+            .unwrap();
+        let worn = out.take_material("material").unwrap();
+        // The block's top edge, just inside, is worn; its middle is not.
+        assert_eq!(value(&worn, Param::CoatWeight, 32, 32), Value::Scalar(1.0));
+        let edge = value(&worn, Param::CoatWeight, 32, 47).scalar().unwrap();
+        assert!(edge < 0.5, "the arris lost its coat: {edge}");
+
+        let mut out = cx
+            .instantiate(
+                &Moss,
+                "moss",
+                Bind::new()
+                    .material("base", block())
+                    .scalar("coverage", 0.05)
+                    .scalar("damp", 0.0),
+            )
+            .unwrap();
+        let moss = out.take_material("material").unwrap();
+        let fuzz = |x, y| value(&moss, Param::FuzzWeight, x, y).scalar().unwrap();
+        // Up-facing: the step up at the block's foot faces down, its top
+        // edge faces up (+y), and moss takes the ledge above.
+        let top: f32 = (16..48).map(|x| fuzz(x, 48)).sum();
+        let bottom: f32 = (16..48).map(|x| fuzz(x, 15)).sum();
+        assert!(
+            top > bottom,
+            "moss on the ledge {top} over the overhang {bottom}"
+        );
+        assert!(
+            cx.diagnostics().reports_at("moss").count() == 1,
+            "the deposit is reported"
+        );
+    }
+
+    struct Exemplar;
+
+    impl ResourceHost for Exemplar {
+        fn resolve(&self, reference: &ResourceRef) -> Result<Resolved, ResourceError> {
+            if reference.0 != "stone.exr" {
+                return Err(ResourceError::NotFound(reference.clone()));
+            }
+            // 96² texels of 5 mm: blotches of color in blocks of 6 texels.
+            let n = 96_u32;
+            let values: Vec<f32> = (0..n * n)
+                .flat_map(|i| {
+                    let block = (i % n) / 6 + 1000 * ((i / n) / 6);
+                    let u = unit_f32(hash(5, &[u64::from(block)]));
+                    [0.3 + 0.4 * u, 0.25 + 0.3 * u, 0.2 + 0.1 * u * u]
+                })
+                .collect();
+            let level = ImageLevel::with_channels(n, n, Vec2::splat(0.005), 3, values).unwrap();
+            let image = SampleImage::typed(
+                PortType::Color(Primaries::Rec709),
+                SamplePolicy::Linear,
+                Domain::Plane,
+                Vec2::ZERO,
+                alloc::vec![level],
+                Fingerprint(11),
+            )
+            .unwrap();
+            Ok(Resolved {
+                content: Fingerprint(11),
+                image,
+                mips: ReductionPolicy::Average,
+            })
+        }
+    }
+
+    #[test]
+    fn by_example_tiles_a_host_exemplar_keeping_its_colors() {
+        let mut cx = Context::new(super::glazed::tile(64), &Exemplar);
+        let mut out = cx
+            .instantiate(
+                &ByExample,
+                "stone",
+                Bind::new()
+                    .input("exemplar", Input::Resource(ResourceRef("stone.exr".into())))
+                    .scalar("cell", 0.1),
+            )
+            .unwrap();
+        let m = out.take_material("material").unwrap();
+        let reds: Vec<f32> = (0..m.grid().len())
+            .map(|i| {
+                m.value(ChannelId::Param(Param::BaseColor), i)
+                    .component(0)
+                    .unwrap()
+            })
+            .collect();
+        let (lo, hi) = reds
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+        assert!(
+            lo >= 0.29 && hi <= 0.71,
+            "within the exemplar's range: {lo}..{hi}"
+        );
+        assert!(hi - lo > 0.2, "keeps its contrast: {lo}..{hi}");
     }
 }

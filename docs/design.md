@@ -1099,6 +1099,26 @@ meaning.
     report their approximations at their instances; a material-wide
     transform moves every channel. `examples/glazed_brick` builds the wall
     and the sill at 2048² and renders them in Blender.
+  - **Directional processing and by-example synthesis** (`dapple_raster`):
+    `SlopeSample` reads along a height's fall lines, `Displace` moves
+    content by a vector field, `Advect` averages along a flow's upstream
+    streamlines (semi-Lagrangian, bounded reach; it pays in `Streaks`,
+    whose trails now bend with a wandering downward flow).
+    `synthesis::ByExample` is Heitz and Neyret's histogram-preserving
+    blend: channels Gaussianized by rank, patches on a triangle lattice at
+    keyed offsets blended as `Σ wᵢ Gᵢ / √Σ wᵢ²`, inverted per channel. The
+    lattice is square cells split in two, so it can fit a wrapping period;
+    channels are Gaussianized separately (no color decorrelation yet).
+  - **Wear, growth and exemplars as modules** (`dapple_library::modules`):
+    `EdgeWear` selects the material beneath (or a worn copy of the base)
+    where curvature, the height over its blur, is convex, optionally on one
+    surface identity; `Moss` is a deposit by orientation (the normal
+    against a stated up), hollows, damp and clumps, with OpenPBR fuzz and
+    lumpy relief (`Deposit::relief`); `ByExample` tiles a host-resolved
+    exemplar in meters. Weathering is location-driven: `Grime` adds
+    splash-back speckle near the foot and fades toward the top,
+    `Efflorescence` rises from the foot, and the sill's drip line feeds
+    `Streaks`.
 
 #### Slice 3: materials on objects
 

@@ -650,6 +650,10 @@ pub struct Deposit {
     pub coverage: Raster,
     /// Its thickness at full coverage, in meters.
     pub thickness: f32,
+    /// Relief on top of that thickness, in meters, where it lies: the
+    /// lumps of moss or the ridges of a salt crust. `None` for a flat
+    /// deposit.
+    pub relief: Option<Raster>,
 }
 
 /// Covers `base` with `deposit`.
@@ -675,10 +679,18 @@ pub fn deposit(base: &Material, deposit: &Deposit) -> Result<(Material, Report),
     if !deposit.thickness.is_finite() {
         return Err(MaterialError::InvalidParameter("thickness"));
     }
+    if let Some(r) = &deposit.relief
+        && !grid.holds_raster(r)
+    {
+        return Err(MaterialError::GridMismatch);
+    }
     let mut on_top = deposit.material.clone();
     let h = ChannelId::Aux(Aux::Height);
     let raised: Vec<Value> = (0..grid.len())
-        .map(|i| Value::Scalar(scalar(base.value(h, i)) + deposit.thickness))
+        .map(|i| {
+            let relief = deposit.relief.as_ref().map_or(0.0, |r| r.values()[i]);
+            Value::Scalar(scalar(base.value(h, i)) + deposit.thickness + relief)
+        })
         .collect();
     on_top.set(h, Channel::Map(grid.typed(PortType::Scalar, raised)?))?;
     match base.aux(Aux::Region) {

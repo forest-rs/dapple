@@ -33,8 +33,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use dapple_elements::{
-    AttributeDecl, Binding, CompositeError, ElementError, ElementSet, InstanceId, LayoutId,
-    Placement, ProgramInstance, Realized, RunningBond,
+    AttributeDecl, Binding, CompositeError, Element, ElementError, ElementSet, InstanceId,
+    LayoutId, Placement, ProgramInstance, Realized, RunningBond,
 };
 use dapple_field::program::{NodeId, Op, ProgramBuilder, ProgramError, ValueProgram};
 use dapple_field::scoped::{ContractError, Node, Scope, ScopedBuilder, ScopedProgram};
@@ -59,6 +59,8 @@ pub const SALT: u32 = 5;
 pub const STONE: u32 = 6;
 /// Surface-material identifier of wood.
 pub const WOOD: u32 = 7;
+/// Surface-material identifier of moss.
+pub const MOSS: u32 = 8;
 
 /// Bricks per course and courses per 1 m tile: 250 × 71 mm courses
 /// including the joints.
@@ -79,8 +81,10 @@ const FACE: f32 = 0.006;
 pub mod glazes {
     use glam::Vec3;
 
-    /// Cream (ivory) glaze, the commonest light-well brick.
-    pub const CREAM: Vec3 = Vec3::new(0.60, 0.48, 0.29);
+    /// Cream (ivory) glaze, the commonest light-well brick: about sRGB
+    /// (223, 209, 177), as photographed cream glazed brick reads in
+    /// daylight.
+    pub const CREAM: Vec3 = Vec3::new(0.74, 0.64, 0.44);
     /// Honey-brown (salt-glaze brown).
     pub const BROWN: Vec3 = Vec3::new(0.072, 0.033, 0.014);
     /// Bottle green.
@@ -132,7 +136,8 @@ pub fn layout_id() -> LayoutId {
 }
 
 /// The attribute schema: `glaze_color` (a color), `glaze_thickness` (in
-/// meters) and `knocks` (how battered, 0 to 1).
+/// meters), `knocks` (how battered, 0 to 1) and `replaced` (1 for a later
+/// replacement brick).
 #[must_use]
 pub fn schema() -> Vec<AttributeDecl> {
     vec![
@@ -146,6 +151,10 @@ pub fn schema() -> Vec<AttributeDecl> {
         },
         AttributeDecl {
             name: String::from("knocks"),
+            port: PortType::Scalar,
+        },
+        AttributeDecl {
+            name: String::from("replaced"),
             port: PortType::Scalar,
         },
     ]
@@ -163,13 +172,17 @@ pub fn bond(domain: Domain) -> RunningBond {
     }
 }
 
-/// The bricks of a 1 m tile glazed by `palette`, each laid up to 0.6 mm off
-/// its bond position and turned up to 0.1°.
+/// The bricks of a 1 m tile glazed by `palette`, as a bricklayer lays them:
+/// each up to 1.5 mm off its bond position, turned up to 0.25°, and up to
+/// 2 mm shorter and 1.2 mm lower than nominal (fired bricks shrink
+/// unevenly), so joints vary in width.
 ///
 /// A brick's glaze is its course's, darkened or lightened by up to
 /// `variation · 25%` and shifted in hue by a fifth of that, from its key;
-/// one brick in ten is a kiln outlier twice as far off. Glaze thickness
-/// runs from 0.2 to 0.45 mm.
+/// one brick in ten is a kiln outlier twice as far off. One in twenty-five
+/// is a later **replacement**: a near match, cleaner and a little cooler
+/// or redder, crisp and unchipped. Glaze thickness runs from 0.2 to
+/// 0.45 mm.
 ///
 /// # Errors
 ///
@@ -192,25 +205,39 @@ pub fn layout(palette: &Palette) -> Result<ElementSet, ElementError> {
             1.0,
             1.0 + (key.unit(23) - 0.5) * 0.1 * palette.variation,
         );
-        let color = (base * depth * hue).clamp(Vec3::ZERO, Vec3::ONE);
+        let replaced = key.unit(25) < 0.04;
+        let color = if replaced {
+            // A near match from another maker: cleaner, a shade off.
+            base * Vec3::new(1.08, 1.1, 1.18) * (0.95 + 0.1 * key.unit(26))
+        } else {
+            base * depth * hue
+        }
+        .clamp(Vec3::ZERO, Vec3::ONE);
         vec![
             Value::Vector3(color),
             Value::Scalar(0.0002 + 0.00025 * key.unit(2)),
-            Value::Scalar(palette.battered * (0.3 + 0.7 * key.unit(24))),
+            Value::Scalar(if replaced {
+                0.0
+            } else {
+                palette.battered * (0.3 + 0.7 * key.unit(24))
+            }),
+            Value::Scalar(f32::from(u8::from(replaced))),
         ]
     })?;
-    for i in 0..set.len() {
-        let key = set.keys()[i];
-        let p = set.placement(i);
-        let shift = Vec2::new(key.unit(11) - 0.5, key.unit(12) - 0.5) * 0.0012;
-        set.set_placement(
-            key,
-            Placement {
-                center: p.center + shift,
-                rotation: (key.unit(13) - 0.5) * 0.0035,
-            },
-        )?;
-    }
+    let elements: Vec<Element> = (0..set.len())
+        .map(|i| {
+            let mut e = set.element(i);
+            let key = e.key;
+            e.placement = Placement {
+                center: e.placement.center
+                    + Vec2::new(key.unit(11) - 0.5, key.unit(12) - 0.5) * 0.003,
+                rotation: (key.unit(13) - 0.5) * 0.009,
+            };
+            e.half_size -= Vec2::new(key.unit(14) * 0.001, key.unit(15) * 0.0006);
+            e
+        })
+        .collect();
+    set = ElementSet::new(schema(), elements)?;
     Ok(set)
 }
 
@@ -327,10 +354,10 @@ fn crazing_field() -> Result<ValueProgram, ProgramError> {
 
 /// The glazed-brick structure program.
 ///
-/// Inputs, in binding order: `glaze_color`, `thickness` and `knocks` (the
-/// attributes), `seed`, `arris`, `profile`, `tilt_x`, `tilt_y`, `bow` and
-/// `crazed` (uniform per-element randomness), `half_size` per element, and
-/// `local` and `edge` per sample.
+/// Inputs, in binding order: `glaze_color`, `thickness`, `knocks` and
+/// `replaced` (the attributes), `seed`, `arris`, `profile`, `tilt_x`,
+/// `tilt_y`, `bow`, `crazed` and `lip` (uniform per-element randomness),
+/// `half_size` per element, and `local` and `edge` per sample.
 ///
 /// Outputs: `height` (meters above the mortar's datum, before the glaze),
 /// `cover` (1 on a brick), `glazed` (1 where glaze remains), `thickness`
@@ -349,6 +376,7 @@ pub fn program() -> Result<ScopedProgram, ContractError> {
         |p: &mut ScopedBuilder, name: &str| p.input(name, PortType::Scalar, Scope::Element);
     let thickness = element(&mut p, "thickness")?;
     let knocks = element(&mut p, "knocks")?;
+    let replaced = element(&mut p, "replaced")?;
     let seed = element(&mut p, "seed")?;
     let arris = element(&mut p, "arris")?;
     let profile = element(&mut p, "profile")?;
@@ -356,6 +384,7 @@ pub fn program() -> Result<ScopedProgram, ContractError> {
     let tilt_y = element(&mut p, "tilt_y")?;
     let bow = element(&mut p, "bow")?;
     let crazed = element(&mut p, "crazed")?;
+    let lip = element(&mut p, "lip")?;
     let half = p.input("half_size", PortType::Vector2, Scope::Element)?;
     let local = p.input("local", PortType::Vector2, Scope::Sample)?;
     let edge = p.input("edge", PortType::Scalar, Scope::Sample)?;
@@ -400,10 +429,11 @@ pub fn program() -> Result<ScopedProgram, ContractError> {
         x: e,
     })?;
     let shape = p.mix(round, s_curve, profile)?;
-    // The face: tilted up to ±0.7 mm along the brick, ±0.3 mm across it,
-    // and bowed by up to 0.9 mm at its middle.
-    let tx = p.lerp(-0.006, 0.006, tilt_x)?;
-    let ty = p.lerp(-0.01, 0.01, tilt_y)?;
+    // The face: lipping, set up to 1.2 mm proud of or back from its
+    // neighbors; tilted up to ±1.1 mm along the brick and ±0.6 mm across
+    // it; and bowed by up to 0.9 mm at its middle.
+    let tx = p.lerp(-0.009, 0.009, tilt_x)?;
+    let ty = p.lerp(-0.02, 0.02, tilt_y)?;
     let along = p.mul(tx, lx)?;
     let across = p.mul(ty, ly)?;
     let tilt = p.add(along, across)?;
@@ -413,6 +443,8 @@ pub fn program() -> Result<ScopedProgram, ContractError> {
     let b = p.lerp(-0.0003, 0.0009, bow)?;
     let bowed = p.mul(b, bulge)?;
     let face = p.add(tilt, bowed)?;
+    let lipping = p.lerp(-0.0012, 0.0012, lip)?;
+    let face = p.add(face, lipping)?;
     let face = p.offset(face, FACE)?;
     let drop = p.sub(one, shape)?;
     let drop = p.mul(r, drop)?;
@@ -451,6 +483,8 @@ pub fn program() -> Result<ScopedProgram, ContractError> {
     let crack = p.smoothstep(0.012, 0.003, border)?;
     let crazes = p.smoothstep(0.65, 0.8, crazed)?;
     let crack = p.mul(crack, crazes)?;
+    let original = p.sub(one, replaced)?;
+    let crack = p.mul(crack, original)?;
 
     // --- Chips -----------------------------------------------------------
     // Chips break from the arris: the chip field is read at the point of
@@ -521,7 +555,7 @@ pub fn program() -> Result<ScopedProgram, ContractError> {
 }
 
 /// The program bound to [`layout`]'s attributes and to key-derived
-/// randomness (streams 3 to 9).
+/// randomness (streams 3 to 10).
 ///
 /// # Errors
 ///
@@ -531,8 +565,9 @@ pub fn instance(program: Arc<ScopedProgram>) -> Result<ProgramInstance, Contract
         Binding::Attribute(String::from("glaze_color")),
         Binding::Attribute(String::from("glaze_thickness")),
         Binding::Attribute(String::from("knocks")),
+        Binding::Attribute(String::from("replaced")),
     ];
-    bindings.extend((3..=9).map(Binding::ElementRandom));
+    bindings.extend((3..=10).map(Binding::ElementRandom));
     bindings.extend([
         Binding::HalfSize,
         Binding::LocalPosition,

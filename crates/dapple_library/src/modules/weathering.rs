@@ -24,7 +24,7 @@ use dapple_material::ops::{self, Deposit};
 use dapple_material::program::{MapBinding, evaluate_mask};
 use dapple_material::{Aux, Channel, ChannelId, Grid, Material, Param};
 use dapple_raster::{
-    AmbientOcclusion, Flow, GaussianBlur, HeightToNormal, Raster, RasterOp, Streak,
+    Advect, AmbientOcclusion, Flow, GaussianBlur, HeightToNormal, Raster, RasterOp, Streak,
 };
 use glam::Vec3;
 
@@ -80,10 +80,11 @@ fn scaled(grid: Grid, r: &Raster, k: f32) -> Result<Raster, ModuleError> {
     Ok(grid.raster(r.values().iter().map(|v| v * k).collect())?)
 }
 
-/// Dirt settled where it is sheltered: in hollows that ambient occlusion
-/// finds, in cavities narrower than `radius` (chips, pits, the joint's
-/// corners), and in broad patches, `coverage` of the surface at most
-/// `strength` thick.
+/// Dirt settled where it is sheltered and where it is thrown: in hollows
+/// that ambient occlusion finds, in cavities narrower than `radius` (chips,
+/// pits, the joint's corners), in broad patches, and as splash-back speckle
+/// within `splash` of the foot, with the face cleaner toward its top by
+/// `clean_top`; `coverage` of the surface at most `strength` thick.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct Grime;
 
@@ -96,11 +97,23 @@ impl Module for Grime {
             },
             doc: "dirt from occlusion and cavities",
             params: vec![
-                color("color", Vec3::new(0.06, 0.052, 0.042), "the dirt's color"),
+                color(
+                    "color",
+                    Vec3::new(0.12, 0.1, 0.075),
+                    "the dirt's color: soil and soot, darker than cream glaze and lighter than brown",
+                ),
                 fraction("coverage", 0.3, "share of the surface dirtied"),
                 meters("radius", [0.001, 0.05], 0.008, "the hollows' scale"),
                 fraction("strength", 0.65, "coverage at its densest"),
                 fraction("patchiness", 0.5, "how much broad patches decide"),
+                meters(
+                    "splash",
+                    [0.0, 5.0],
+                    0.35,
+                    "height above the foot that rain splashes back onto; 0 for none",
+                ),
+                fraction("splash_weight", 1.0, "how much the splash zone decides"),
+                fraction("clean_top", 0.5, "how much cleaner the face is at its top"),
                 meters("thickness", [0.0, 0.001], 0.00004, "the dirt's thickness"),
                 seed(),
             ],
@@ -133,6 +146,11 @@ impl Module for Grime {
                 .collect(),
         )?;
         let patches = realize_scalar(grid, |b, d| fbm(b, d, [4.0, 4.0], args.seed("patches"), 4))?;
+        let fine_map =
+            realize_scalar(grid, |b, d| fbm(b, d, [150.0, 150.0], args.seed("fine"), 3))?;
+        #[expect(clippy::cast_precision_loss, reason = "grid sizes are small")]
+        let extent_m = grid.texel.y * grid.height as f32;
+        let splash_m = args.scalar("splash");
 
         // The score: occlusion, cavity depth in millimeters, patches.
         let mut p = ScopedBuilder::new("dapple_library.grime.score");
@@ -140,13 +158,37 @@ impl Module for Grime {
         let cav = p.input("cavity", PortType::Scalar, Scope::Pass)?;
         let patch = p.input("patches", PortType::Scalar, Scope::Sample)?;
         let patchiness = p.input("patchiness", PortType::Scalar, Scope::Material)?;
+        let at = p.input("position", PortType::Vector2, Scope::Sample)?;
+        let fine = p.input("fine", PortType::Scalar, Scope::Sample)?;
+        let foot = p.input("foot", PortType::Scalar, Scope::Material)?;
+        let splash = p.input("splash", PortType::Scalar, Scope::Material)?;
+        let splash_w = p.input("splash_weight", PortType::Scalar, Scope::Material)?;
+        let extent = p.input("extent", PortType::Scalar, Scope::Material)?;
+        let clean_top = p.input("clean_top", PortType::Scalar, Scope::Material)?;
         let one = p.scalar(1.0);
         let closed = p.sub(one, ao_in)?;
+        let closed = p.scale(0.5, closed)?;
         let cav_mm = p.scale(1000.0, cav)?;
         let cav_mm = p.saturate(cav_mm)?;
         let score = p.add_scaled(closed, 0.7, cav_mm)?;
         let broad = p.mul(patch, patchiness)?;
         let score = p.add_scaled(score, 0.6, broad)?;
+        // Where it is: splash-back speckle at the foot, a cleaner top.
+        let y = p.component(at, 1)?;
+        let up = p.sub(y, foot)?;
+        let low = p.node(Node::Div(up, splash))?;
+        let low = p.sub(one, low)?;
+        let low = p.saturate(low)?;
+        let speckle = p.smoothstep(-0.2, 0.6, fine)?;
+        let speckle = p.lerp(0.4, 1.0, speckle)?;
+        let low = p.mul(low, speckle)?;
+        let low = p.mul(low, splash_w)?;
+        let score = p.add(score, low)?;
+        let height = p.node(Node::Div(up, extent))?;
+        let height = p.saturate(height)?;
+        let fade = p.mul(height, clean_top)?;
+        let fade = p.sub(one, fade)?;
+        let score = p.mul(score, fade)?;
         p.output("score", PortType::Scalar, Scope::Pass, score)?;
         let program = p.finish();
         let score = evaluate_mask(
@@ -156,6 +198,13 @@ impl Module for Grime {
                 MapBinding::Pass(scalar_map(grid, &cavity)?),
                 MapBinding::Map(scalar_map(grid, &patches)?),
                 MapBinding::Constant(Value::Scalar(args.scalar("patchiness"))),
+                MapBinding::Position,
+                MapBinding::Map(scalar_map(grid, &fine_map)?),
+                MapBinding::Constant(Value::Scalar(grid.origin.y)),
+                MapBinding::Constant(Value::Scalar(if splash_m > 0.0 { splash_m } else { 1e9 })),
+                MapBinding::Constant(Value::Scalar(args.scalar("splash_weight"))),
+                MapBinding::Constant(Value::Scalar(extent_m)),
+                MapBinding::Constant(Value::Scalar(args.scalar("clean_top"))),
             ],
             base,
         )?;
@@ -168,6 +217,7 @@ impl Module for Grime {
                 material: dirt,
                 coverage: covered,
                 thickness: args.scalar("thickness"),
+                relief: None,
             },
         )?);
         Ok(Outputs::new().with("material", Output::Material(m)))
@@ -176,7 +226,8 @@ impl Module for Grime {
 
 /// Grime washed down a face from its ledges: upward-facing surfaces (the
 /// lower lips of joints, a sill's drip) shed trails that run `length` down
-/// the face and fade, some ledges more than others, in vertical runs;
+/// the face and fade, some ledges more than others, in vertical runs,
+/// carried along a wandering downward flow ([`Advect`]) so they bend;
 /// `coverage` of the surface at most `strength` thick. A `sources` mask
 /// adds ledges the height does not show.
 #[derive(Copy, Clone, Debug, Default)]
@@ -219,7 +270,9 @@ impl Module for Streaks {
     fn build(&self, cx: &mut Context<'_>, args: &Args) -> Result<Outputs, ModuleError> {
         let grid = cx.grid();
         let base = args.material("base").ok_or_else(|| fail("base"))?;
-        let normals = HeightToNormal { scale: 1.0 }.apply(&base.height()?)?;
+        // Ledges at the scale of units and sills, not of tooling or grain.
+        let smooth = GaussianBlur { sigma: 0.003 }.apply(&base.height()?)?;
+        let normals = HeightToNormal { scale: 1.0 }.apply(&smooth)?;
         let gate = realize_scalar(grid, |b, d| fbm(b, d, [7.0, 3.0], args.seed("gate"), 3))?;
         let extra = args.map("sources");
         let mut sources = Vec::with_capacity(grid.len());
@@ -242,7 +295,16 @@ impl Module for Streaks {
             .zip(runs.values())
             .map(|(t, r)| t * (0.35 + 0.65 * super::smoothstep(-0.4, 0.5, *r)))
             .collect();
-        let covered = coverage(&grid.raster(score)?, args.scalar("coverage"), 0.1)?;
+        // Water does not run plumb: carry the trails along a flow that runs
+        // down the face and wanders sideways, so they bend and soften.
+        let wander = realize_scalar(grid, |b, d| fbm(b, d, [12.0, 6.0], args.seed("wander"), 3))?;
+        let flow = grid.raster(wander.values().iter().map(|w| [0.6 * w, -1.0]).collect())?;
+        let score = Advect {
+            step: 2.0 * grid.texel.y,
+            steps: 6,
+        }
+        .apply(&grid.raster(score)?, &flow)?;
+        let covered = coverage(&score, args.scalar("coverage"), 0.1)?;
         let covered = scaled(grid, &covered, args.scalar("strength"))?;
         let grime = deposit_material(grid, args, args.color("color"), 0.85, DIRT)?;
         let m = cx.record(ops::deposit(
@@ -251,6 +313,7 @@ impl Module for Streaks {
                 material: grime,
                 coverage: covered,
                 thickness: args.scalar("thickness"),
+                relief: None,
             },
         )?);
         Ok(Outputs::new().with("material", Output::Material(m)))
@@ -370,6 +433,7 @@ impl Module for Efflorescence {
                 material: salt,
                 coverage: covered,
                 thickness: args.scalar("thickness"),
+                relief: None,
             },
         )?);
         Ok(Outputs::new().with("material", Output::Material(m)))

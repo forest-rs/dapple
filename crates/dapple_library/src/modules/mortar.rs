@@ -41,11 +41,11 @@ impl Module for Mortar {
             params: vec![
                 color(
                     "color",
-                    Vec3::new(0.24, 0.225, 0.2),
-                    "mean color: an aged grey-brown lime",
+                    Vec3::new(0.36, 0.33, 0.27),
+                    "mean color: an aged buff-grey lime",
                 ),
                 meters("grain", [0.0005, 0.005], 0.0016, "sand grain size"),
-                fraction("soot", 0.4, "how strong the sooty patches are"),
+                fraction("soot", 0.15, "how strong the sooty patches are"),
                 meters(
                     "recess",
                     [0.0, 0.02],

@@ -302,6 +302,7 @@ fn deposits_cover_raise_and_hide_the_coat() {
             material: dirt,
             coverage,
             thickness: 0.0005,
+            relief: None,
         },
     )
     .unwrap();

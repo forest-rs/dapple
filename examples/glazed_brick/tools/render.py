@@ -62,9 +62,9 @@ print("cycles device:", scene.cycles.device, [d.name for d in cycles_prefs.devic
 scene.cycles.samples = 256
 scene.cycles.use_denoising = True
 scene.view_settings.view_transform = "AgX"
-# One stop down: glazed faces under full sky otherwise clip toward white,
-# where AgX desaturates them.
-scene.view_settings.exposure = -1.0
+# Half a stop down: glazed faces under full sky otherwise clip toward
+# white, where AgX desaturates them.
+scene.view_settings.exposure = -0.5
 scene.render.resolution_x = 1600
 scene.render.resolution_y = 1000
 
@@ -203,6 +203,49 @@ def wall(name, subdivisions, mat):
 camera = bpy.data.objects.new("camera", bpy.data.cameras.new("camera"))
 scene.collection.objects.link(camera)
 scene.camera = camera
+
+
+def white_balance():
+    """Balances the view on a grey card facing the camera where the wall
+    stands, as a photographer would: the blue sky otherwise tints every
+    neutral, and cream glaze reads grey."""
+    bpy.ops.mesh.primitive_plane_add(
+        size=1.0, location=(0.0, -0.5, 0.6), rotation=(math.pi / 2.0, 0.0, 0.0)
+    )
+    card = bpy.context.active_object
+    mat = bpy.data.materials.new("grey card")
+    bsdf = mat.node_tree.nodes["Principled BSDF"]
+    bsdf.inputs["Base Color"].default_value = (0.18, 0.18, 0.18, 1.0)
+    bsdf.inputs["Roughness"].default_value = 1.0
+    bsdf.inputs["Specular IOR Level"].default_value = 0.0
+    card.data.materials.append(mat)
+    settings = (scene.render.resolution_x, scene.render.resolution_y, scene.cycles.samples)
+    format_ = (scene.render.image_settings.file_format, scene.render.image_settings.color_depth)
+    scene.render.resolution_x = scene.render.resolution_y = 32
+    scene.cycles.samples = 64
+    scene.render.image_settings.file_format = "OPEN_EXR"
+    camera.location = (0.0, -1.5, 0.6)
+    camera.rotation_euler = Vector((0.0, 1.0, 0.0)).to_track_quat("-Z", "Y").to_euler()
+    camera.data.lens = 200.0
+    path = os.path.join(gallery, "white-balance-probe.exr")
+    scene.render.filepath = path
+    bpy.ops.render.render(write_still=True)
+    probe = bpy.data.images.load(path)
+    px = list(probe.pixels)
+    count = len(px) // 4
+    mean = [sum(px[c::4]) / count for c in range(3)]
+    bpy.data.images.remove(probe)
+    os.remove(path)
+    bpy.data.objects.remove(card)
+    scene.render.resolution_x, scene.render.resolution_y, scene.cycles.samples = settings
+    scene.render.image_settings.file_format, scene.render.image_settings.color_depth = format_
+    scene.view_settings.use_white_balance = True
+    # Only the card's hue matters; its level stays with the exposure.
+    scene.view_settings.white_balance_whitepoint = [c / mean[1] for c in mean]
+    print("white point:", mean)
+
+
+white_balance()
 
 
 def shoot(name, eye, target, lens):

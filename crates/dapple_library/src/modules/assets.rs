@@ -20,8 +20,8 @@ use dapple_raster::{DistanceTransform, Raster, RasterOp};
 use glam::{Vec2, Vec3};
 
 use super::{
-    CeramicBody, Efflorescence, Finish, Grime, Mortar, Stone, Streaks, Wood, color, fail, flag,
-    fraction, integer, mask_map, meters, scalar_map, seed, smoothstep,
+    CeramicBody, EdgeWear, Efflorescence, Finish, Grime, Mortar, Moss, Stone, Streaks, Wood, color,
+    fail, flag, fraction, integer, mask_map, meters, scalar_map, seed, smoothstep,
 };
 use crate::glazed_brick::{self, GLAZE, JOINT, Palette, Structure, glazes};
 
@@ -96,7 +96,8 @@ impl Module for GlazedBrickWall {
                 flag("weathered", true, "whether to add dirt, streaks and salts"),
                 fraction("dirt", 0.3, "share of the surface dirtied"),
                 fraction("streaks", 0.06, "share of the surface streaked"),
-                fraction("salts", 0.04, "share of the surface bloomed with salts"),
+                fraction("salts", 0.05, "share of the surface bloomed with salts"),
+                fraction("moss", 0.01, "share of the surface grown with moss"),
                 seed(),
             ],
             inputs: vec![],
@@ -200,13 +201,31 @@ impl Module for GlazedBrickWall {
                     .integer("surface", GLAZE),
             )?,
         )?;
+        // Glaze worn off the sharpest arrises, down to the body.
+        let mut worn = bricks;
+        worn.set_aux(Aux::Region, Channel::Map(st.owners.clone()))?;
+        wall = take(
+            cx.instantiate(
+                &EdgeWear,
+                "wear",
+                Bind::new()
+                    .material("base", wall)
+                    .material("worn", worn)
+                    .scalar("radius", 0.002)
+                    .scalar("coverage", 0.006)
+                    .integer("surface", GLAZE),
+            )?,
+        )?;
         if args.flag("weathered") {
             wall = weather(
                 cx,
                 wall,
-                args.scalar("dirt"),
-                args.scalar("streaks"),
-                args.scalar("salts"),
+                &Weathering {
+                    dirt: args.scalar("dirt"),
+                    streaks: args.scalar("streaks"),
+                    salts: args.scalar("salts"),
+                    moss: args.scalar("moss"),
+                },
                 None,
             )?;
         }
@@ -214,34 +233,61 @@ impl Module for GlazedBrickWall {
     }
 }
 
-/// Dirt, streaks and salts over `m`.
-fn weather(
-    cx: &mut Context<'_>,
-    m: Material,
+/// How much of each weathering to apply.
+struct Weathering {
     dirt: f32,
     streaks: f32,
     salts: f32,
+    moss: f32,
+}
+
+/// Dirt, streaks, salts and moss over `m`, heaviest low on the face.
+fn weather(
+    cx: &mut Context<'_>,
+    m: Material,
+    w: &Weathering,
     sources: Option<&Raster>,
 ) -> Result<Material, ModuleError> {
     let grid = cx.grid();
     let m = take(cx.instantiate(
         &Grime,
         "dirt",
-        Bind::new().material("base", m).scalar("coverage", dirt),
+        Bind::new().material("base", m).scalar("coverage", w.dirt),
     )?)?;
-    let mut bind = Bind::new().material("base", m).scalar("coverage", streaks);
+    let mut bind = Bind::new()
+        .material("base", m)
+        .scalar("coverage", w.streaks);
     if let Some(s) = sources {
         bind = bind
             .input("sources", Input::Map(mask_map(grid, s)?))
-            .scalar("length", 0.3)
-            .scalar("strength", 0.75);
+            .scalar("length", 0.35)
+            .scalar("strength", 0.85);
     }
     let m = take(cx.instantiate(&Streaks, "streaks", bind)?)?;
-    take(cx.instantiate(
-        &Efflorescence,
-        "salts",
-        Bind::new().material("base", m).scalar("coverage", salts),
-    )?)
+    let m = take(
+        cx.instantiate(
+            &Efflorescence,
+            "salts",
+            Bind::new()
+                .material("base", m)
+                .scalar("coverage", w.salts)
+                .scalar("rise", 0.35),
+        )?,
+    )?;
+    if w.moss > 0.0 {
+        take(
+            cx.instantiate(
+                &Moss,
+                "moss",
+                Bind::new()
+                    .material("base", m)
+                    .scalar("coverage", w.moss)
+                    .scalar("damp", 0.25),
+            )?,
+        )
+    } else {
+        Ok(m)
+    }
 }
 
 /// A stone sill over glazed brickwork, on a 1 m wrapping tile: the top
@@ -270,8 +316,9 @@ impl Module for StoneSill {
                 color("field", glazes::GREEN, "the wall's field glaze"),
                 color("dado", glazes::OXBLOOD, "the wall's dado glaze"),
                 fraction("dirt", 0.3, "share of the surface dirtied"),
-                fraction("streaks", 0.18, "share of the surface streaked"),
+                fraction("streaks", 0.22, "share of the surface streaked"),
                 fraction("salts", 0.06, "share of the surface bloomed with salts"),
+                fraction("moss", 0.015, "share of the surface grown with moss"),
                 seed(),
             ],
             inputs: vec![],
@@ -324,9 +371,12 @@ impl Module for StoneSill {
         let m = weather(
             cx,
             m,
-            args.scalar("dirt"),
-            args.scalar("streaks"),
-            args.scalar("salts"),
+            &Weathering {
+                dirt: args.scalar("dirt"),
+                streaks: args.scalar("streaks"),
+                salts: args.scalar("salts"),
+                moss: args.scalar("moss"),
+            },
             Some(&drip),
         )?;
         Ok(Outputs::new().with("material", Output::Material(m)))

@@ -926,6 +926,32 @@ meaning.
 - **Gates:** a region round-trips through composite → reconstruct with a
   correspondence that names every split and merge; curve-driven element
   spacing is independent of realization resolution.
+- *As built* (`dapple_elements`, `dapple_raster`):
+  - `RegionMap`: a label raster and a region table in key order. Composited
+    regions (`from_composite`) keep their elements' keys; reconstructed
+    ones (`reconstruct`, a flood fill that continues across a wrapping
+    raster's edges) are keyed by their anchors, the first texel in
+    row-major order. `correspondence` groups regions linked by shared
+    texels into matches, splits, merges, regroups, appearances and
+    disappearances. `retaining` rekeys a canonical map from a previous one,
+    the persisted identity state: the largest overlap keeps its parent's
+    key, so one child of a split and the result of a merge keep identity.
+    Per-region `inset` (exact distance transforms per region),
+    `boundaries`, `mask` and `statistics`.
+  - `Morphology` (dilate, erode, open, close by an exact disk in domain
+    units) is a tiled raster op, and a graph raster node that keeps masks
+    masks.
+  - `CurveNetwork`: polylines with arc length and width profiles, the
+    nearest curve's frame (distance, along, across, tangent, width) as
+    `ScalarField`s, a stroke box-filtered across the curve, intersections,
+    and `stitches` every `spacing` of arc length keyed by curve and index.
+  - `ScatterLayout` places elements exactly where `dapple_field::Scatter`
+    places splats (`Scatter::splat_at`), so `Op::Scatter` is its
+    field-level lowering; variants choose an `Outline` (rectangle or
+    ellipse) and aspect, and `Binding::Variant` lets a program choose
+    sub-materials.
+  - The gates are tests: `regions_round_trip_and_name_every_split_and_merge`
+    and `curve_stitch_spacing_is_independent_of_resolution`.
 
 #### Slice 2: reusable materials
 

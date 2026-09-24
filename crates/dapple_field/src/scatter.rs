@@ -80,6 +80,32 @@ struct Splat {
     value: f32,
 }
 
+/// A cell's random draws: jitter in the cell, radius in cells, angle, and
+/// value.
+#[derive(Copy, Clone, Debug)]
+struct Draw {
+    jitter: Vec2,
+    radius: f32,
+    angle: Option<f32>,
+    value: f32,
+}
+
+/// Where one splat of a [`Scatter`] lies ([`Scatter::splat_at`]).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SplatPlacement {
+    /// Its lattice cell, wrapped onto the period.
+    pub cell: [i64; 2],
+    /// Its center, in domain units, inside its cell.
+    pub center: Vec2,
+    /// Its radius, in domain units.
+    pub radius: f32,
+    /// Its counterclockwise turn in radians: 0 unless the placement
+    /// rotates splats.
+    pub rotation: f32,
+    /// Its random value in `[0, 1)`, as [`ScatterOutput::TopValue`] reads.
+    pub value: f32,
+}
+
 /// Stamps scattered at jittered points of a lattice.
 ///
 /// Each lattice cell holds a splat with probability `density`, centered at
@@ -179,29 +205,67 @@ impl Scatter {
         }
     }
 
-    /// The splat of cell `cell + offset`, relative to the query point `q`
-    /// inside `cell` (both in cells), if the cell holds one.
-    fn splat(&self, cell: [i64; 2], offset: [i8; 2], q: Vec2) -> Option<Splat> {
-        let [wx, wy] = self.lattice.wrap_cell([
-            cell[0] + i64::from(offset[0]),
-            cell[1] + i64::from(offset[1]),
-        ]);
+    /// Cells per period along each axis on a periodic domain, where
+    /// [`Self::splat_at`] repeats; `None` on the plane.
+    #[must_use]
+    pub fn cells(&self) -> Option<[i64; 2]> {
+        self.lattice.wrap
+    }
+
+    /// The splat of lattice cell `cell`, if the cell holds one: exactly the
+    /// splat the field draws there, so an element layout placed from these
+    /// matches the field. Cells wrap onto the period.
+    #[must_use]
+    pub fn splat_at(&self, cell: [i64; 2]) -> Option<SplatPlacement> {
+        let cell = self.lattice.wrap_cell(cell);
+        let draw = self.draw(cell)?;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "cell indices are far below f32's exact integer range"
+        )]
+        let origin = Vec2::new(cell[0] as f32, cell[1] as f32);
+        Some(SplatPlacement {
+            cell,
+            center: (origin + draw.jitter) / self.lattice.frequency,
+            radius: draw.radius / self.lattice.frequency.x,
+            rotation: draw.angle.unwrap_or(0.0),
+            value: draw.value,
+        })
+    }
+
+    /// The random draws of wrapped cell `cell`, if it holds a splat.
+    fn draw(&self, [wx, wy]: [i64; 2]) -> Option<Draw> {
         let id = hash(self.seed, &[SPLAT_TAG, key(wx), key(wy)]);
         if unit_f32(hash(id, &[0])) >= self.placement.density {
             return None;
         }
-        let center = Vec2::new(
-            f32::from(offset[0]) + unit_f32(hash(id, &[1])),
-            f32::from(offset[1]) + unit_f32(hash(id, &[2])),
-        );
         let [small, large] = self.placement.radius;
-        let radius = small + (large - small) * unit_f32(hash(id, &[3]));
-        let turn = if self.placement.rotate {
-            let angle = unit_f32(hash(id, &[4])) * core::f32::consts::TAU;
+        Some(Draw {
+            jitter: Vec2::new(unit_f32(hash(id, &[1])), unit_f32(hash(id, &[2]))),
+            radius: small + (large - small) * unit_f32(hash(id, &[3])),
+            angle: self
+                .placement
+                .rotate
+                .then(|| unit_f32(hash(id, &[4])) * core::f32::consts::TAU),
+            value: unit_f32(hash(id, &[5])),
+        })
+    }
+
+    /// The splat of cell `cell + offset`, relative to the query point `q`
+    /// inside `cell` (both in cells), if the cell holds one.
+    fn splat(&self, cell: [i64; 2], offset: [i8; 2], q: Vec2) -> Option<Splat> {
+        let draw = self.draw(self.lattice.wrap_cell([
+            cell[0] + i64::from(offset[0]),
+            cell[1] + i64::from(offset[1]),
+        ]))?;
+        let center = Vec2::new(
+            f32::from(offset[0]) + draw.jitter.x,
+            f32::from(offset[1]) + draw.jitter.y,
+        );
+        let radius = draw.radius;
+        let turn = draw.angle.map_or(Vec2::X, |angle| {
             Vec2::new(libm::cosf(angle), libm::sinf(angle))
-        } else {
-            Vec2::X
-        };
+        });
         let d = (q - center) / radius;
         // Rotate by −angle: domain axes into splat axes.
         let local = Vec2::new(d.x * turn.x + d.y * turn.y, d.y * turn.x - d.x * turn.y);
@@ -209,7 +273,7 @@ impl Scatter {
             local,
             scale: self.lattice.frequency.x / radius,
             turn,
-            value: unit_f32(hash(id, &[5])),
+            value: draw.value,
         })
     }
 

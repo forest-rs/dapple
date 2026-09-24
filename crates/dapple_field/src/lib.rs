@@ -96,7 +96,7 @@ pub use field::{Affine2, Affine3, PlaneField, ScalarField, Transformed, central_
 pub use fractal::{Fractal, FractalKind, FractalParams, MAX_OCTAVES};
 pub use image::{Edge, ImageLevel, SampleImage, SamplePolicy};
 pub use noise::{Basis, Noise};
-pub use scatter::{Placement, Scatter, ScatterField, ScatterOutput, Stamp};
+pub use scatter::{Placement, Scatter, ScatterField, ScatterOutput, SplatPlacement, Stamp};
 pub use shape::Disk;
 pub use solid::{Cellular3, CellularField3, Fractal3, Noise3, SolidField, central_difference3};
 pub use tiling::{MAX_HERRINGBONE_RATIO, Pattern, TileOutput, TileSample, Tiling, TilingField};

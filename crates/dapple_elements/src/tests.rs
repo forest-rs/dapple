@@ -832,3 +832,184 @@ fn curve_stitch_spacing_is_independent_of_resolution() {
         );
     }
 }
+
+fn scatter(density: f32) -> dapple_field::Scatter {
+    dapple_field::Scatter::new(
+        domain(),
+        dapple_field::Placement {
+            frequency: 16.0,
+            density,
+            radius: [0.25, 0.5],
+            rotate: true,
+        },
+        dapple_field::Stamp::Disk { softness: 0.0 },
+        9,
+    )
+    .unwrap()
+}
+
+/// A program whose outputs are a sub-material chosen by the element's
+/// variant (0 or 1) and full coverage.
+fn variant_instance() -> ProgramInstance {
+    let mut b = SurfaceBuilder::new("test.variant");
+    let variant = b
+        .input("variant", PortType::Scalar, Scope::Element)
+        .unwrap();
+    let one = b.constant(Value::Scalar(1.0));
+    let (stone, flake) = (b.constant(Value::Id(0)), b.constant(Value::Id(1)));
+    let material = b
+        .add(Node::Select {
+            condition: variant,
+            a: flake,
+            b: stone,
+        })
+        .unwrap();
+    b.output("material", PortType::Id, Scope::Element, material)
+        .unwrap();
+    b.output("cover", PortType::Mask, Scope::Element, one)
+        .unwrap();
+    ProgramInstance::new(
+        InstanceId::named("test.variant"),
+        Arc::new(b.finish()),
+        vec![Binding::Variant],
+    )
+    .unwrap()
+}
+
+#[test]
+fn scattered_elements_follow_the_field_and_pick_variants() {
+    let disks = ScatterLayout {
+        layout: LayoutId::named("test.pebbles"),
+        scatter: scatter(0.7),
+        variants: vec![ScatterVariant {
+            weight: 1.0,
+            outline: Outline::Ellipse,
+            aspect: 1.0,
+        }],
+    };
+    let set = disks.elements(Vec::new(), |_, _| Vec::new()).unwrap();
+    assert!(set.len() > 100, "{}", set.len());
+    // Composited as disks, the elements cover what the field's disks cover.
+    let inst = variant_instance();
+    let background = [Value::Id(9), Value::Scalar(0.0)];
+    let size = 256;
+    let realized = Realized::composite(&Composite {
+        set: &set,
+        instance: &inst,
+        background: &background,
+        domain: domain(),
+        width: size,
+        height: size,
+        tile_size: 32,
+    })
+    .unwrap();
+    let mut b = ProgramBuilder::new();
+    let field = b
+        .add(Op::Scatter {
+            domain: domain(),
+            placement: dapple_field::Placement {
+                frequency: 16.0,
+                density: 0.7,
+                radius: [0.25, 0.5],
+                rotate: true,
+            },
+            stamp: dapple_field::Stamp::Disk { softness: 0.0 },
+            seed: 9,
+            output: dapple_field::ScatterOutput::Coverage,
+        })
+        .unwrap();
+    let field = b.finish(field).unwrap();
+    let realization = dapple_raster::Realization::period(domain(), size, size).unwrap();
+    let coverage = dapple_raster::realize(&field, realization).unwrap();
+    let cover = realized.output("cover").unwrap().unwrap();
+    let dapple_raster::typed::Storage::F32(cover) = cover.storage() else {
+        panic!("cover is a mask")
+    };
+    // The two antialias their edges differently (the field's disk edge is
+    // a smoothstep over a footprint inside the radius, the composite's a
+    // box estimate summed over overlapping elements), so compare texels
+    // both are sure of: none is inside one and outside the other.
+    let sure = |v: f32| v <= 0.001 || v >= 0.999;
+    let (mut compared, mut disagree) = (0_u32, 0_u32);
+    let mut bad = Vec::new();
+    for (&a, &b) in cover.values().iter().zip(coverage.values()) {
+        if sure(a) && sure(b) {
+            compared += 1;
+            disagree += u32::from((a >= 0.5) != (b >= 0.5));
+            if (a >= 0.5) != (b >= 0.5) {
+                bad.push((a, b));
+            }
+        }
+    }
+    assert!(compared > size * size * 3 / 4, "{compared}");
+    assert_eq!(disagree, 0, "of {compared} texels: {bad:?}");
+
+    // Two kinds, drawn by weight; the program reads each element's.
+    let mixed = ScatterLayout {
+        variants: vec![
+            ScatterVariant {
+                weight: 3.0,
+                outline: Outline::Ellipse,
+                aspect: 1.0,
+            },
+            ScatterVariant {
+                weight: 1.0,
+                outline: Outline::Rectangle,
+                aspect: 0.4,
+            },
+        ],
+        ..disks.clone()
+    };
+    let set = mixed.elements(Vec::new(), |_, _| Vec::new()).unwrap();
+    let flakes = (0..set.len()).filter(|&i| set.variant(i) == 1).count();
+    assert!(flakes > set.len() / 8 && flakes < set.len() / 2, "{flakes}");
+    for i in 0..set.len() {
+        let expected = if set.variant(i) == 1 {
+            (Outline::Rectangle, 0.4)
+        } else {
+            (Outline::Ellipse, 1.0)
+        };
+        let h = set.half_size(i);
+        assert_eq!(set.outline(i), expected.0);
+        assert!((h.y / h.x - expected.1).abs() < 1e-5);
+    }
+    let realized = Realized::composite(&Composite {
+        set: &set,
+        instance: &inst,
+        background: &background,
+        domain: domain(),
+        width: size,
+        height: size,
+        tile_size: 32,
+    })
+    .unwrap();
+    for i in 0..set.len() {
+        let (x, y) = texel_at(set.placement(i).center, size);
+        if realized.owner(x, y) == Some(set.keys()[i]) {
+            assert_eq!(realized.value(0, x, y), Value::Id(set.variant(i)));
+        }
+    }
+    // A density edit keeps the keys of the elements that remain.
+    let sparse = ScatterLayout {
+        scatter: scatter(0.4),
+        ..disks
+    };
+    let fewer = sparse.elements(Vec::new(), |_, _| Vec::new()).unwrap();
+    let all = disks_set();
+    assert!(fewer.len() < all.len());
+    assert!(fewer.keys().iter().all(|k| all.index_of(*k).is_some()));
+}
+
+fn disks_set() -> ElementSet {
+    ScatterLayout {
+        layout: LayoutId::named("test.pebbles"),
+        scatter: scatter(0.7),
+        variants: vec![ScatterVariant {
+            weight: 1.0,
+            outline: Outline::Ellipse,
+            aspect: 1.0,
+        }],
+    }
+    .elements(Vec::new(), |_, _| Vec::new())
+    .unwrap()
+}

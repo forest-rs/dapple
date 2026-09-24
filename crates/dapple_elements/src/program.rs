@@ -646,6 +646,9 @@ pub enum Binding {
     ElementRandom(u64),
     /// The element's half extent, a `Vector2` ([`Scope::Element`]).
     HalfSize,
+    /// The element's variant as a scalar (0, 1, 2, …), for programs that
+    /// choose a shape or sub-material per variant ([`Scope::Element`]).
+    Variant,
     /// The sample's element-local position, a `Vector2`
     /// ([`Scope::Sample`]).
     LocalPosition,
@@ -660,7 +663,9 @@ impl Binding {
     pub const fn scope(&self) -> Scope {
         match self {
             Self::Constant(_) => Scope::Material,
-            Self::Attribute(_) | Self::ElementRandom(_) | Self::HalfSize => Scope::Element,
+            Self::Attribute(_) | Self::ElementRandom(_) | Self::HalfSize | Self::Variant => {
+                Scope::Element
+            }
             Self::LocalPosition | Self::EdgeDistance => Scope::Sample,
         }
     }
@@ -676,6 +681,7 @@ impl Binding {
             Self::HalfSize => w.push(4),
             Self::LocalPosition => w.push(5),
             Self::EdgeDistance => w.push(6),
+            Self::Variant => w.push(7),
         }
     }
 }
@@ -722,7 +728,9 @@ impl ProgramInstance {
                     continue;
                 }
                 Binding::Attribute(_) => continue,
-                Binding::ElementRandom(_) | Binding::EdgeDistance => Shape::Scalar,
+                Binding::ElementRandom(_) | Binding::EdgeDistance | Binding::Variant => {
+                    Shape::Scalar
+                }
                 Binding::HalfSize | Binding::LocalPosition => Shape::Vector2,
             };
             if shape != Shape::of(input.port) {
@@ -890,6 +898,8 @@ impl Prepared<'_> {
                         Value::Scalar(key_of(self.set, element).unit(*stream))
                     }
                     Binding::HalfSize => Value::Vector2(self.set.half_size(element)),
+                    #[expect(clippy::cast_precision_loss, reason = "variant indices are small")]
+                    Binding::Variant => Value::Scalar(self.set.variant(element) as f32),
                     Binding::LocalPosition => Value::Vector2(context.expect("sample scope").local),
                     Binding::EdgeDistance => Value::Scalar(context.expect("sample scope").edge),
                 }

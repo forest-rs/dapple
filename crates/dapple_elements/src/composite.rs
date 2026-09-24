@@ -5,7 +5,8 @@
 //!
 //! Each texel center `p` asks every element near it for its **coverage**:
 //! the fraction of a texel-wide box around `p` inside the element's
-//! rectangle, estimated from the signed distance to its boundary
+//! outline (a rectangle or an ellipse), estimated from the signed distance
+//! to its boundary
 //! (`clamp(0.5 − d / texel, 0, 1)`). The background (mortar, grout) covers
 //! what the elements leave, `1 − min(Σ cᵢ, 1)`.
 //!
@@ -166,11 +167,6 @@ struct Context<'a> {
     ports: Vec<PortType>,
 }
 
-fn signed_distance(q: Vec2, half: Vec2) -> f32 {
-    let d = q.abs() - half;
-    d.max(Vec2::ZERO).length() + d.x.max(d.y).min(0.0)
-}
-
 impl<'a> Context<'a> {
     fn new(c: &Composite<'a>) -> Result<Self, CompositeError> {
         let Domain::Periodic { period } = c.domain else {
@@ -281,7 +277,10 @@ impl<'a> Context<'a> {
         for &(i, shift) in &self.buckets[(by * self.counts[0] + bx) as usize] {
             let i = i as usize;
             let q = self.set.placement(i).to_local(p + shift);
-            let d = signed_distance(q, self.set.half_size(i));
+            let d = self
+                .set
+                .outline(i)
+                .signed_distance(q, self.set.half_size(i));
             let coverage = (0.5 - d / width).clamp(0.0, 1.0);
             if coverage > 0.0 {
                 out.push((i, coverage, q, -d));

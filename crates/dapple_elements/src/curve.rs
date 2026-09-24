@@ -34,7 +34,7 @@ use dapple_field::{Domain, Footprint, ScalarField, Value};
 use glam::Vec2;
 
 use crate::identity::{Anchor, ElementKey, LayoutId};
-use crate::set::{AttributeDecl, Element, ElementError, ElementSet, Placement};
+use crate::set::{AttributeDecl, Element, ElementError, ElementSet, Outline, Placement};
 
 /// A curve failure.
 #[derive(Clone, Debug, PartialEq)]
@@ -162,7 +162,8 @@ impl Curve {
     pub fn at(&self, s: f32) -> CurvePoint {
         let length = self.length();
         let s = if self.closed {
-            s.rem_euclid(length)
+            let r = s - length * libm::floorf(s / length);
+            if r >= length { 0.0 } else { r }
         } else {
             s.clamp(0.0, length)
         };
@@ -447,6 +448,7 @@ impl CurveNetwork {
                         rotation: libm::atan2f(point.tangent.y, point.tangent.x),
                     },
                     half_size,
+                    outline: Outline::Rectangle,
                     variant: 0,
                     attributes: attributes(key, point, s),
                 });

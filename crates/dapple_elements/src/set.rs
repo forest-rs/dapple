@@ -76,6 +76,44 @@ impl Bounds {
     }
 }
 
+/// An element's outline within its half extent.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum Outline {
+    /// The rectangle of its half extent: bricks, tiles, planks.
+    #[default]
+    Rectangle,
+    /// The ellipse inscribed in it: pebbles, flakes, spots.
+    Ellipse,
+}
+
+impl Outline {
+    /// The signed distance from element-local point `q` to the outline of
+    /// half extent `half`, negative inside.
+    ///
+    /// Exact for rectangles and circles; for other ellipses a first-order
+    /// estimate, exact on the outline and good near it, which is where
+    /// coverage and bevels read it.
+    #[must_use]
+    pub fn signed_distance(self, q: Vec2, half: Vec2) -> f32 {
+        match self {
+            Self::Rectangle => {
+                let d = q.abs() - half;
+                d.max(Vec2::ZERO).length() + d.x.max(d.y).min(0.0)
+            }
+            Self::Ellipse if half.x == half.y => q.length() - half.x,
+            Self::Ellipse => {
+                let k0 = (q / half).length();
+                let k1 = (q / (half * half)).length();
+                if k1 > 0.0 {
+                    k0 * (k0 - 1.0) / k1
+                } else {
+                    -half.min_element()
+                }
+            }
+        }
+    }
+}
+
 /// A named, typed per-element attribute column.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttributeDecl {
@@ -94,6 +132,8 @@ pub struct Element {
     pub placement: Placement,
     /// Half its extent along its local axes, in domain units; positive.
     pub half_size: Vec2,
+    /// Its outline within that extent.
+    pub outline: Outline,
     /// Which variant of the realizing program it uses.
     pub variant: u32,
     /// Attribute values in the set's schema order.
@@ -175,6 +215,7 @@ pub struct ElementSet {
     keys: Vec<ElementKey>,
     placements: Vec<Placement>,
     half_sizes: Vec<Vec2>,
+    outlines: Vec<Outline>,
     variants: Vec<u32>,
     /// One column per schema attribute.
     columns: Vec<Vec<Value>>,
@@ -212,6 +253,7 @@ impl ElementSet {
             keys: Vec::with_capacity(elements.len()),
             placements: Vec::with_capacity(elements.len()),
             half_sizes: Vec::with_capacity(elements.len()),
+            outlines: Vec::with_capacity(elements.len()),
             variants: Vec::with_capacity(elements.len()),
         };
         for e in elements {
@@ -231,6 +273,7 @@ impl ElementSet {
             set.keys.push(e.key);
             set.placements.push(e.placement);
             set.half_sizes.push(e.half_size);
+            set.outlines.push(e.outline);
             set.variants.push(e.variant);
         }
         Ok(set)
@@ -278,6 +321,12 @@ impl ElementSet {
         self.half_sizes[i]
     }
 
+    /// Element `i`'s outline.
+    #[must_use]
+    pub fn outline(&self, i: usize) -> Outline {
+        self.outlines[i]
+    }
+
     /// Element `i`'s variant.
     #[must_use]
     pub fn variant(&self, i: usize) -> u32 {
@@ -298,6 +347,7 @@ impl ElementSet {
             key: self.keys[i],
             placement: self.placements[i],
             half_size: self.half_sizes[i],
+            outline: self.outlines[i],
             variant: self.variants[i],
             attributes: self.columns.iter().map(|c| c[i]).collect(),
         }
@@ -317,8 +367,8 @@ impl ElementSet {
         }
     }
 
-    /// Element `i`'s content fingerprint: its key, placement, size, variant
-    /// and attribute values. It changes when the element changes; its
+    /// Element `i`'s content fingerprint: its key, placement, size, outline,
+    /// variant and attribute values. It changes when the element changes; its
     /// identity does not.
     #[must_use]
     pub fn fingerprint_of(&self, i: usize) -> u64 {
@@ -328,6 +378,10 @@ impl ElementSet {
         words.extend([
             u64::from(self.half_sizes[i].x.to_bits()),
             u64::from(self.half_sizes[i].y.to_bits()),
+            match self.outlines[i] {
+                Outline::Rectangle => 0,
+                Outline::Ellipse => 1,
+            },
             u64::from(self.variants[i]),
         ]);
         for column in &self.columns {

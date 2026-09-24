@@ -14,8 +14,9 @@
 //!   from it. Identity, content fingerprint, dense index and
 //!   [`correspondence`] are four separate things.
 //! - **Element sets** ([`ElementSet`]): a column table of keys, placements,
-//!   sizes, variants and typed attributes, in canonical key order. Layouts
-//!   ([`RunningBond`]) produce them; [`ElementSet::filter`],
+//!   sizes, outlines, variants and typed attributes, in canonical key
+//!   order. Layouts ([`RunningBond`], [`ScatterLayout`], curve stitches)
+//!   produce them; [`ElementSet::filter`],
 //!   [`ElementSet::set_placement`] and [`ElementSet::set_attribute`] edit
 //!   them.
 //! - **Surface programs** ([`program`]): the callable contract an element
@@ -61,7 +62,7 @@ pub use curve::{
     Curve, CurveError, CurveField, CurveNetwork, CurveOutput, CurvePoint, CurveSample, Intersection,
 };
 pub use identity::{Anchor, ElementKey, LayoutId};
-pub use layout::RunningBond;
+pub use layout::{RunningBond, ScatterLayout, ScatterVariant};
 pub use program::{
     Binding, ContractError, InstanceId, Node, NodeRef, ProgramInstance, Scope, SurfaceBuilder,
     SurfaceProgram,
@@ -71,7 +72,7 @@ pub use region::{
     RegionMap, RegionStatistics, Regroup, Split,
 };
 pub use set::{
-    AttributeDecl, Bounds, Correspondence, Element, ElementError, ElementSet, Placement,
+    AttributeDecl, Bounds, Correspondence, Element, ElementError, ElementSet, Outline, Placement,
     correspondence,
 };
 

@@ -284,6 +284,7 @@ dependencies = [
  "dapple_elements",
  "dapple_field",
  "dapple_material",
+ "dapple_package",
  "dapple_raster",
  "glam",
  "libm",
@@ -299,6 +300,17 @@ dependencies = [
  "glam",
  "libm",
  "openpbr",
+]
+
+[[package]]
+name = "dapple_package"
+version = "0.0.1"
+dependencies = [
+ "dapple_field",
+ "dapple_material",
+ "glam",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -744,6 +756,7 @@ dependencies = [
  "dapple_lab",
  "dapple_library",
  "dapple_material",
+ "dapple_package",
  "dapple_raster",
  "glam",
 ]

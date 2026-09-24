@@ -27,11 +27,8 @@ pub struct CeramicBody;
 impl Module for CeramicBody {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId {
-                name: "dapple_library.ceramic_body",
-                version: 1,
-            },
-            doc: "a fired-clay body",
+            id: ModuleId::new("dapple_library.ceramic_body", 1),
+            doc: "a fired-clay body".into(),
             params: vec![
                 color(
                     "color",
@@ -45,9 +42,9 @@ impl Module for CeramicBody {
             ],
             inputs: vec![],
             outputs: vec![OutputDecl {
-                name: "material",
+                name: "material".into(),
                 kind: OutputKind::Material,
-                doc: "the body, surface identity BODY",
+                doc: "the body, surface identity BODY".into(),
             }],
         }
     }

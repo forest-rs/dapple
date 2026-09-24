@@ -30,6 +30,7 @@
 //! Modules build on whatever grid their context has; on a wrapping grid
 //! their noise uses whole lattice cells per period, so they tile.
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
 use dapple_field::program::{NodeId, Op, ProgramBuilder, ProgramError};
@@ -221,10 +222,10 @@ pub(crate) fn scalar(
     doc: &'static str,
 ) -> ParamDecl {
     ParamDecl {
-        name,
+        name: name.into(),
         kind: ParamKind::Scalar { unit, range },
         default: ParamValue::Scalar(default),
-        doc,
+        doc: doc.into(),
     }
 }
 
@@ -243,10 +244,10 @@ pub(crate) fn fraction(name: &'static str, default: f32, doc: &'static str) -> P
 
 pub(crate) fn color(name: &'static str, default: Vec3, doc: &'static str) -> ParamDecl {
     ParamDecl {
-        name,
+        name: name.into(),
         kind: ParamKind::Color,
         default: ParamValue::Color(default),
-        doc,
+        doc: doc.into(),
     }
 }
 
@@ -257,28 +258,28 @@ pub(crate) fn integer(
     doc: &'static str,
 ) -> ParamDecl {
     ParamDecl {
-        name,
+        name: name.into(),
         kind: ParamKind::Integer { range },
         default: ParamValue::Integer(default),
-        doc,
+        doc: doc.into(),
     }
 }
 
 pub(crate) fn flag(name: &'static str, default: bool, doc: &'static str) -> ParamDecl {
     ParamDecl {
-        name,
+        name: name.into(),
         kind: ParamKind::Flag,
         default: ParamValue::Flag(default),
-        doc,
+        doc: doc.into(),
     }
 }
 
 pub(crate) const fn seed() -> ParamDecl {
     ParamDecl {
-        name: "seed",
+        name: Cow::Borrowed("seed"),
         kind: ParamKind::Seed,
         default: ParamValue::Seed(0),
-        doc: "varies the instance; mixed with its path",
+        doc: Cow::Borrowed("varies the instance; mixed with its path"),
     }
 }
 

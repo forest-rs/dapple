@@ -253,8 +253,8 @@ mod gate {
         }
     }
 
-    fn modules(d: &Diagnostics) -> Vec<&'static str> {
-        let mut v: Vec<_> = d.instances().map(|(_, m)| m.name).collect();
+    fn modules(d: &Diagnostics) -> Vec<&str> {
+        let mut v: Vec<&str> = d.instances().map(|(_, m)| m.name.as_ref()).collect();
         v.sort_unstable();
         v.dedup();
         v
@@ -501,5 +501,78 @@ mod tiling {
             let m = out.take_material("material").unwrap();
             assert_eq!(m.tiling(), Tiling::BOTH, "{name}");
         }
+    }
+}
+
+mod packages {
+    use dapple_field::Edge;
+    use dapple_material::module::{Bind, Context, Module};
+    use dapple_material::resource::NoResources;
+    use dapple_material::{Grid, Material};
+    use dapple_package::{Package, PackageError};
+    use glam::{Vec2, Vec3};
+
+    use crate::modules::VarnishedBoard;
+    use crate::packages::{VARNISHED_BOARD, registry};
+
+    fn grid() -> Grid {
+        Grid {
+            width: 64,
+            height: 32,
+            origin: Vec2::ZERO,
+            texel: Vec2::splat(1.0 / 64.0),
+            edge: Edge::Clamp,
+        }
+    }
+
+    fn realize(module: &dyn Module, bind: Bind) -> Material {
+        let mut cx = Context::new(grid(), &NoResources);
+        cx.instantiate(module, "board", bind)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .take_material("material")
+            .expect("a material")
+    }
+
+    /// The package form of the varnished board survives a round trip
+    /// through its serialized form, and realizes the native module's bits,
+    /// with and without its preset.
+    #[test]
+    fn the_packaged_board_matches_the_native_one_bit_for_bit() {
+        let package = Package::from_json(VARNISHED_BOARD).expect("reads");
+        let again = Package::from_json(&package.to_json()).expect("reads its own output");
+        assert_eq!(again, package);
+        assert_eq!(again.fingerprint(), package.fingerprint());
+        let engine = registry();
+        let (a, b) = (
+            engine.compile(&package).expect("compiles"),
+            engine.compile(&again).expect("compiles"),
+        );
+        assert_eq!(a.fingerprint(), b.fingerprint());
+        let packaged = realize(&a, Bind::new());
+        assert_eq!(packaged, realize(&b, Bind::new()));
+        let native = realize(&VarnishedBoard, Bind::new());
+        assert_eq!(packaged.digest(), native.digest());
+
+        let preset = a.preset("dark_and_worn").expect("a preset");
+        let worn = realize(&a, preset);
+        let native_worn = realize(
+            &VarnishedBoard,
+            Bind::new()
+                .color("varnish", Vec3::new(0.55, 0.3, 0.12))
+                .scalar("dirt", 0.3),
+        );
+        assert_eq!(worn.digest(), native_worn.digest());
+        assert_ne!(worn.digest(), packaged.digest());
+    }
+
+    /// An engine without a module the package needs refuses it by name.
+    #[test]
+    fn a_missing_module_is_refused() {
+        let package = Package::from_json(VARNISHED_BOARD).expect("reads");
+        let engine = dapple_package::Registry::new();
+        assert!(matches!(
+            engine.compile(&package),
+            Err(PackageError::UnknownModule(m)) if m.name == "dapple_library.wood"
+        ));
     }
 }

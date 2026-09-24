@@ -21,8 +21,10 @@
 //!    energies at four scales (a simple spectral descriptor), and the
 //!    fitted values are compared with the hidden ones.
 //!
-//! Each fit writes its report in the lab format (`*-fit.json`) and
-//! before-and-after previews.
+//! Each fit writes its report in the lab format (`*-fit.json`),
+//! before-and-after previews, and the fitted parameters as a preset
+//! document (`*-preset.json`, `dapple_package`), which is read back and
+//! checked to rebuild the fitted material bit for bit.
 
 use std::path::{Path, PathBuf};
 
@@ -33,9 +35,10 @@ use dapple_lab::measure::{band_energies, delta_e, lab};
 use dapple_lab::preview::{base_color, contact_sheet, raking};
 use dapple_library::glazed_brick::{BODY, GLAZE};
 use dapple_library::modules::{GlazedBrickWall, Stone};
-use dapple_material::module::{Bind, Context, Module};
+use dapple_material::module::{Bind, Context, Module, ParamValue};
 use dapple_material::resource::NoResources;
 use dapple_material::{Aux, ChannelId, Material, Param};
+use dapple_package::{Preset, PresetSet};
 use dapple_raster::{DistanceTransform, RasterOp, percentiles};
 use glam::Vec3;
 
@@ -144,32 +147,62 @@ fn f32s(p: &[f64]) -> Vec<f32> {
     p.iter().map(|v| *v as f32).collect()
 }
 
-fn stone(n: u32, p: &[f64]) -> Result<Material> {
+/// The stone's parameters for search point `p`, as a preset.
+fn stone_preset(p: &[f64]) -> Preset {
     let p = f32s(p);
     let light = Vec3::new(0.50, 0.41, 0.27) * p[0];
     let dark = Vec3::new(0.37, 0.29, 0.19) * p[1];
-    build(
-        &Stone,
-        n,
-        Bind::new()
-            .color("light", light.min(Vec3::ONE))
-            .color("dark", dark.min(Vec3::ONE))
-            .scalar("bedding_strength", p[2])
-            .scalar("grain", p[3]),
+    Preset::new(
+        "fitted",
+        "fitted to an exemplar's statistics by material_fit",
     )
+    .with("light", ParamValue::Color(light.min(Vec3::ONE)))
+    .with("dark", ParamValue::Color(dark.min(Vec3::ONE)))
+    .with("bedding_strength", ParamValue::Scalar(p[2]))
+    .with("grain", ParamValue::Scalar(p[3]))
+}
+
+/// The wall's parameters for search point `p`, as a preset.
+fn wall_preset(p: &[f64]) -> Preset {
+    let p = f32s(p);
+    Preset::new("fitted", "fitted to target measurements by material_fit")
+        .with("battered", ParamValue::Scalar(p[0]))
+        .with("dirt", ParamValue::Scalar(p[1]))
+        .with("field", ParamValue::Color(Vec3::new(p[2], p[3], p[4])))
+        .with("glaze_roughness", ParamValue::Scalar(p[5]))
+}
+
+fn stone(n: u32, p: &[f64]) -> Result<Material> {
+    build(&Stone, n, stone_preset(p).bind())
 }
 
 fn wall(n: u32, p: &[f64]) -> Result<Material> {
-    let p = f32s(p);
-    build(
-        &GlazedBrickWall,
-        n,
-        Bind::new()
-            .scalar("battered", p[0])
-            .scalar("dirt", p[1])
-            .color("field", Vec3::new(p[2], p[3], p[4]))
-            .scalar("glaze_roughness", p[5]),
-    )
+    build(&GlazedBrickWall, n, wall_preset(p).bind())
+}
+
+/// Saves `preset` for `module` as a preset document, reads it back and
+/// checks that it rebuilds `fitted` bit for bit.
+fn save_preset(
+    out: &Path,
+    name: &str,
+    module: &dyn Module,
+    n: u32,
+    preset: Preset,
+    fitted: &Material,
+) -> Result<()> {
+    let interface = module.interface();
+    let set = PresetSet::new(&interface.id, vec![preset]);
+    set.check(&interface)?;
+    let path = out.join(format!("{name}.json"));
+    std::fs::write(&path, set.to_json())?;
+    let again = PresetSet::from_json(&std::fs::read_to_string(&path)?)?;
+    again.check(&interface)?;
+    let rebuilt = build(module, n, again.get("fitted").ok_or("no preset")?.bind())?;
+    if rebuilt.digest() != fitted.digest() {
+        return Err("the saved preset does not rebuild the fitted material".into());
+    }
+    println!("{} (rebuilds the fit bit for bit)", path.display());
+    Ok(())
 }
 
 /// A contact sheet: base color over raking light, one column a material.
@@ -246,7 +279,16 @@ fn main() -> Result<()> {
     show("wall", &space, &targets, &result);
     let report = result.report("glazed brick wall fit", &space, &targets);
     std::fs::write(out.join("wall-fit.json"), report.to_json())?;
-    preview(&out, "wall-fit", &[&before, &wall(n, &result.params)?])?;
+    let fitted = wall(n, &result.params)?;
+    preview(&out, "wall-fit", &[&before, &fitted])?;
+    save_preset(
+        &out,
+        "wall-preset",
+        &GlazedBrickWall,
+        n,
+        wall_preset(&result.params),
+        &fitted,
+    )?;
 
     // 2. Stone to an exemplar's statistics.
     let hidden = [1.12, 0.78, 0.45, 0.0011];
@@ -298,10 +340,15 @@ fn main() -> Result<()> {
     }
     std::fs::write(out.join("stone-fit.json"), report.to_json())?;
     // Start, fitted, exemplar.
-    preview(
+    let fitted = stone(n, &result.params)?;
+    preview(&out, "stone-fit", &[&before, &fitted, &exemplar])?;
+    save_preset(
         &out,
-        "stone-fit",
-        &[&before, &stone(n, &result.params)?, &exemplar],
+        "stone-preset",
+        &Stone,
+        n,
+        stone_preset(&result.params),
+        &fitted,
     )?;
     Ok(())
 }

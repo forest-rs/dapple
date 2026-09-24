@@ -11,6 +11,7 @@ members = [
     "crates/dapple_lab",
     "crates/dapple_library",
     "crates/dapple_material",
+    "crates/dapple_package",
     "crates/dapple_raster",
     "examples/field_gallery",
     "examples/glazed_brick",
@@ -94,6 +95,7 @@ dapple_imaging = { path = "crates/dapple_imaging" }
 dapple_lab = { path = "crates/dapple_lab" }
 dapple_library = { path = "crates/dapple_library" }
 dapple_material = { path = "crates/dapple_material" }
+dapple_package = { path = "crates/dapple_package" }
 dapple_raster = { path = "crates/dapple_raster" }
 # Pinned to forest-rs/execution main at the merge of #99 (scoped drains under
 # early cutoff, on top of #97 and #98), which no crates.io release contains
@@ -119,5 +121,5 @@ libm = "0.2.16"
 openpbr = { default-features = false, features = ["libm"], git = "https://github.com/forest-rs/openpbr", rev = "374ddf3512e7bb4d369708777be6b3ff60754964" }
 png = "0.18.1"
 serde = { default-features = false, features = ["alloc", "derive"], version = "1.0.228" }
-serde_json = "1.0.145"
+serde_json = { default-features = false, features = ["alloc"], version = "1.0.145" }
 toml = "1.1.6"

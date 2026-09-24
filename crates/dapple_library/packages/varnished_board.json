@@ -1,0 +1,77 @@
+{
+  "format": "dapple.package",
+  "version": 1,
+  "interface": {
+    "module": { "name": "dapple_library.packages.varnished_board", "version": 1 },
+    "doc": "varnished oak, as a package: wood, an amber varnish and a little dirt",
+    "params": [
+      {
+        "name": "varnish",
+        "doc": "the varnish's tint",
+        "type": { "color": { "default": [0.78, 0.52, 0.25] } }
+      },
+      {
+        "name": "dirt",
+        "doc": "share of the surface dirtied",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.08 } }
+      }
+    ],
+    "outputs": [
+      {
+        "name": "material",
+        "doc": "the board",
+        "type": "material",
+        "semantics": { "channels": ["base_color", "specular_roughness", "coat_weight"] }
+      }
+    ]
+  },
+  "requires": {
+    "capabilities": [
+      { "name": "dapple.graph", "version": 1 },
+      { "name": "dapple.semantics", "version": 1 }
+    ],
+    "modules": [
+      { "name": "dapple_library.wood", "version": 1 },
+      { "name": "dapple_library.finish", "version": 1 },
+      { "name": "dapple_library.grime", "version": 1 }
+    ]
+  },
+  "presets": [
+    {
+      "name": "dark_and_worn",
+      "doc": "an old board under a darkened varnish",
+      "values": { "varnish": { "color": [0.55, 0.3, 0.12] }, "dirt": { "scalar": 0.3 } }
+    }
+  ],
+  "body": {
+    "steps": [
+      {
+        "name": "oak",
+        "module": { "name": "dapple_library.wood", "version": 1 }
+      },
+      {
+        "name": "varnish",
+        "module": { "name": "dapple_library.finish", "version": 1 },
+        "params": {
+          "color": { "param": "varnish" },
+          "tint": { "value": { "scalar": 0.55 } },
+          "roughness": { "value": { "scalar": 0.1 } },
+          "thickness": { "value": { "scalar": 0.00006 } },
+          "peel": { "value": { "scalar": 0.000004 } },
+          "peel_size": { "value": { "scalar": 0.006 } }
+        },
+        "inputs": { "base": { "output": { "step": "oak", "output": "material" } } }
+      },
+      {
+        "name": "dirt",
+        "module": { "name": "dapple_library.grime", "version": 1 },
+        "params": {
+          "coverage": { "param": "dirt" },
+          "strength": { "value": { "scalar": 0.5 } }
+        },
+        "inputs": { "base": { "output": { "step": "varnish", "output": "material" } } }
+      }
+    ],
+    "outputs": { "material": { "step": "dirt", "output": "material" } }
+  }
+}

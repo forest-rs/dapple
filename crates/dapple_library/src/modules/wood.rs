@@ -32,11 +32,8 @@ pub struct Wood;
 impl Module for Wood {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId {
-                name: "dapple_library.wood",
-                version: 1,
-            },
-            doc: "flat-sawn oak",
+            id: ModuleId::new("dapple_library.wood", 1),
+            doc: "flat-sawn oak".into(),
             params: vec![
                 meters(
                     "offset",
@@ -51,9 +48,9 @@ impl Module for Wood {
             ],
             inputs: vec![],
             outputs: vec![OutputDecl {
-                name: "material",
+                name: "material".into(),
                 kind: OutputKind::Material,
-                doc: "the board",
+                doc: "the board".into(),
             }],
         }
     }

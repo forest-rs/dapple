@@ -445,47 +445,44 @@ struct Paint;
 impl Module for Paint {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId {
-                name: "test.paint",
-                version: 1,
-            },
-            doc: "flat paint",
+            id: ModuleId::new("test.paint", 1),
+            doc: "flat paint".into(),
             params: vec![
                 ParamDecl {
-                    name: "color",
+                    name: "color".into(),
                     kind: ParamKind::Color,
                     default: ParamValue::Color(Vec3::splat(0.5)),
-                    doc: "its color",
+                    doc: "its color".into(),
                 },
                 ParamDecl {
-                    name: "thickness",
+                    name: "thickness".into(),
                     kind: ParamKind::Scalar {
                         unit: Unit::Meters,
                         range: [0.0, 0.001],
                     },
                     default: ParamValue::Scalar(0.0001),
-                    doc: "film thickness",
+                    doc: "film thickness".into(),
                 },
                 ParamDecl {
-                    name: "seed",
+                    name: "seed".into(),
                     kind: ParamKind::Seed,
                     default: ParamValue::Seed(0),
-                    doc: "variation",
+                    doc: "variation".into(),
                 },
             ],
             inputs: vec![InputDecl {
-                name: "exemplar",
+                name: "exemplar".into(),
                 kind: InputKind::Resource(ResourceRequest {
                     port: PortType::Scalar,
                     periodic: true,
                 }),
                 required: false,
-                doc: "a tint image",
+                doc: "a tint image".into(),
             }],
             outputs: vec![OutputDecl {
-                name: "material",
+                name: "material".into(),
                 kind: OutputKind::Material,
-                doc: "the paint",
+                doc: "the paint".into(),
             }],
         }
     }
@@ -516,11 +513,8 @@ struct TwoCoats;
 impl Module for TwoCoats {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId {
-                name: "test.two_coats",
-                version: 1,
-            },
-            doc: "two paints",
+            id: ModuleId::new("test.two_coats", 1),
+            doc: "two paints".into(),
             params: vec![],
             inputs: vec![],
             outputs: vec![],

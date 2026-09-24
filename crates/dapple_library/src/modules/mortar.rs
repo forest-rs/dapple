@@ -33,11 +33,8 @@ pub struct Mortar;
 impl Module for Mortar {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId {
-                name: "dapple_library.mortar",
-                version: 1,
-            },
-            doc: "sanded lime mortar",
+            id: ModuleId::new("dapple_library.mortar", 1),
+            doc: "sanded lime mortar".into(),
             params: vec![
                 color(
                     "color",
@@ -57,15 +54,15 @@ impl Module for Mortar {
                 seed(),
             ],
             inputs: vec![InputDecl {
-                name: "joint",
+                name: "joint".into(),
                 kind: InputKind::Map(PortType::Scalar),
                 required: false,
-                doc: "distance to the nearest unit, in meters, for tooling",
+                doc: "distance to the nearest unit, in meters, for tooling".into(),
             }],
             outputs: vec![OutputDecl {
-                name: "material",
+                name: "material".into(),
                 kind: OutputKind::Material,
-                doc: "the mortar, surface identity MORTAR",
+                doc: "the mortar, surface identity MORTAR".into(),
             }],
         }
     }

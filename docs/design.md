@@ -655,6 +655,7 @@ starts.
 | `dapple_raster` | Tiled rasters, raster ops, kernels and footprints | yes |
 | `dapple_graph` | Material graph value, typed ports, validation, compilation onto `execution_graph`, tile invalidation, caches, budgets, reports | yes |
 | `dapple_material` | Material values (OpenPBR bindings, auxiliary channels), the four material operations and their reports, programs over materials, modules, resources | yes |
+| `dapple_package` | Portable material packages: the versioned JSON source of module interfaces, graph bodies and presets, compiled against an engine's modules and capabilities | yes |
 | `dapple_encode` | Per-type mip builders, specular AA, packing profiles; PNG/EXR/KTX2 writing and the `ctt` compressor behind `std` | core yes |
 | `dapple_imaging` | Imaging scenes → coverage fields | yes |
 | `dapple_exedra` | `Chart` domain: rasterized chart layouts, seam gutters | yes |
@@ -671,7 +672,8 @@ Plus the shared `openpbr` crate outside dapple (see above).
 - `libm`, for deterministic transcendentals;
 - `execution_graph` and `invalidation` (forest-rs);
 - `imaging` and `kurbo`, in `dapple_imaging` only;
-- `ctt`, `png` and similar, only in `dapple_encode`'s std features.
+- `ctt`, `png` and similar, only in `dapple_encode`'s std features;
+- `serde` and `serde_json` (alloc only), in `dapple_package` for the package format.
 
 No image-processing framework dependency: the raster ops are ours, because
 determinism and footprints are the point.
@@ -1178,6 +1180,31 @@ meaning.
   percentiles, mean chroma and band energies at four scales. The wall
   needed a `glaze_roughness` parameter: a roughness target nothing public
   could reach was the finding.
+- **Portable packages** (`dapple_package`): a material module as data.
+  The editable source (`Package`, JSON with a `format` and a `version`)
+  holds the interface (parameters with units and ranges, material, map
+  and resource inputs, outputs with semantics: the channels a material
+  binds and the axes it tiles along), the engine capabilities it expects
+  (at a least version) and the modules it uses (at exact versions),
+  presets, and a body: module instances in order, each binding literals,
+  the package's own parameters and inputs, or earlier steps' outputs. The
+  execution artifact (`CompiledPackage`) is that source compiled against
+  a `Registry` of modules and capabilities, every name resolved and every
+  binding's kind and range checked; it is a `Module`, so its steps' seeds
+  come from their instance paths as a native composition's do. Unknown
+  versions, fields, capabilities and modules are refused with typed
+  errors. The varnished board, written as a package, realizes the native
+  module's bits; fitted parameters save as preset documents
+  (`PresetSet`) and rebuild the fit bit for bit. Module identities and
+  interface names are now `Cow<'static, str>`, borrowed for native modules
+  and owned for loaded ones. Bodies compose modules; field programs stay
+  inside native modules for now.
+- **Chart evaluation honors the sampling guarantee**: a solid program whose
+  guarantee is point-only (a `fract` of a varying input, like oak's rays
+  around the pith) cannot be filtered by a footprint, so
+  `eval_chart_anisotropic` integrates each tap over its rectangle on the
+  surface with 4 × 4 stratified point samples instead. The timber bake's
+  rays no longer alias into stair steps at 2 mm texels.
 - **Deposits matte what they cover**: `Deposit::matting` moves roughness
   toward the deposit's faster than coverage, so a thin haze of grime dulls
   a glaze's reflection before it hides its color.

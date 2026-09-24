@@ -27,18 +27,18 @@ use crate::glazed_brick::{MOSS, STONE};
 
 fn base_input() -> InputDecl {
     InputDecl {
-        name: "base",
+        name: "base".into(),
         kind: InputKind::Material,
         required: true,
-        doc: "the material worn or grown over",
+        doc: "the material worn or grown over".into(),
     }
 }
 
 fn material_output() -> Vec<OutputDecl> {
     vec![OutputDecl {
-        name: "material",
+        name: "material".into(),
         kind: OutputKind::Material,
-        doc: "the result",
+        doc: "the result".into(),
     }]
 }
 
@@ -70,11 +70,8 @@ pub struct EdgeWear;
 impl Module for EdgeWear {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId {
-                name: "dapple_library.edge_wear",
-                version: 1,
-            },
-            doc: "wear on convex edges, from curvature",
+            id: ModuleId::new("dapple_library.edge_wear", 1),
+            doc: "wear on convex edges, from curvature".into(),
             params: vec![
                 meters(
                     "radius",
@@ -101,10 +98,10 @@ impl Module for EdgeWear {
             inputs: vec![
                 base_input(),
                 InputDecl {
-                    name: "worn",
+                    name: "worn".into(),
                     kind: InputKind::Material,
                     required: false,
-                    doc: "what wear exposes",
+                    doc: "what wear exposes".into(),
                 },
             ],
             outputs: material_output(),
@@ -203,11 +200,8 @@ pub struct Moss;
 impl Module for Moss {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId {
-                name: "dapple_library.moss",
-                version: 1,
-            },
-            doc: "moss where the surface faces up, is hollow or damp",
+            id: ModuleId::new("dapple_library.moss", 1),
+            doc: "moss where the surface faces up, is hollow or damp".into(),
             params: vec![
                 color("color", Vec3::new(0.05, 0.085, 0.02), "the moss's color"),
                 color(
@@ -354,11 +348,8 @@ pub struct ByExample;
 impl Module for ByExample {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId {
-                name: "dapple_library.by_example",
-                version: 1,
-            },
-            doc: "a material tiled from an exemplar image",
+            id: ModuleId::new("dapple_library.by_example", 1),
+            doc: "a material tiled from an exemplar image".into(),
             params: vec![
                 meters("cell", [0.005, 2.0], 0.08, "the blended patches' size"),
                 meters("relief", [0.0, 0.01], 0.0004, "relief from luminance"),
@@ -367,13 +358,13 @@ impl Module for ByExample {
                 seed(),
             ],
             inputs: vec![InputDecl {
-                name: "exemplar",
+                name: "exemplar".into(),
                 kind: InputKind::Resource(ResourceRequest {
                     port: PortType::Color(Primaries::Rec709),
                     periodic: false,
                 }),
                 required: true,
-                doc: "the exemplar, linear, in meters",
+                doc: "the exemplar, linear, in meters".into(),
             }],
             outputs: material_output(),
         }

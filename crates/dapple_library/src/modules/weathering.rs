@@ -36,18 +36,18 @@ use crate::glazed_brick::{DIRT, MORTAR, SALT};
 
 fn base_input() -> InputDecl {
     InputDecl {
-        name: "base",
+        name: "base".into(),
         kind: InputKind::Material,
         required: true,
-        doc: "the material weathered",
+        doc: "the material weathered".into(),
     }
 }
 
 fn material_output() -> Vec<OutputDecl> {
     vec![OutputDecl {
-        name: "material",
+        name: "material".into(),
         kind: OutputKind::Material,
-        doc: "the weathered material",
+        doc: "the weathered material".into(),
     }]
 }
 
@@ -91,11 +91,8 @@ pub struct Grime;
 impl Module for Grime {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId {
-                name: "dapple_library.grime",
-                version: 1,
-            },
-            doc: "dirt from occlusion and cavities",
+            id: ModuleId::new("dapple_library.grime", 1),
+            doc: "dirt from occlusion and cavities".into(),
             params: vec![
                 color(
                     "color",
@@ -268,11 +265,8 @@ pub struct Streaks;
 impl Module for Streaks {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId {
-                name: "dapple_library.streaks",
-                version: 1,
-            },
-            doc: "grime streaks below ledges",
+            id: ModuleId::new("dapple_library.streaks", 1),
+            doc: "grime streaks below ledges".into(),
             params: vec![
                 color("color", Vec3::new(0.03, 0.027, 0.022), "the grime's color"),
                 fraction("coverage", 0.12, "share of the surface streaked"),
@@ -289,10 +283,10 @@ impl Module for Streaks {
             inputs: vec![
                 base_input(),
                 InputDecl {
-                    name: "sources",
+                    name: "sources".into(),
                     kind: InputKind::Map(PortType::Mask),
                     required: false,
-                    doc: "more ledges, where grime starts",
+                    doc: "more ledges, where grime starts".into(),
                 },
             ],
             outputs: material_output(),
@@ -363,11 +357,8 @@ pub struct Efflorescence;
 impl Module for Efflorescence {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId {
-                name: "dapple_library.efflorescence",
-                version: 1,
-            },
-            doc: "salt bloom rising from the foot",
+            id: ModuleId::new("dapple_library.efflorescence", 1),
+            doc: "salt bloom rising from the foot".into(),
             params: vec![
                 color("color", Vec3::new(0.50, 0.49, 0.46), "the salts' color"),
                 fraction("coverage", 0.08, "share of the surface bloomed"),

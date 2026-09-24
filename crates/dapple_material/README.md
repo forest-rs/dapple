@@ -21,8 +21,9 @@ combine them, and parameterized modules that build them.
   raster-pass results and positions, checking scopes.
 - **Modules.** A `Module` publishes an `Interface`: typed parameters with
   units, ranges and defaults; material, map and host-resolved resource
-  inputs; named outputs; a versioned `ModuleId`. `Context::instantiate`
-  checks bindings, derives seeds from the instance path, and records every
+  inputs; named outputs; a versioned `ModuleId`. Names are borrowed for
+  native modules and owned for modules loaded as data (`dapple_package`).
+  `Context::instantiate` checks bindings, derives seeds from the instance path, and records every
   operation's report against the instance that made it.
 - **Lowering.** `lower::maps` turns a material into `dapple_encode`'s maps
   and names the parameters they cannot carry.

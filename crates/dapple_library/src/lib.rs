@@ -19,6 +19,8 @@
 //!   body, mortar, stone, wood, finishes and weathering, and assets built
 //!   from them: a glazed brick wall, a stone sill, a varnished board and a
 //!   threshold.
+//! - [`packages`]: those modules offered to portable packages
+//!   (`dapple_package`), and the varnished board written as one.
 
 #![no_std]
 
@@ -31,6 +33,7 @@ pub mod glazed_brick;
 pub mod gravel;
 pub mod modules;
 pub mod oak;
+pub mod packages;
 pub mod parquet;
 
 #[cfg(test)]

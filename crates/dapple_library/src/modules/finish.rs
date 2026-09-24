@@ -42,11 +42,8 @@ pub struct Finish;
 impl Module for Finish {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId {
-                name: "dapple_library.finish",
-                version: 1,
-            },
-            doc: "a glaze, varnish or oil: pigment and a coat",
+            id: ModuleId::new("dapple_library.finish", 1),
+            doc: "a glaze, varnish or oil: pigment and a coat".into(),
             params: vec![
                 color(
                     "color",
@@ -107,34 +104,34 @@ impl Module for Finish {
             ],
             inputs: vec![
                 InputDecl {
-                    name: "base",
+                    name: "base".into(),
                     kind: InputKind::Material,
                     required: true,
-                    doc: "what the finish is on",
+                    doc: "what the finish is on".into(),
                 },
                 InputDecl {
-                    name: "coverage",
+                    name: "coverage".into(),
                     kind: InputKind::Map(PortType::Mask),
                     required: false,
-                    doc: "where the finish lies",
+                    doc: "where the finish lies".into(),
                 },
                 InputDecl {
-                    name: "thickness",
+                    name: "thickness".into(),
                     kind: InputKind::Map(PortType::Scalar),
                     required: false,
-                    doc: "its thickness in meters",
+                    doc: "its thickness in meters".into(),
                 },
                 InputDecl {
-                    name: "color",
+                    name: "color".into(),
                     kind: InputKind::Map(PortType::Color(Primaries::Rec709)),
                     required: false,
-                    doc: "its color per texel",
+                    doc: "its color per texel".into(),
                 },
             ],
             outputs: vec![OutputDecl {
-                name: "material",
+                name: "material".into(),
                 kind: OutputKind::Material,
-                doc: "the finished material",
+                doc: "the finished material".into(),
             }],
         }
     }

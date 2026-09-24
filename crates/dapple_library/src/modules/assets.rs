@@ -27,9 +27,9 @@ use crate::glazed_brick::{self, GLAZE, JOINT, Palette, Structure, glazes};
 
 fn material_output() -> Vec<OutputDecl> {
     vec![OutputDecl {
-        name: "material",
+        name: "material".into(),
         kind: OutputKind::Material,
-        doc: "the asset's material",
+        doc: "the asset's material".into(),
     }]
 }
 
@@ -70,11 +70,8 @@ impl Module for GlazedBrickWall {
     fn interface(&self) -> Interface {
         let d = Palette::default();
         Interface {
-            id: ModuleId {
-                name: "dapple_library.glazed_brick_wall",
-                version: 1,
-            },
-            doc: "Victorian glazed brickwork on a 1 m tile",
+            id: ModuleId::new("dapple_library.glazed_brick_wall", 1),
+            doc: "Victorian glazed brickwork on a 1 m tile".into(),
             params: vec![
                 color("field", d.field, "the field's glaze, above the band"),
                 color("band", d.band, "the band's glaze"),
@@ -301,11 +298,8 @@ pub struct StoneSill;
 impl Module for StoneSill {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId {
-                name: "dapple_library.stone_sill",
-                version: 1,
-            },
-            doc: "a stone sill bedded over glazed brickwork",
+            id: ModuleId::new("dapple_library.stone_sill", 1),
+            doc: "a stone sill bedded over glazed brickwork".into(),
             params: vec![
                 meters("sill", [0.05, 0.4], 0.15, "the sill's height on the face"),
                 meters(
@@ -394,11 +388,8 @@ pub struct VarnishedBoard;
 impl Module for VarnishedBoard {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId {
-                name: "dapple_library.varnished_board",
-                version: 1,
-            },
-            doc: "varnished oak",
+            id: ModuleId::new("dapple_library.varnished_board", 1),
+            doc: "varnished oak".into(),
             params: vec![
                 color("varnish", Vec3::new(0.78, 0.52, 0.25), "the varnish's tint"),
                 fraction("dirt", 0.08, "share of the surface dirtied"),
@@ -448,11 +439,8 @@ pub struct Threshold;
 impl Module for Threshold {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId {
-                name: "dapple_library.threshold",
-                version: 1,
-            },
-            doc: "a limestone step and an oiled oak tread",
+            id: ModuleId::new("dapple_library.threshold", 1),
+            doc: "a limestone step and an oiled oak tread".into(),
             params: vec![seed()],
             inputs: vec![],
             outputs: material_output(),

@@ -37,11 +37,8 @@ pub struct Stone;
 impl Module for Stone {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId {
-                name: "dapple_library.stone",
-                version: 1,
-            },
-            doc: "bedded, tooled stone",
+            id: ModuleId::new("dapple_library.stone", 1),
+            doc: "bedded, tooled stone".into(),
             params: vec![
                 color("light", Vec3::new(0.50, 0.41, 0.27), "the lightest beds"),
                 color("dark", Vec3::new(0.37, 0.29, 0.19), "the darkest beds"),
@@ -62,9 +59,9 @@ impl Module for Stone {
             ],
             inputs: vec![],
             outputs: vec![OutputDecl {
-                name: "material",
+                name: "material".into(),
                 kind: OutputKind::Material,
-                doc: "the stone",
+                doc: "the stone".into(),
             }],
         }
     }

@@ -13,6 +13,7 @@ dapple_field.workspace = true
 dapple_lab = { features = ["std"], workspace = true }
 dapple_library.workspace = true
 dapple_material.workspace = true
+dapple_package.workspace = true
 dapple_raster.workspace = true
 glam.workspace = true
 

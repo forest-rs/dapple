@@ -32,9 +32,10 @@
 //! identified by its [`ModuleId`] as a registered function is by its name);
 //! what it builds, and every instance's arguments, are inspectable values.
 
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -50,12 +51,26 @@ use crate::resource::{self, Resolved, ResourceError, ResourceHost, ResourceRef, 
 
 /// A module's versioned identity. A new version is a new module: instances
 /// name the version they were written against.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+///
+/// Names are borrowed for modules compiled into the program and owned for
+/// modules loaded as data (packages).
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ModuleId {
     /// The module's stable name, such as `"dapple_library.mortar"`.
-    pub name: &'static str,
+    pub name: Cow<'static, str>,
     /// Its interface and behavior version.
     pub version: u32,
+}
+
+impl ModuleId {
+    /// The identity `name@version`.
+    #[must_use]
+    pub const fn new(name: &'static str, version: u32) -> Self {
+        Self {
+            name: Cow::Borrowed(name),
+            version,
+        }
+    }
 }
 
 impl fmt::Display for ModuleId {
@@ -116,7 +131,12 @@ pub enum ParamValue {
 }
 
 impl ParamValue {
-    fn fits(self, kind: ParamKind) -> Result<(), &'static str> {
+    /// Checks the value against `kind`: its type, and its range.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong: `"wrong kind"` or `"out of range"`.
+    pub fn fits(self, kind: ParamKind) -> Result<(), &'static str> {
         match (self, kind) {
             (Self::Scalar(v), ParamKind::Scalar { range, .. }) => {
                 if v.is_finite() && v >= range[0] && v <= range[1] {
@@ -161,16 +181,16 @@ impl ParamValue {
 }
 
 /// A declared parameter.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ParamDecl {
     /// Its name, unique in the interface.
-    pub name: &'static str,
+    pub name: Cow<'static, str>,
     /// Its type, unit and range.
     pub kind: ParamKind,
     /// Its value when an instance does not bind it.
     pub default: ParamValue,
     /// What it means.
-    pub doc: &'static str,
+    pub doc: Cow<'static, str>,
 }
 
 /// What an input holds.
@@ -185,16 +205,16 @@ pub enum InputKind {
 }
 
 /// A declared input.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputDecl {
     /// Its name, unique in the interface.
-    pub name: &'static str,
+    pub name: Cow<'static, str>,
     /// What it holds.
     pub kind: InputKind,
     /// Whether an instance must bind it.
     pub required: bool,
     /// What it means.
-    pub doc: &'static str,
+    pub doc: Cow<'static, str>,
 }
 
 /// What an output holds.
@@ -207,14 +227,14 @@ pub enum OutputKind {
 }
 
 /// A declared output.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputDecl {
     /// Its name, unique in the interface.
-    pub name: &'static str,
+    pub name: Cow<'static, str>,
     /// What it holds.
     pub kind: OutputKind,
     /// What it means.
-    pub doc: &'static str,
+    pub doc: Cow<'static, str>,
 }
 
 /// A module's public interface.
@@ -223,7 +243,7 @@ pub struct Interface {
     /// The module's identity.
     pub id: ModuleId,
     /// What the module makes.
-    pub doc: &'static str,
+    pub doc: Cow<'static, str>,
     /// Parameters.
     pub params: Vec<ParamDecl>,
     /// Inputs.
@@ -255,7 +275,7 @@ pub enum Output {
 /// A module's outputs, by name.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Outputs {
-    entries: Vec<(&'static str, Output)>,
+    entries: Vec<(Cow<'static, str>, Output)>,
 }
 
 impl Outputs {
@@ -269,18 +289,15 @@ impl Outputs {
 
     /// Adds output `name`.
     #[must_use]
-    pub fn with(mut self, name: &'static str, output: Output) -> Self {
-        self.entries.push((name, output));
+    pub fn with(mut self, name: impl Into<Cow<'static, str>>, output: Output) -> Self {
+        self.entries.push((name.into(), output));
         self
     }
 
     /// Output `name`.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&Output> {
-        self.entries
-            .iter()
-            .find(|(n, _)| *n == name)
-            .map(|(_, o)| o)
+        self.entries.iter().find(|(n, _)| n == name).map(|(_, o)| o)
     }
 
     /// Material output `name`.
@@ -298,7 +315,7 @@ impl Outputs {
         let i = self
             .entries
             .iter()
-            .position(|(n, o)| *n == name && matches!(o, Output::Material(_)))?;
+            .position(|(n, o)| n == name && matches!(o, Output::Material(_)))?;
         match self.entries.remove(i).1 {
             Output::Material(m) => Some(m),
             Output::Map(_) => unreachable!("matched above"),
@@ -385,23 +402,30 @@ impl Bind {
 enum Bound {
     Material(Material),
     Map(TypedRaster),
-    Resource(Resolved),
+    Resource(ResourceRef, Resolved),
 }
 
 /// An instance's checked arguments, as its body sees them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Args {
-    params: Vec<(&'static str, ParamValue)>,
-    inputs: Vec<(&'static str, Option<Bound>)>,
+    params: Vec<(Cow<'static, str>, ParamValue)>,
+    inputs: Vec<(Cow<'static, str>, Option<Bound>)>,
     seed: u64,
     fingerprint: u64,
 }
 
 impl Args {
-    fn param(&self, name: &str) -> ParamValue {
+    /// Parameter `name`, of whatever kind.
+    ///
+    /// # Panics
+    ///
+    /// When the interface declares no parameter `name`: a bug in the
+    /// module, not in the instance.
+    #[must_use]
+    pub fn param(&self, name: &str) -> ParamValue {
         self.params
             .iter()
-            .find(|(n, _)| *n == name)
+            .find(|(n, _)| n == name)
             .map(|(_, v)| *v)
             .unwrap_or_else(|| panic!("the interface declares no parameter {name:?}"))
     }
@@ -472,17 +496,29 @@ impl Args {
         self.seed(purpose) & 0xffff_ffff
     }
 
-    fn input(&self, name: &str) -> Option<&Bound> {
+    fn bound(&self, name: &str) -> Option<&Bound> {
         self.inputs
             .iter()
-            .find(|(n, _)| *n == name)
+            .find(|(n, _)| n == name)
             .and_then(|(_, b)| b.as_ref())
+    }
+
+    /// Input `name` as it was bound, when bound, to pass on to a nested
+    /// instance: a resource as its logical name, which the nested
+    /// instance resolves again.
+    #[must_use]
+    pub fn input(&self, name: &str) -> Option<Input> {
+        self.bound(name).map(|b| match b {
+            Bound::Material(m) => Input::Material(m.clone()),
+            Bound::Map(m) => Input::Map(m.clone()),
+            Bound::Resource(r, _) => Input::Resource(r.clone()),
+        })
     }
 
     /// Material input `name`, when bound.
     #[must_use]
     pub fn material(&self, name: &str) -> Option<&Material> {
-        match self.input(name) {
+        match self.bound(name) {
             Some(Bound::Material(m)) => Some(m),
             _ => None,
         }
@@ -491,7 +527,7 @@ impl Args {
     /// Map input `name`, when bound.
     #[must_use]
     pub fn map(&self, name: &str) -> Option<&TypedRaster> {
-        match self.input(name) {
+        match self.bound(name) {
             Some(Bound::Map(m)) => Some(m),
             _ => None,
         }
@@ -500,8 +536,8 @@ impl Args {
     /// Resource input `name`, resolved, when bound.
     #[must_use]
     pub fn resource(&self, name: &str) -> Option<&Resolved> {
-        match self.input(name) {
-            Some(Bound::Resource(r)) => Some(r),
+        match self.bound(name) {
+            Some(Bound::Resource(_, r)) => Some(r),
             _ => None,
         }
     }
@@ -526,21 +562,21 @@ pub enum ModuleErrorKind {
         reason: &'static str,
     },
     /// A required input is not bound.
-    MissingInput(&'static str),
+    MissingInput(String),
     /// An input holds the wrong kind of value or is off the grid.
-    InvalidInput(&'static str),
+    InvalidInput(String),
     /// A resource could not be resolved or does not fit.
     Resource(ResourceError),
     /// The body did not produce a declared output, or produced one of the
-    /// wrong kind.
-    Output(&'static str),
+    /// wrong kind, or one that does not hold what the interface says.
+    Output(String),
     /// A material operation in the body failed.
     Material(MaterialError),
     /// A material output breaks its tiling promise: a map has a seam
     /// along an axis the material says it tiles along.
     Seam {
         /// The output.
-        output: &'static str,
+        output: String,
         /// The channel's name.
         channel: &'static str,
         /// What the seam measurement found.
@@ -667,9 +703,9 @@ pub struct Diagnostics {
 
 impl Diagnostics {
     /// The instances built, as `(path, module)`, in order.
-    pub fn instances(&self) -> impl Iterator<Item = (&str, ModuleId)> + '_ {
+    pub fn instances(&self) -> impl Iterator<Item = (&str, &ModuleId)> + '_ {
         self.entries.iter().filter_map(|e| match e.event {
-            Event::Instantiated { .. } => Some((e.path.as_str(), e.module)),
+            Event::Instantiated { .. } => Some((e.path.as_str(), &e.module)),
             Event::Operation(_) => None,
         })
     }
@@ -756,13 +792,10 @@ impl<'a> Context<'a> {
     /// value it came with, so operations chain:
     /// `let m = cx.record(ops::coat(&m, &c)?);`.
     pub fn record<T>(&mut self, (value, report): (T, Report)) -> T {
-        let module = self.stack.last().map_or(
-            ModuleId {
-                name: "",
-                version: 0,
-            },
-            |f| f.module,
-        );
+        let module = self
+            .stack
+            .last()
+            .map_or(ModuleId::new("", 0), |f| f.module.clone());
         self.diagnostics.entries.push(Entry {
             path: self.path().into(),
             module,
@@ -796,17 +829,17 @@ impl<'a> Context<'a> {
             kind: Box::new(kind),
         };
         for (n, _) in &bind.params {
-            if !interface.params.iter().any(|p| p.name == n) {
+            if !interface.params.iter().any(|p| p.name == *n) {
                 return Err(fail(ModuleErrorKind::Unknown(n.clone())));
             }
         }
         for (n, _) in &bind.inputs {
-            if !interface.inputs.iter().any(|p| p.name == n) {
+            if !interface.inputs.iter().any(|p| p.name == *n) {
                 return Err(fail(ModuleErrorKind::Unknown(n.clone())));
             }
         }
         let mut words = alloc::vec![
-            name_word(1, interface.id.name),
+            name_word(1, &interface.id.name),
             u64::from(interface.id.version)
         ];
         let mut params = Vec::with_capacity(interface.params.len());
@@ -816,41 +849,42 @@ impl<'a> Context<'a> {
                 .params
                 .iter()
                 .rev()
-                .find(|(n, _)| n == decl.name)
+                .find(|(n, _)| *n == decl.name)
                 .map_or(decl.default, |(_, v)| *v);
             value.fits(decl.kind).map_err(|reason| {
                 fail(ModuleErrorKind::InvalidParam {
-                    name: decl.name.into(),
+                    name: decl.name.to_string(),
                     reason,
                 })
             })?;
             if let ParamValue::Seed(s) = value {
                 user_seed = s;
             }
-            words.push(name_word(2, decl.name));
+            words.push(name_word(2, &decl.name));
             value.words(&mut words);
-            params.push((decl.name, value));
+            params.push((decl.name.clone(), value));
         }
         let mut inputs = Vec::with_capacity(interface.inputs.len());
         for decl in &interface.inputs {
-            let given = bind.inputs.iter().rev().find(|(n, _)| n == decl.name);
+            let given = bind.inputs.iter().rev().find(|(n, _)| *n == decl.name);
+            let invalid = || fail(ModuleErrorKind::InvalidInput(decl.name.to_string()));
             let bound = match (given.map(|(_, i)| i), decl.kind) {
                 (None, _) if decl.required => {
-                    return Err(fail(ModuleErrorKind::MissingInput(decl.name)));
+                    return Err(fail(ModuleErrorKind::MissingInput(decl.name.to_string())));
                 }
                 (None, _) => None,
                 (Some(Input::Material(m)), InputKind::Material) => {
                     if m.grid() != self.grid {
-                        return Err(fail(ModuleErrorKind::InvalidInput(decl.name)));
+                        return Err(invalid());
                     }
-                    words.extend([name_word(3, decl.name), m.digest()]);
+                    words.extend([name_word(3, &decl.name), m.digest()]);
                     Some(Bound::Material(m.clone()))
                 }
                 (Some(Input::Map(r)), InputKind::Map(port)) => {
                     if r.port() != port || !self.grid.holds(r) {
-                        return Err(fail(ModuleErrorKind::InvalidInput(decl.name)));
+                        return Err(invalid());
                     }
-                    words.extend([name_word(3, decl.name), r.digest()]);
+                    words.extend([name_word(3, &decl.name), r.digest()]);
                     Some(Bound::Map(r.clone()))
                 }
                 (Some(Input::Resource(reference)), InputKind::Resource(request)) => {
@@ -865,15 +899,15 @@ impl<'a> Context<'a> {
                         reason = "splitting the 128-bit fingerprint into its halves"
                     )]
                     words.extend([
-                        name_word(3, decl.name),
+                        name_word(3, &decl.name),
                         resolved.content.0 as u64,
                         (resolved.content.0 >> 64) as u64,
                     ]);
-                    Some(Bound::Resource(resolved))
+                    Some(Bound::Resource(reference.clone(), resolved))
                 }
-                _ => return Err(fail(ModuleErrorKind::InvalidInput(decl.name))),
+                _ => return Err(invalid()),
             };
-            inputs.push((decl.name, bound));
+            inputs.push((decl.name.clone(), bound));
         }
         let mut seed_words: Vec<u64> = path.split('/').map(|s| name_word(4, s)).collect();
         seed_words.push(user_seed);
@@ -885,14 +919,14 @@ impl<'a> Context<'a> {
         };
         self.diagnostics.entries.push(Entry {
             path: path.clone(),
-            module: interface.id,
+            module: interface.id.clone(),
             event: Event::Instantiated {
                 fingerprint: args.fingerprint,
             },
         });
         self.stack.push(Frame {
             path: path.clone(),
-            module: interface.id,
+            module: interface.id.clone(),
         });
         let built = module.build(self, &args);
         self.stack.pop();
@@ -903,7 +937,7 @@ impl<'a> Context<'a> {
             e
         })?;
         for decl in &interface.outputs {
-            let ok = match (outputs.get(decl.name), decl.kind) {
+            let ok = match (outputs.get(&decl.name), decl.kind) {
                 (Some(Output::Material(m)), OutputKind::Material) => m.grid() == self.grid,
                 (Some(Output::Map(r)), OutputKind::Map(port)) => {
                     r.port() == port && self.grid.holds(r)
@@ -911,13 +945,13 @@ impl<'a> Context<'a> {
                 _ => false,
             };
             if !ok {
-                return Err(fail(ModuleErrorKind::Output(decl.name)));
+                return Err(fail(ModuleErrorKind::Output(decl.name.to_string())));
             }
-            if let Some(Output::Material(m)) = outputs.get(decl.name)
+            if let Some(Output::Material(m)) = outputs.get(&decl.name)
                 && let Err(e) = m.check_tiling()
             {
                 return Err(fail(ModuleErrorKind::Seam {
-                    output: decl.name,
+                    output: decl.name.to_string(),
                     channel: e.channel.name(),
                     seam: e.seam,
                 }));

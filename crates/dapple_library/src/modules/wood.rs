@@ -12,7 +12,7 @@ use dapple_material::module::{
     Args, Context, Interface, Module, ModuleError, ModuleId, Output, OutputDecl, OutputKind,
     Outputs,
 };
-use dapple_material::{Aux, Channel, Material, Param};
+use dapple_material::{Aux, Channel, Material, Param, Tiling};
 use glam::Vec3;
 
 use super::{fraction, integer, meters, realize, scalar_channel, seed};
@@ -98,6 +98,8 @@ impl Module for Wood {
             colors.push(col);
         }
         let mut m = Material::new(grid);
+        // A board cut from a log does not repeat.
+        m.set_tiling(Tiling::NONE);
         m.set_param(Param::BaseColor, super::color_map(grid, &colors)?)?;
         m.set_param(Param::SpecularRoughness, scalar_channel(grid, &roughs)?)?;
         m.set_aux(Aux::Height, scalar_channel(grid, &heights)?)?;

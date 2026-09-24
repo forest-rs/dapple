@@ -14,7 +14,7 @@ use dapple_material::module::{
     OutputKind, Outputs,
 };
 use dapple_material::ops::{self, Detail, Layer, Transition};
-use dapple_material::{Aux, Channel, Grid, Material};
+use dapple_material::{Aux, Channel, Grid, Material, Tiling};
 use dapple_raster::typed::Storage;
 use dapple_raster::{DistanceTransform, Raster, RasterOp};
 use glam::{Vec2, Vec3};
@@ -94,10 +94,10 @@ impl Module for GlazedBrickWall {
                 fraction("variation", d.variation, "brick-to-brick glaze variation"),
                 fraction("battered", d.battered, "how chipped the bricks are"),
                 flag("weathered", true, "whether to add dirt, streaks and salts"),
-                fraction("dirt", 0.3, "share of the surface dirtied"),
+                fraction("dirt", 0.35, "share of the surface dirtied"),
                 fraction("streaks", 0.06, "share of the surface streaked"),
                 fraction("salts", 0.05, "share of the surface bloomed with salts"),
-                fraction("moss", 0.01, "share of the surface grown with moss"),
+                fraction("moss", 0.03, "share of the surface grown with moss"),
                 seed(),
             ],
             inputs: vec![],
@@ -318,7 +318,7 @@ impl Module for StoneSill {
                 fraction("dirt", 0.3, "share of the surface dirtied"),
                 fraction("streaks", 0.22, "share of the surface streaked"),
                 fraction("salts", 0.06, "share of the surface bloomed with salts"),
-                fraction("moss", 0.015, "share of the surface grown with moss"),
+                fraction("moss", 0.03, "share of the surface grown with moss"),
                 seed(),
             ],
             inputs: vec![],
@@ -366,6 +366,8 @@ impl Module for StoneSill {
         if let Some(r) = wall.aux(Aux::Region) {
             m.set_aux(Aux::Region, r.clone())?;
         }
+        // A sill sits at the top of the wall: the asset tiles along it.
+        m.set_tiling(m.tiling().and(Tiling::X));
         // Rain runs off the sill and down the wall from just under it.
         let drip = band(grid, bottom - JOINT - 0.004, bottom - JOINT)?;
         let m = weather(

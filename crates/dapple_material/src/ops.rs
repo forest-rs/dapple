@@ -161,6 +161,7 @@ fn mix(
 ) -> Result<Material, MaterialError> {
     let grid = a.grid();
     let mut out = Material::new(grid);
+    out.set_tiling(a.tiling().and(b.tiling()));
     let partial = |i: usize| w[i] > 0.0 && w[i] < 1.0;
     report.partial += (0..w.len()).filter(|&i| partial(i)).count() as u64;
     let (lo, hi) = w
@@ -654,6 +655,11 @@ pub struct Deposit {
     /// lumps of moss or the ridges of a salt crust. `None` for a flat
     /// deposit.
     pub relief: Option<Raster>,
+    /// How quickly a thin film kills gloss, at least 1: where it covers
+    /// `c` of a texel, the specular and coat roughness move toward the
+    /// deposit's by `min(1, matting · c)` rather than by `c`. A haze of
+    /// grime too thin to hide a glaze's color still dulls its reflection.
+    pub matting: f32,
 }
 
 /// Covers `base` with `deposit`.
@@ -678,6 +684,9 @@ pub fn deposit(base: &Material, deposit: &Deposit) -> Result<(Material, Report),
     }
     if !deposit.thickness.is_finite() {
         return Err(MaterialError::InvalidParameter("thickness"));
+    }
+    if !(deposit.matting.is_finite() && deposit.matting >= 1.0) {
+        return Err(MaterialError::InvalidParameter("matting"));
     }
     if let Some(r) = &deposit.relief
         && !grid.holds_raster(r)
@@ -704,7 +713,25 @@ pub fn deposit(base: &Material, deposit: &Deposit) -> Result<(Material, Report),
         .map(|c| c.clamp(0.0, 1.0))
         .collect();
     let mut report = Report::new("deposit");
-    let m = mix(base, &on_top, &w, &mut report)?;
+    let mut m = mix(base, &on_top, &w, &mut report)?;
+    if deposit.matting > 1.0 {
+        for p in [Param::SpecularRoughness, Param::CoatRoughness] {
+            let c = ChannelId::Param(p);
+            let dep = ChannelId::Param(Param::SpecularRoughness);
+            let values: Vec<Value> = (0..grid.len())
+                .map(|i| {
+                    let (r, t) = (scalar(m.value(c, i)), w[i]);
+                    if t <= 0.0 {
+                        return Value::Scalar(r);
+                    }
+                    let k = (deposit.matting * t).min(1.0);
+                    let target = scalar(deposit.material.value(dep, i));
+                    Value::Scalar(r + (target.max(r) - r) * k)
+                })
+                .collect();
+            m.set(c, Channel::Map(grid.typed(PortType::Scalar, values)?))?;
+        }
+    }
     Ok((m, report))
 }
 
@@ -787,6 +814,7 @@ pub fn transform(m: &Material, t: MaterialTransform) -> Result<(Material, Report
         v
     };
     let mut out = Material::new(grid);
+    out.set_tiling(m.tiling());
     for (c, ch) in m.bound() {
         let port = c.port();
         let turns_vectors = matches!(

@@ -10,7 +10,8 @@ use core::fmt;
 use dapple_field::hash::hash;
 use dapple_field::scoped::{ContractError, value_fits, value_words};
 use dapple_field::{Edge, NormalFrame, PortType, Primaries, Value};
-use dapple_raster::typed::{TypedError, TypedRaster};
+use dapple_raster::seam::{Axis, Seam, seam};
+use dapple_raster::typed::{Storage, TypedError, TypedRaster};
 use dapple_raster::{Raster, RasterError, Realization};
 use glam::{Vec2, Vec3};
 use openpbr::color::LinearSrgb;
@@ -130,6 +131,61 @@ impl Grid {
     pub fn holds_raster<T: Copy>(&self, raster: &Raster<T>) -> bool {
         Self::of_raster(raster) == *self
     }
+}
+
+/// Which axes a material promises to tile along: the wrap from the last
+/// column to the first (`x`) and from the last row to the first (`y`).
+///
+/// A material on a wrapping grid tiles along both unless something that
+/// made it is tied to one place: a wall's foot, where splash-back and
+/// rising damp gather, tiles along the wall but not up it. Operations keep
+/// the axes both their inputs tile along; modules narrow them where they
+/// use positions that do not repeat. [`Material::check_tiling`] holds a
+/// material to its promise.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Tiling {
+    /// Tiles across columns.
+    pub x: bool,
+    /// Tiles across rows.
+    pub y: bool,
+}
+
+impl Tiling {
+    /// Tiles along both axes.
+    pub const BOTH: Self = Self { x: true, y: true };
+    /// Tiles along x only: along a wall, not up it.
+    pub const X: Self = Self { x: true, y: false };
+    /// Does not tile.
+    pub const NONE: Self = Self { x: false, y: false };
+
+    /// What `grid` allows: both axes on a wrapping grid, none otherwise.
+    #[must_use]
+    pub fn of(grid: Grid) -> Self {
+        if grid.edge == Edge::Wrap {
+            Self::BOTH
+        } else {
+            Self::NONE
+        }
+    }
+
+    /// The axes both tile along.
+    #[must_use]
+    pub const fn and(self, other: Self) -> Self {
+        Self {
+            x: self.x && other.x,
+            y: self.y && other.y,
+        }
+    }
+}
+
+/// A channel that breaks its material's tiling promise, from
+/// [`Material::check_tiling`].
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SeamError {
+    /// The channel.
+    pub channel: ChannelId,
+    /// What the seam measurement found.
+    pub seam: Seam,
 }
 
 /// An auxiliary channel: data consumers need that is not an OpenPBR
@@ -370,8 +426,20 @@ impl From<ContractError> for MaterialError {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Material {
     grid: Grid,
+    tiling: Tiling,
     params: Vec<Option<Channel>>,
     aux: Vec<Option<Channel>>,
+}
+
+/// The seam of a typed raster along `axis`.
+#[must_use]
+pub fn typed_seam(r: &TypedRaster, axis: Axis) -> Seam {
+    match r.storage() {
+        Storage::F32(r) => seam(r, axis),
+        Storage::U32(r) => seam(r, axis),
+        Storage::F32x2(r) => seam(r, axis),
+        Storage::F32x3(r) => seam(r, axis),
+    }
 }
 
 fn param_index(p: Param) -> usize {
@@ -387,6 +455,7 @@ impl Material {
     pub fn new(grid: Grid) -> Self {
         Self {
             grid,
+            tiling: Tiling::of(grid),
             params: vec![None; Param::COUNT],
             aux: vec![None; Aux::ALL.len()],
         }
@@ -417,6 +486,50 @@ impl Material {
     #[must_use]
     pub const fn grid(&self) -> Grid {
         self.grid
+    }
+
+    /// The axes the material promises to tile along.
+    #[must_use]
+    pub const fn tiling(&self) -> Tiling {
+        self.tiling
+    }
+
+    /// Narrows or sets the tiling promise, never beyond what the grid
+    /// allows.
+    pub fn set_tiling(&mut self, tiling: Tiling) {
+        self.tiling = tiling.and(Tiling::of(self.grid));
+    }
+
+    /// The seam of every bound map along every axis the material promises
+    /// to tile, in channel order.
+    #[must_use]
+    pub fn seams(&self) -> Vec<(ChannelId, Seam)> {
+        let axes = [(self.tiling.x, Axis::X), (self.tiling.y, Axis::Y)];
+        let mut out = Vec::new();
+        for (c, ch) in self.bound() {
+            let Channel::Map(r) = ch else { continue };
+            for (on, axis) in axes {
+                if on {
+                    out.push((c, typed_seam(r, axis)));
+                }
+            }
+        }
+        out
+    }
+
+    /// Holds the material to its tiling promise: every bound map is
+    /// seamless along every promised axis.
+    ///
+    /// # Errors
+    ///
+    /// The first [`SeamError`] found.
+    pub fn check_tiling(&self) -> Result<(), SeamError> {
+        for (channel, seam) in self.seams() {
+            if !seam.is_seamless() {
+                return Err(SeamError { channel, seam });
+            }
+        }
+        Ok(())
     }
 
     /// Parameter `p`'s binding, if bound.

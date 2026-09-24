@@ -303,6 +303,7 @@ fn deposits_cover_raise_and_hide_the_coat() {
             coverage,
             thickness: 0.0005,
             relief: None,
+            matting: 1.0,
         },
     )
     .unwrap();
@@ -421,7 +422,7 @@ fn programs_over_materials_check_scopes() {
         .value(ChannelId::Param(Param::SpecularRoughness), 9)
         .scalar()
         .unwrap();
-    assert_eq!(out[0].value(9), Value::Scalar(0.5 * r * 2.0));
+    assert_eq!(out.outputs[0].value(9), Value::Scalar(0.5 * r * 2.0));
     assert!(
         evaluate(
             &p,
@@ -627,5 +628,83 @@ fn modules_check_bindings_derive_seeds_and_keep_boundaries() {
             .value(ChannelId::Param(Param::BaseColor), 0),
         Value::Vector3(Vec3::splat(0.25)),
         "the resolved exemplar tints"
+    );
+}
+
+#[test]
+fn programs_are_checked_across_the_wrap() {
+    use dapple_field::scoped::{Node, UnaryOp};
+    // An 8 × 8 grid of 1 cm texels wraps with a period of 8 cm.
+    let m = Material::new(grid());
+    let program = |periodic_x: bool| {
+        let mut b = ScopedBuilder::new("wrap");
+        let at = b.input("at", PortType::Vector2, Scope::Sample).unwrap();
+        let x = b.component(at, 0).unwrap();
+        let y = b.component(at, 1).unwrap();
+        // Whole cycles along x (period 8 cm) or a third of one; a ramp up y.
+        let k = if periodic_x {
+            2.0 * core::f32::consts::TAU / 0.08
+        } else {
+            0.3 * core::f32::consts::TAU / 0.08
+        };
+        let kx = b.scale(k, x).unwrap();
+        let wave = b.node(Node::Unary(UnaryOp::Sin, kx)).unwrap();
+        let out = b.add(wave, y).unwrap();
+        b.output("v", PortType::Scalar, Scope::Sample, out).unwrap();
+        b.finish()
+    };
+    let t = evaluate(&program(true), &[MapBinding::Position], &m)
+        .unwrap()
+        .tiling;
+    assert_eq!(t, Tiling::X, "whole cycles tile; the ramp does not");
+    let t = evaluate(&program(false), &[MapBinding::Position], &m)
+        .unwrap()
+        .tiling;
+    assert_eq!(t, Tiling::NONE, "a fractional cycle leaves a seam");
+}
+
+#[test]
+fn a_thin_deposit_mattes_the_gloss_beneath() {
+    let (coated, _) = ops::coat(
+        &rich(0.1),
+        &Coating {
+            roughness: Channel::Constant(Value::Scalar(0.05)),
+            ..Coating::clear()
+        },
+    )
+    .unwrap();
+    let mut dirt = Material::new(grid());
+    dirt.set_param(
+        Param::SpecularRoughness,
+        Channel::Constant(Value::Scalar(0.9)),
+    )
+    .unwrap();
+    let thin = ramp_raster(|_, _| 0.25);
+    let deposit = |matting| {
+        ops::deposit(
+            &coated,
+            &Deposit {
+                material: dirt.clone(),
+                coverage: thin.clone(),
+                thickness: 0.0,
+                relief: None,
+                matting,
+            },
+        )
+        .unwrap()
+        .0
+    };
+    let coat_rough = |m: &Material| {
+        m.value(ChannelId::Param(Param::CoatRoughness), 0)
+            .scalar()
+            .unwrap()
+    };
+    assert!(
+        (coat_rough(&deposit(1.0)) - 0.05).abs() < 1e-6,
+        "no matting: the coat keeps its gloss"
+    );
+    assert!(
+        coat_rough(&deposit(4.0)) > 0.85,
+        "a quarter's haze mattes it"
     );
 }

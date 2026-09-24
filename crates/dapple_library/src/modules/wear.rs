@@ -136,6 +136,7 @@ impl Module for EdgeWear {
             ],
             base,
         )?;
+        let (score, score_tiling) = score;
         let target = args.integer("surface");
         let score = if target == 0 {
             score
@@ -185,7 +186,8 @@ impl Module for EdgeWear {
                 w
             }
         };
-        let m = cx.record(ops::select(base, &worn, &worn_mask, Transition::Mask)?);
+        let mut m = cx.record(ops::select(base, &worn, &worn_mask, Transition::Mask)?);
+        m.set_tiling(m.tiling().and(score_tiling));
         Ok(Outputs::new().with("material", Output::Material(m)))
     }
 }
@@ -207,7 +209,7 @@ impl Module for Moss {
             },
             doc: "moss where the surface faces up, is hollow or damp",
             params: vec![
-                color("color", Vec3::new(0.035, 0.055, 0.016), "the moss's color"),
+                color("color", Vec3::new(0.05, 0.085, 0.02), "the moss's color"),
                 color(
                     "sheen",
                     Vec3::new(0.16, 0.2, 0.07),
@@ -292,6 +294,7 @@ impl Module for Moss {
             ],
             base,
         )?;
+        let (score, score_tiling) = score;
         let covered = coverage(&score, args.scalar("coverage"), 0.04)?;
         let lumps = realize_scalar(grid, |b, d| {
             fbm(b, d, [300.0, 300.0], args.seed("lumps"), 3)
@@ -322,15 +325,19 @@ impl Module for Moss {
         )?;
         moss.set_param(Param::FuzzRoughness, Channel::Constant(Value::Scalar(0.7)))?;
         moss.set_aux(Aux::Surface, Channel::Constant(Value::Id(MOSS)))?;
-        let m = cx.record(ops::deposit(
+        let mut m = cx.record(ops::deposit(
             base,
             &Deposit {
                 material: moss,
                 coverage: covered,
                 thickness: args.scalar("thickness"),
                 relief: Some(relief),
+                matting: 2.0,
             },
         )?);
+        // Damp ties moss to the foot; evaluating its score across the wrap
+        // found where it tiles.
+        m.set_tiling(m.tiling().and(score_tiling));
         Ok(Outputs::new().with("material", Output::Material(m)))
     }
 }

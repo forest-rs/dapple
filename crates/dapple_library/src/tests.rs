@@ -477,3 +477,29 @@ mod wear {
         assert!(hi - lo > 0.2, "keeps its contrast: {lo}..{hi}");
     }
 }
+
+mod tiling {
+    use dapple_material::Tiling;
+    use dapple_material::module::{Bind, Context, Module};
+    use dapple_material::resource::NoResources;
+
+    use crate::modules::{CeramicBody, Mortar, Stone};
+
+    /// Every material family promises to tile on a wrapping grid, and
+    /// instantiation holds it to that: features whose frequency does not
+    /// divide the period (a tooling pitch, a band width) would leave a
+    /// seam and fail.
+    #[test]
+    fn families_tile_on_a_wrapping_grid() {
+        let modules: [&dyn Module; 3] = [&Stone, &CeramicBody, &Mortar];
+        for module in modules {
+            let mut cx = Context::new(super::glazed::tile(512), &NoResources);
+            let name = module.interface().id.name;
+            let mut out = cx
+                .instantiate(module, "m", Bind::new())
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let m = out.take_material("material").unwrap();
+            assert_eq!(m.tiling(), Tiling::BOTH, "{name}");
+        }
+    }
+}

@@ -42,7 +42,8 @@ mod report;
 pub mod resource;
 
 pub use material::{
-    Aux, Channel, ChannelId, Grid, Material, MaterialError, param_default, param_port,
+    Aux, Channel, ChannelId, Grid, Material, MaterialError, SeamError, Tiling, param_default,
+    param_port, typed_seam,
 };
 pub use openpbr;
 pub use openpbr::Param;

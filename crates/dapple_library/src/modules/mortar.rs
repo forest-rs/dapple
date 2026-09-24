@@ -191,9 +191,13 @@ impl Module for Mortar {
             ],
             &m0,
         )?;
-        let [color_map, height, roughness]: [_; 3] =
-            out.try_into().map_err(|_| super::fail("three outputs"))?;
+        let out_tiling = out.tiling;
+        let [color_map, height, roughness]: [_; 3] = out
+            .outputs
+            .try_into()
+            .map_err(|_| super::fail("three outputs"))?;
         let mut m = Material::new(grid);
+        m.set_tiling(out_tiling);
         m.set_param(Param::BaseColor, Channel::Map(color_map))?;
         m.set_param(Param::SpecularRoughness, Channel::Map(roughness))?;
         m.set_aux(Aux::Height, Channel::Map(height))?;

@@ -29,8 +29,8 @@ use dapple_raster::{
 use glam::Vec3;
 
 use super::{
-    color, coverage, fail, fbm, fraction, integer, mask_map, meters, realize_scalar, scalar_map,
-    seed,
+    color, coverage, fail, fbm, fraction, integer, mask_map, meters, realize_scalar, scalar,
+    scalar_map, seed,
 };
 use crate::glazed_brick::{DIRT, MORTAR, SALT};
 
@@ -112,7 +112,18 @@ impl Module for Grime {
                     0.35,
                     "height above the foot that rain splashes back onto; 0 for none",
                 ),
-                fraction("splash_weight", 1.0, "how much the splash zone decides"),
+                scalar(
+                    "splash_weight",
+                    dapple_material::module::Unit::None,
+                    [0.0, 4.0],
+                    1.6,
+                    "how much the splash zone decides",
+                ),
+                color(
+                    "splash_color",
+                    Vec3::new(0.2, 0.16, 0.11),
+                    "the splashed soil's color, lighter than soot",
+                ),
                 fraction("clean_top", 0.5, "how much cleaner the face is at its top"),
                 meters("thickness", [0.0, 0.001], 0.00004, "the dirt's thickness"),
                 seed(),
@@ -208,18 +219,39 @@ impl Module for Grime {
             ],
             base,
         )?;
+        let (score, score_tiling) = score;
         let covered = coverage(&score, args.scalar("coverage"), 0.12)?;
         let covered = scaled(grid, &covered, args.scalar("strength"))?;
-        let dirt = deposit_material(grid, args, args.color("color"), 0.92, DIRT)?;
-        let m = cx.record(ops::deposit(
+        let mut dirt = deposit_material(grid, args, args.color("color"), 0.92, DIRT)?;
+        if splash_m > 0.0 {
+            // Soil splashed up from the ground is lighter than soot.
+            let splash_color = args.color("splash_color");
+            let colors: Vec<Vec3> = (0..grid.len())
+                .map(|i| {
+                    let c = match dirt.value(ChannelId::Param(Param::BaseColor), i) {
+                        Value::Vector3(c) => c,
+                        _ => args.color("color"),
+                    };
+                    let y = grid.center(i).y - grid.origin.y;
+                    let low = (1.0 - y / splash_m).clamp(0.0, 1.0);
+                    c.lerp(splash_color, low)
+                })
+                .collect();
+            dirt.set_param(Param::BaseColor, super::color_map(grid, &colors)?)?;
+        }
+        let mut m = cx.record(ops::deposit(
             base,
             &Deposit {
                 material: dirt,
                 coverage: covered,
                 thickness: args.scalar("thickness"),
                 relief: None,
+                matting: 3.0,
             },
         )?);
+        // Splash-back and a cleaner top tie the dirt to the face's foot and
+        // top; the score's evaluation across the wrap found where it tiles.
+        m.set_tiling(m.tiling().and(score_tiling));
         Ok(Outputs::new().with("material", Output::Material(m)))
     }
 }
@@ -314,6 +346,7 @@ impl Module for Streaks {
                 coverage: covered,
                 thickness: args.scalar("thickness"),
                 relief: None,
+                matting: 4.0,
             },
         )?);
         Ok(Outputs::new().with("material", Output::Material(m)))
@@ -381,7 +414,8 @@ impl Module for Efflorescence {
                 MapBinding::Constant(Value::Id(args.integer("target"))),
             ],
             base,
-        )?;
+        )?
+        .0;
         let spread = args.scalar("spread");
         let near = if spread > 0.0 {
             GaussianBlur { sigma: spread }.apply(&on)?
@@ -424,18 +458,23 @@ impl Module for Efflorescence {
             ],
             base,
         )?;
+        let (score, score_tiling) = score;
         let covered = coverage(&score, args.scalar("coverage"), 0.08)?;
         let covered = scaled(grid, &covered, args.scalar("strength"))?;
         let salt = deposit_material(grid, args, args.color("color"), 0.97, SALT)?;
-        let m = cx.record(ops::deposit(
+        let mut m = cx.record(ops::deposit(
             base,
             &Deposit {
                 material: salt,
                 coverage: covered,
                 thickness: args.scalar("thickness"),
                 relief: None,
+                matting: 3.0,
             },
         )?);
+        // Rising damp is tied to the foot: the bloom tiles along the face,
+        // as evaluating its score across the wrap finds.
+        m.set_tiling(m.tiling().and(score_tiling));
         Ok(Outputs::new().with("material", Output::Material(m)))
     }
 }

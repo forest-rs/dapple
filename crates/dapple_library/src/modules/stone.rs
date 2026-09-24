@@ -28,7 +28,9 @@ use crate::glazed_brick::STONE;
 /// Color comes from a ramp through `dark`, the midpoint of the two, and
 /// `light`, read at the mottling. The tooling is a batting chisel's work:
 /// bands `tooling_band` wide, each of fine parallel cuts `tooling_pitch`
-/// apart at the band's own slant, `tooling` deep, fading in and out.
+/// apart at the band's own slant, `tooling` deep, fading in and out. On a
+/// wrapping grid the band width and pitch snap to the nearest sizes that
+/// divide the period, so the face tiles.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct Stone;
 
@@ -96,8 +98,34 @@ impl Module for Stone {
                 output: CellOutput::CellValue,
             })
         })?;
+        // Grain relief: rounded grains (distance to the grain's center),
+        // continuous, so their relief is band-limited like the rest.
+        let grain_f1 = realize(grid, |b, d| {
+            b.add(Op::Cellular {
+                domain: d,
+                frequency: fit(d, [cell, cell]),
+                jitter: 0.9,
+                seed: args.seed("grain"),
+                output: CellOutput::F1,
+            })
+        })?;
         let stain = realize(grid, |b, d| fbm(b, d, [7.0, 7.0], args.seed("stain"), 4))?;
         let wander = realize(grid, |b, d| fbm(b, d, [30.0, 30.0], args.seed("wander"), 2))?;
+        // On a wrapping grid, whole bands across the period and whole cuts
+        // up it, so the tooling is periodic by construction.
+        let (band_width, pitch_m) = fit_period(
+            grid,
+            args.scalar("tooling_band"),
+            args.scalar("tooling_pitch"),
+        );
+        // Band indices repeat after a period on a wrapping grid; elsewhere
+        // after far more bands than the grid holds.
+        #[expect(clippy::cast_precision_loss, reason = "grid sizes are small")]
+        let band_count = if grid.edge == dapple_field::Edge::Wrap {
+            libm::roundf(grid.texel.x * grid.width as f32 / band_width)
+        } else {
+            1.0e6
+        };
 
         let (light, dark) = (args.color("light"), args.color("dark"));
         let ramp = ColorRamp::new(&[
@@ -113,6 +141,7 @@ impl Module for Stone {
         let mottle_in = sample(&mut p, "mottle")?;
         let beds_in = sample(&mut p, "beds")?;
         let grain_in = sample(&mut p, "grain")?;
+        let grain_f1_in = sample(&mut p, "grain_relief")?;
         let stain_in = sample(&mut p, "stain")?;
         let wander_in = sample(&mut p, "wander")?;
         let at = p.input("position", PortType::Vector2, Scope::Sample)?;
@@ -120,6 +149,7 @@ impl Module for Stone {
         let stain_k = p.input("stain_amount", PortType::Scalar, Scope::Material)?;
         let depth = p.input("tooling_depth", PortType::Scalar, Scope::Material)?;
         let band_w = p.input("tooling_band", PortType::Scalar, Scope::Material)?;
+        let bands_n = p.input("tooling_bands", PortType::Scalar, Scope::Material)?;
         let pitch = p.input("tooling_pitch", PortType::Scalar, Scope::Material)?;
         let rough = p.input("roughness", PortType::Scalar, Scope::Material)?;
         let bands = p.resource("band_random", {
@@ -150,13 +180,28 @@ impl Module for Stone {
         // chisel wide, each band of fine parallel cuts at its own slant.
         let x = p.component(at, 0)?;
         let y = p.component(at, 1)?;
+        // Bands are centered on whole multiples of their width, so a band
+        // boundary never lies on the wrap, and their index repeats every
+        // `bands` (the period's count) so a band crossing the wrap is one.
         let bx = p.node(Node::Div(x, band_w))?;
-        let band = p.node(Node::Unary(UnaryOp::Floor, bx))?;
+        let bx = p.offset(bx, 0.5)?;
+        let raw = p.node(Node::Unary(UnaryOp::Floor, bx))?;
+        let per = p.node(Node::Div(raw, bands_n))?;
+        let per = p.node(Node::Unary(UnaryOp::Fract, per))?;
+        let band = p.mul(per, bands_n)?;
+        let band = p.offset(band, 0.25)?;
+        let band = p.node(Node::Unary(UnaryOp::Floor, band))?;
         let zero = p.scalar(0.0);
         let key = p.node(Node::Vector2(band, zero))?;
         let r = p.sample(bands, key)?;
         let slant = p.scale(0.25, r)?;
-        let sx = p.mul(x, slant)?;
+        // Slant within the band, from its own left edge, so bands are
+        // independent and the wrap across x is a band boundary like any
+        // other.
+        let left = p.offset(raw, -0.5)?;
+        let left = p.mul(left, band_w)?;
+        let x_in = p.sub(x, left)?;
+        let sx = p.mul(x_in, slant)?;
         let u = p.add(y, sx)?;
         let u = p.node(Node::Div(u, pitch))?;
         let phase = p.scale(3.7, r)?;
@@ -174,7 +219,8 @@ impl Module for Stone {
         let h = p.mul(groove, depth)?;
         let h = p.scale(-1.0, h)?;
         let h = p.add_scaled(h, 0.0003, mottle_in)?;
-        let h = p.add_scaled(h, 0.00012, grain_in)?;
+        let bump = p.scale(-0.00015, grain_f1_in)?;
+        let h = p.add(h, bump)?;
         let r = p.add_scaled(rough, 0.05, grain_in)?;
         let r = p.saturate(r)?;
         p.output(
@@ -192,21 +238,25 @@ impl Module for Stone {
                 MapBinding::Map(mottle),
                 MapBinding::Map(beds),
                 MapBinding::Map(grain),
+                MapBinding::Map(grain_f1),
                 MapBinding::Map(stain),
                 MapBinding::Map(wander),
                 MapBinding::Position,
                 MapBinding::Constant(Value::Scalar(args.scalar("bedding_strength"))),
                 MapBinding::Constant(Value::Scalar(args.scalar("stain"))),
                 MapBinding::Constant(Value::Scalar(args.scalar("tooling"))),
-                MapBinding::Constant(Value::Scalar(args.scalar("tooling_band"))),
-                MapBinding::Constant(Value::Scalar(args.scalar("tooling_pitch"))),
+                MapBinding::Constant(Value::Scalar(band_width)),
+                MapBinding::Constant(Value::Scalar(band_count)),
+                MapBinding::Constant(Value::Scalar(pitch_m)),
                 MapBinding::Constant(Value::Scalar(args.scalar("roughness"))),
             ],
             &Material::new(grid),
         )?;
+        let out_tiling = out.tiling;
         let [color_map, height, roughness]: [_; 3] =
-            out.try_into().map_err(|_| fail("three outputs"))?;
+            out.outputs.try_into().map_err(|_| fail("three outputs"))?;
         let mut m = Material::new(grid);
+        m.set_tiling(out_tiling);
         m.set_param(Param::BaseColor, Channel::Map(color_map))?;
         m.set_param(Param::SpecularRoughness, Channel::Map(roughness))?;
         m.set_aux(Aux::Height, Channel::Map(height))?;
@@ -216,4 +266,16 @@ impl Module for Stone {
         )?;
         Ok(Outputs::new().with("material", Output::Material(m)))
     }
+}
+
+/// `band` and `pitch` adjusted to the nearest sizes that fit a whole number
+/// of times into a wrapping grid's period along x and y.
+fn fit_period(grid: dapple_material::Grid, band: f32, pitch: f32) -> (f32, f32) {
+    if grid.edge != dapple_field::Edge::Wrap {
+        return (band, pitch);
+    }
+    #[expect(clippy::cast_precision_loss, reason = "grid sizes are small")]
+    let extent = grid.texel * glam::Vec2::new(grid.width as f32, grid.height as f32);
+    let fit = |e: f32, size: f32| e / libm::roundf(e / size).max(1.0);
+    (fit(extent.x, band), fit(extent.y, pitch))
 }

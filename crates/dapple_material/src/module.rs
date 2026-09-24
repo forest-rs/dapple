@@ -17,7 +17,9 @@
 //! explicitly ([`Bind`]), checks them against the interface (unknown names,
 //! wrong kinds and out-of-range values are errors, not clamps), fills
 //! defaults, resolves resources through the host, and checks the outputs
-//! the body returns. Modules instantiate modules the same way, so an
+//! the body returns, including that every material output keeps its
+//! tiling promise ([`crate::Tiling`]): a seam along a promised axis is an
+//! error, not a surprise in a render. Modules instantiate modules the same way, so an
 //! instance has a **path** (`wall/glaze`), and its seeds derive from that
 //! path and its `seed` parameter ([`Args::seed`]): two instances of one
 //! module differ, and one instance keeps its randomness however its
@@ -534,6 +536,16 @@ pub enum ModuleErrorKind {
     Output(&'static str),
     /// A material operation in the body failed.
     Material(MaterialError),
+    /// A material output breaks its tiling promise: a map has a seam
+    /// along an axis the material says it tiles along.
+    Seam {
+        /// The output.
+        output: &'static str,
+        /// The channel's name.
+        channel: &'static str,
+        /// What the seam measurement found.
+        seam: dapple_raster::seam::Seam,
+    },
     /// Something else in the body failed.
     Body(&'static str),
 }
@@ -594,6 +606,15 @@ impl fmt::Display for ModuleError {
             ModuleErrorKind::Resource(e) => e.fmt(f),
             ModuleErrorKind::Output(n) => write!(f, "output {n:?} missing or mistyped"),
             ModuleErrorKind::Material(e) => e.fmt(f),
+            ModuleErrorKind::Seam {
+                output,
+                channel,
+                seam,
+            } => write!(
+                f,
+                "output {output:?} promises to tile but {channel} has a seam along {:?} (ratio {})",
+                seam.axis, seam.ratio
+            ),
             ModuleErrorKind::Body(what) => f.write_str(what),
         }
     }
@@ -891,6 +912,15 @@ impl<'a> Context<'a> {
             };
             if !ok {
                 return Err(fail(ModuleErrorKind::Output(decl.name)));
+            }
+            if let Some(Output::Material(m)) = outputs.get(decl.name)
+                && let Err(e) = m.check_tiling()
+            {
+                return Err(fail(ModuleErrorKind::Seam {
+                    output: decl.name,
+                    channel: e.channel.name(),
+                    seam: e.seam,
+                }));
             }
         }
         Ok(outputs)

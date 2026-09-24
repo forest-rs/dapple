@@ -6,8 +6,9 @@
 Usage: blender --background --python render.py -- <gallery-dir>
 
 Reads `<gallery-dir>/maps/` (base_color.png, orm.png, normal.png,
-height.png and height.txt, as `cargo run --release -p glazed_brick` writes
-them) and writes into <gallery-dir>:
+clearcoat.png, coat_color.png, height.png and height.txt, as
+`cargo run --release -p glazed_brick -- [wall|sill]` writes them) and writes
+into <gallery-dir>:
 
 - `blender-front.png`: the wall face on, under sky and a low sun;
 - `blender-grazing.png`: along the wall at a grazing angle, where the
@@ -16,6 +17,10 @@ them) and writes into <gallery-dir>:
 - `blender-grazing-normal-map.png`: the grazing view on a flat plane shaded
   by `normal.png` alone, to check the packed normal map against the
   displaced geometry.
+
+The glaze is OpenPBR's coat, rendered as Principled BSDF's coat: weight
+and roughness from `clearcoat.png` (R, G), tint from `coat_color.png`, IOR
+1.5; the base under it is the glaze's pigment (or the exposed body).
 
 The wall is 2 m wide (two repeats of the 1 m tile) and 1 m tall, displaced
 by the height map in meters. The maps' rows start at domain `y = 0` at the
@@ -57,6 +62,9 @@ print("cycles device:", scene.cycles.device, [d.name for d in cycles_prefs.devic
 scene.cycles.samples = 256
 scene.cycles.use_denoising = True
 scene.view_settings.view_transform = "AgX"
+# One stop down: glazed faces under full sky otherwise clip toward white,
+# where AgX desaturates them.
+scene.view_settings.exposure = -1.0
 scene.render.resolution_x = 1600
 scene.render.resolution_y = 1000
 
@@ -79,12 +87,12 @@ if hasattr(sky, "sun_elevation"):
     if hasattr(sky, "sun_disc"):
         sky.sun_disc = False
 background = nodes["Background"]
-background.inputs["Strength"].default_value = 0.35
+background.inputs["Strength"].default_value = 0.15
 world.node_tree.links.new(sky.outputs["Color"], background.inputs["Color"])
 scene.world = world
 
 sun_data = bpy.data.lights.new("sun", type="SUN")
-sun_data.energy = 4.0
+sun_data.energy = 5.0
 sun_data.angle = math.radians(1.0)
 sun = bpy.data.objects.new("sun", sun_data)
 # A sun lamp shines along its local -Z.
@@ -116,6 +124,8 @@ def image(name, colorspace):
 base_color = image("base_color.png", "sRGB")
 orm = image("orm.png", "Non-Color")
 normal = image("normal.png", "Non-Color")
+clearcoat = image("clearcoat.png", "Non-Color")
+coat_color = image("coat_color.png", "sRGB")
 height = image("height.png", "Non-Color")
 
 
@@ -141,6 +151,12 @@ def material(name, displaced):
     links.new(texture(orm).outputs["Color"], split.inputs["Color"])
     links.new(split.outputs["Green"], bsdf.inputs["Roughness"])
     links.new(split.outputs["Blue"], bsdf.inputs["Metallic"])
+    coat = n.new("ShaderNodeSeparateColor")
+    links.new(texture(clearcoat).outputs["Color"], coat.inputs["Color"])
+    links.new(coat.outputs["Red"], bsdf.inputs["Coat Weight"])
+    links.new(coat.outputs["Green"], bsdf.inputs["Coat Roughness"])
+    bsdf.inputs["Coat IOR"].default_value = 1.5
+    links.new(texture(coat_color).outputs["Color"], bsdf.inputs["Coat Tint"])
     output = n["Material Output"]
     if displaced:
         # Height in meters: lo + h · (hi − lo) = (h − midlevel) · scale.

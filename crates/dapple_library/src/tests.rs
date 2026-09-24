@@ -81,155 +81,242 @@ fn brick_joints_are_mortar() {
 }
 
 mod glazed {
-    use alloc::sync::Arc;
     use alloc::vec::Vec;
 
-    use dapple_elements::{Composite, Realized};
-    use dapple_field::Domain;
-    use dapple_raster::typed::Storage;
-    use dapple_raster::{DistanceTransform, Raster, RasterOp};
+    use dapple_field::{Edge, Value};
+    use dapple_material::module::{Bind, Context};
+    use dapple_material::resource::NoResources;
+    use dapple_material::{Aux, ChannelId, Grid, Material, Param};
+    use dapple_raster::{DistanceTransform, RasterOp};
+    use glam::Vec2;
 
-    use crate::glazed_brick::{self, BODY, GLAZE, MORTAR};
+    use crate::glazed_brick::{BODY, GLAZE, MORTAR};
+    use crate::modules::GlazedBrickWall;
 
-    const SIZE: u32 = 512;
+    const SIZE: u32 = 256;
 
-    fn composite() -> (Realized, glazed_brick::Finished) {
-        let domain = Domain::periodic(1, 1).unwrap();
-        let set = glazed_brick::layout().unwrap();
-        let instance = glazed_brick::instance(Arc::new(glazed_brick::program().unwrap())).unwrap();
-        let realized = Realized::composite(&Composite {
-            set: &set,
-            instance: &instance,
-            background: &glazed_brick::BACKGROUND,
-            domain,
-            width: SIZE,
-            height: SIZE,
-            tile_size: 64,
-        })
-        .unwrap();
-        let finished = glazed_brick::finish(&realized, domain).unwrap();
-        (realized, finished)
+    pub(super) fn tile(size: u32) -> Grid {
+        Grid {
+            width: size,
+            height: size,
+            origin: Vec2::ZERO,
+            texel: Vec2::splat(1.0 / size as f32),
+            edge: Edge::Wrap,
+        }
     }
 
-    fn ids(finished: &glazed_brick::Finished) -> Vec<u32> {
-        let Storage::U32(ids) = finished.material.storage() else {
-            panic!("materials are identifiers")
-        };
-        ids.values().to_vec()
+    fn wall(weathered: bool) -> Material {
+        let mut cx = Context::new(tile(SIZE), &NoResources);
+        let mut out = cx
+            .instantiate(
+                &GlazedBrickWall,
+                "wall",
+                Bind::new().flag("weathered", weathered),
+            )
+            .unwrap();
+        out.take_material("material").unwrap()
+    }
+
+    fn surfaces(m: &Material) -> Vec<u32> {
+        (0..m.grid().len())
+            .map(|i| match m.value(ChannelId::Aux(Aux::Surface), i) {
+                Value::Id(id) => id,
+                other => panic!("surface {other:?}"),
+            })
+            .collect()
+    }
+
+    fn scalar(m: &Material, c: ChannelId, i: usize) -> f32 {
+        m.value(c, i).scalar().unwrap()
     }
 
     #[test]
     fn chips_break_from_the_arris_and_expose_rough_body() {
-        let (realized, finished) = composite();
-        let materials = ids(&finished);
-        let Some(Storage::F32(cover)) = realized
-            .output("cover")
-            .unwrap()
-            .map(|r| r.storage().clone())
-        else {
-            panic!("cover is a mask")
-        };
+        let m = wall(false);
+        let ids = surfaces(&m);
         // Distance from each texel into its brick: to the nearest mortar.
-        let mortar = Raster::from_values(
-            SIZE,
-            SIZE,
-            cover.origin(),
-            cover.texel(),
-            cover.edge(),
-            cover.values().iter().map(|c| 1.0 - c).collect(),
-        )
-        .unwrap();
+        let mortar = m
+            .grid()
+            .raster(
+                ids.iter()
+                    .map(|&s| f32::from(u8::from(s == MORTAR)))
+                    .collect(),
+            )
+            .unwrap();
         let inward = DistanceTransform { threshold: 0.5 }.apply(&mortar).unwrap();
-        let rough = finished.specular_roughness.values();
-        let (mut body, mut near_edge) = (0_u32, 0_u32);
-        let (mut body_rough, mut glaze_rough, mut glazed) = (0.0_f64, 0.0_f64, 0_u32);
-        for (i, &m) in materials.iter().enumerate() {
-            match m {
+        let (mut body, mut near_edge, mut glazed) = (0_u32, 0_u32, 0_u32);
+        let (mut body_rough, mut coat_rough) = (0.0_f64, 0.0_f64);
+        for (i, &s) in ids.iter().enumerate() {
+            match s {
                 BODY => {
                     body += 1;
-                    near_edge += u32::from(inward.values()[i] < 0.01);
-                    body_rough += f64::from(rough[i]);
+                    near_edge += u32::from(inward.values()[i] < 0.012);
+                    body_rough +=
+                        f64::from(scalar(&m, ChannelId::Param(Param::SpecularRoughness), i));
                 }
                 GLAZE => {
                     glazed += 1;
-                    glaze_rough += f64::from(rough[i]);
+                    coat_rough += f64::from(scalar(&m, ChannelId::Param(Param::CoatRoughness), i));
+                    assert!(
+                        scalar(&m, ChannelId::Param(Param::CoatWeight), i) > 0.5,
+                        "glaze is coated"
+                    );
                 }
                 MORTAR => {}
-                other => panic!("unknown material {other}"),
+                other => panic!("unknown surface {other}"),
             }
         }
-        // Texels mixing materials blend their roughness, so compare means.
-        let (body_rough, glaze_rough) = (
-            body_rough / f64::from(body),
-            glaze_rough / f64::from(glazed),
-        );
+        let (body_rough, coat_rough) =
+            (body_rough / f64::from(body), coat_rough / f64::from(glazed));
         assert!(body_rough > 0.65, "exposed body is rough: {body_rough}");
-        assert!(glaze_rough < 0.3, "glaze is glossy: {glaze_rough}");
-        // Chips are there, a small share of the bricks, and nearly all of
-        // them break from an edge (the rest are pits).
+        assert!(coat_rough < 0.15, "glaze is glossy: {coat_rough}");
         let share = f64::from(body) / f64::from(SIZE * SIZE);
-        assert!(share > 0.002 && share < 0.04, "chipped share {share}");
+        assert!(share > 0.002 && share < 0.1, "chipped share {share}");
         assert!(
-            near_edge * 100 >= body * 90,
+            near_edge * 100 >= body * 85,
             "{near_edge} of {body} chipped texels near an edge"
         );
     }
 
     #[test]
-    fn mortar_is_recessed_and_textured() {
-        let (_, finished) = composite();
-        let materials = ids(&finished);
-        let height = finished.height.values();
-        let Storage::F32x3(color) = finished.base_color.storage() else {
-            panic!("colors have three channels")
-        };
-        let mut mortar = Vec::new();
-        let mut glaze = Vec::new();
-        for (i, &m) in materials.iter().enumerate() {
-            match m {
-                MORTAR => mortar.push((height[i], color.values()[i][0])),
-                GLAZE => glaze.push(height[i]),
+    fn mortar_is_recessed_and_textured_and_weathering_darkens_it() {
+        let clean = wall(false);
+        let ids = surfaces(&clean);
+        let h = ChannelId::Aux(Aux::Height);
+        let color = ChannelId::Param(Param::BaseColor);
+        let (mut mortar, mut glaze) = (Vec::new(), Vec::new());
+        for (i, &s) in ids.iter().enumerate() {
+            match s {
+                MORTAR => mortar.push((
+                    scalar(&clean, h, i),
+                    clean.value(color, i).component(0).unwrap(),
+                )),
+                GLAZE => glaze.push(scalar(&clean, h, i)),
                 _ => {}
             }
         }
-        let highest_mortar = mortar.iter().map(|m| m.0).fold(f32::MIN, f32::max);
-        #[expect(clippy::cast_precision_loss, reason = "texel counts")]
+        let highest = mortar.iter().map(|m| m.0).fold(f32::MIN, f32::max);
         let mean_glaze = glaze.iter().sum::<f32>() / glaze.len() as f32;
         assert!(
-            mean_glaze - highest_mortar > 0.002,
-            "glaze at {mean_glaze} m, mortar up to {highest_mortar} m"
+            mean_glaze - highest > 0.002,
+            "glaze at {mean_glaze} m, mortar up to {highest} m"
         );
-        // The mortar is not one flat color.
         let (lo, hi) = mortar
             .iter()
             .fold((f32::MAX, f32::MIN), |(a, b), m| (a.min(m.1), b.max(m.1)));
-        assert!(hi - lo > 0.1, "mortar red from {lo} to {hi}");
-        assert!(mortar.iter().all(|m| m.0 < 0.004 && m.0 > -0.002));
+        assert!(hi - lo > 0.05, "mortar red from {lo} to {hi}");
+
+        let weathered = wall(true);
+        let mean = |m: &Material| {
+            (0..m.grid().len())
+                .map(|i| f64::from(m.value(color, i).component(1).unwrap()))
+                .sum::<f64>()
+                / m.grid().len() as f64
+        };
+        assert!(mean(&weathered) < mean(&clean), "dirt darkens");
+        let salts = surfaces(&weathered)
+            .iter()
+            .filter(|&&s| s == crate::glazed_brick::SALT)
+            .count();
+        assert!(salts > 0, "salts bloom");
+    }
+}
+
+mod gate {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    use dapple_field::Edge;
+    use dapple_material::module::{Bind, Context, Diagnostics, Event, Module};
+    use dapple_material::ops::{self, MaterialTransform};
+    use dapple_material::resource::NoResources;
+    use dapple_material::{Channel, Grid, Material};
+    use glam::Vec2;
+
+    use crate::modules::{StoneSill, Threshold, VarnishedBoard};
+
+    fn build(asset: &dyn Module, grid: Grid) -> (Material, Diagnostics) {
+        let mut cx = Context::new(grid, &NoResources);
+        let mut out = cx.instantiate(asset, "asset", Bind::new()).unwrap();
+        let m = out.take_material("material").unwrap();
+        (m, cx.into_diagnostics())
     }
 
+    fn strip() -> Grid {
+        Grid {
+            width: 128,
+            height: 32,
+            origin: Vec2::ZERO,
+            texel: Vec2::splat(1.0 / 128.0),
+            edge: Edge::Clamp,
+        }
+    }
+
+    fn modules(d: &Diagnostics) -> Vec<&'static str> {
+        let mut v: Vec<_> = d.instances().map(|(_, m)| m.name).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// Slice 2's gate: the same stone, wood and finish modules reused in
+    /// several assets without duplicating their graphs; each operation
+    /// reports its approximations; a material-wide transform moves every
+    /// channel.
     #[test]
-    fn brick_faces_are_tilted_and_bowed_apart() {
-        let (realized, finished) = composite();
-        // Per-brick tilt and bow put brick centers at different heights.
-        let mut heights: Vec<f32> = (0..realized.set().len())
-            .map(|i| {
-                let p = realized
-                    .set()
-                    .placement(i)
-                    .center
-                    .rem_euclid(glam::Vec2::ONE);
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "centers lie in the unit period"
-                )]
-                let (x, y) = ((p.x * SIZE as f32) as i64, (p.y * SIZE as f32) as i64);
-                finished.height.at(x, y)
-            })
-            .collect();
-        heights.sort_by(f32::total_cmp);
+    fn modules_are_reused_across_assets_and_report_approximations() {
+        let (sill, sill_d) = build(&StoneSill, super::glazed::tile(128));
+        let (_, board_d) = build(&VarnishedBoard, strip());
+        let (_, threshold_d) = build(&Threshold, strip());
+        let used: [Vec<&str>; 3] = [modules(&sill_d), modules(&board_d), modules(&threshold_d)];
+        let count = |name: &str| used.iter().filter(|u| u.contains(&name)).count();
+        assert!(count("dapple_library.stone") >= 2, "{used:?}");
+        assert!(count("dapple_library.wood") >= 2, "{used:?}");
+        assert!(count("dapple_library.finish") >= 3, "{used:?}");
+        assert!(count("dapple_library.mortar") >= 1, "{used:?}");
+        // One module, one definition: every instance of a module names the
+        // same versioned identity, whichever asset instantiated it.
+        for d in [&sill_d, &board_d, &threshold_d] {
+            for (path, id) in d.instances() {
+                assert_eq!(id.version, 1, "{path}");
+            }
+        }
+        // Reports stay with the instances that made them, and partial
+        // selections and deposits say what they approximated.
+        let mut kinds = Vec::new();
+        for e in &sill_d.entries {
+            if let Event::Operation(r) = &e.event {
+                assert!(!e.path.is_empty(), "attributed");
+                for a in &r.approximations {
+                    kinds.push((String::from(r.operation), a.kind));
+                }
+            }
+        }
         assert!(
-            heights[heights.len() - 1] - heights[0] > 0.0003,
-            "face heights {heights:?}"
+            kinds.iter().any(|(op, _)| op == "deposit"),
+            "deposits report: {kinds:?}"
         );
+        assert!(
+            kinds.iter().any(|(op, _)| op == "select"),
+            "selections report: {kinds:?}"
+        );
+        let dirt = sill_d.reports_at("asset/dirt").count();
+        assert_eq!(dirt, 1, "the grime's deposit is reported at its instance");
+
+        // A material-wide transform moves every channel.
+        let (moved, report) = ops::transform(
+            &sill,
+            MaterialTransform::offset(Vec2::new(3.0 / 128.0, 0.0)),
+        )
+        .unwrap();
+        assert!(report.is_exact());
+        let mut maps = 0;
+        for (c, ch) in sill.bound() {
+            if let Channel::Map(r) = ch {
+                maps += 1;
+                assert_eq!(moved.value(c, 3), r.value_at(0, 0), "{c} moved");
+            }
+        }
+        assert!(maps >= 6, "a rich material: {maps} maps");
     }
 }

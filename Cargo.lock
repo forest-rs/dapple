@@ -270,8 +270,10 @@ version = "0.0.1"
 dependencies = [
  "dapple_elements",
  "dapple_field",
+ "dapple_material",
  "dapple_raster",
  "glam",
+ "libm",
 ]
 
 [[package]]
@@ -537,11 +539,10 @@ dependencies = [
 name = "glazed_brick"
 version = "0.0.0"
 dependencies = [
- "dapple_elements",
  "dapple_encode",
  "dapple_field",
  "dapple_library",
- "dapple_raster",
+ "dapple_material",
  "glam",
  "png",
 ]

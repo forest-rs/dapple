@@ -1,112 +1,128 @@
 // Copyright 2026 the Dapple Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Writes review images of `dapple_library::glazed_brick`: one keyed layout
-//! driving color, height, roughness, surface material and owner labels.
+//! Builds glazed-brick assets from `dapple_library`'s material modules and
+//! writes their maps and review images.
 //!
-//! Run with `cargo run --release -p glazed_brick -- [output-dir]`; the
-//! default is the repository's git-ignored `.local/gallery/glazed-brick`.
-//! Images show one 1 m period with domain `+y` up. `lit.png` is a simple
-//! shaded preview (a raking light from the upper left, a Blinn–Phong
-//! highlight on the glaze), `close-up-*.png` crops one corner at full
-//! resolution, and `moved-*.png` shows one brick moved by an edit and
-//! updated incrementally.
+//! Run with `cargo run --release -p glazed_brick -- [asset] [output-dir]`,
+//! where `asset` is `wall` (the default: a weathered Victorian glazed brick
+//! wall, cream over a green band and a brown dado) or `sill` (a stone sill
+//! bedded over green and oxblood glazed brick, streaked below). The default
+//! output is the repository's git-ignored `.local/gallery/glazed-brick` or
+//! `.local/gallery/stone-sill`. Images show one 1 m period with domain `+y`
+//! up.
 //!
-//! `maps/` holds the material as textures for a renderer, packed by
-//! `dapple_encode` for the glTF profile: `base_color.png` (sRGB),
-//! `normal.png` (tangent-space, `+Y` toward the image top), `orm.png`
-//! (occlusion, roughness, metalness), and `height.png`, 16-bit height over
-//! the range `height.txt` gives in meters. Rows run from domain `y = 0` at
-//! the image top, as glTF reads textures. `tools/render.py` renders them in
-//! Blender as a displaced wall.
+//! `maps/` holds the material packed by `dapple_encode` for the glTF
+//! profile: `base_color.png` (sRGB), `normal.png` (tangent-space, `+Y`
+//! toward the image top), `orm.png` (occlusion, roughness, metalness),
+//! `clearcoat.png` (R coat weight, G coat roughness), and, outside glTF,
+//! `coat_color.png` (sRGB coat tint, which glTF cannot carry) and
+//! `height.png`, 16-bit height over the range `height.txt` gives in meters.
+//! Rows run from domain `y = 0` at the image top, as glTF reads textures.
+//! `tools/render.py` renders them in Blender as a displaced wall.
+//!
+//! `diagnostics.txt` lists every module instance by path and every
+//! material operation's approximation report, attributed to the instance
+//! that made it.
 
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use dapple_elements::{Composite, ElementKey, Placement, Realized};
-use dapple_field::{Domain, Value};
-use dapple_library::glazed_brick;
-use dapple_raster::typed::Storage;
-use dapple_raster::{HeightToNormal, Raster, RasterOp};
+use dapple_encode::{
+    Edge, Filter, Image, PackSettings, PixelFormat, Profile, data_mips, encode_data, pack,
+};
+use dapple_field::Value;
+use dapple_library::glazed_brick::{BODY, DIRT, GLAZE, MORTAR, SALT, STONE};
+use dapple_library::modules::{GlazedBrickWall, StoneSill};
+use dapple_material::module::{Bind, Context, Module};
+use dapple_material::resource::NoResources;
+use dapple_material::{Aux, ChannelId, Grid, Material, Param, lower};
 use glam::{Vec2, Vec3};
 
 const SIZE: u32 = 2048;
-const CROP: u32 = 512;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// An RGB image, rows top to bottom.
-struct Rgb {
-    width: u32,
-    height: u32,
-    pixels: Vec<[f32; 3]>,
+fn main() -> Result<()> {
+    let mut args = std::env::args().skip(1);
+    let asset = args.next().unwrap_or_else(|| String::from("wall"));
+    let (module, gallery): (&dyn Module, &str) = match asset.as_str() {
+        "wall" => (&GlazedBrickWall, "glazed-brick"),
+        "sill" => (&StoneSill, "stone-sill"),
+        other => return Err(format!("unknown asset {other:?}: wall or sill").into()),
+    };
+    let out = args.next().map_or_else(
+        || repository().join(".local/gallery").join(gallery),
+        PathBuf::from,
+    );
+    std::fs::create_dir_all(&out)?;
+
+    #[expect(clippy::cast_precision_loss, reason = "a small grid size")]
+    let texel = Vec2::splat(1.0 / SIZE as f32);
+    let grid = Grid {
+        width: SIZE,
+        height: SIZE,
+        origin: Vec2::ZERO,
+        texel,
+        edge: Edge::Wrap,
+    };
+    let start = std::time::Instant::now();
+    let mut cx = Context::new(grid, &NoResources);
+    let mut outputs = cx.instantiate(module, &asset, Bind::new())?;
+    let material = outputs
+        .take_material("material")
+        .ok_or("the asset returned no material")?;
+    println!("built {asset} at {SIZE}² in {:.2?}", start.elapsed());
+    let diagnostics = cx.into_diagnostics();
+    std::fs::write(out.join("diagnostics.txt"), diagnostics.to_string())?;
+    print!("{diagnostics}");
+
+    write_previews(&out, &material)?;
+    write_maps(&out.join("maps"), &material)?;
+    Ok(())
 }
 
-impl Rgb {
-    /// From a raster-ordered (bottom row first) function of texels.
-    fn from_texels(width: u32, height: u32, f: impl Fn(u32, u32) -> [f32; 3]) -> Self {
-        let mut pixels = Vec::with_capacity((width * height) as usize);
-        for row in 0..height {
-            let y = height - 1 - row;
-            for x in 0..width {
-                pixels.push(f(x, y));
-            }
-        }
-        Self {
-            width,
-            height,
-            pixels,
-        }
-    }
-
-    fn crop(&self, x0: u32, row0: u32, size: u32) -> Self {
-        let mut pixels = Vec::with_capacity((size * size) as usize);
-        for row in row0..row0 + size {
-            for x in x0..x0 + size {
-                pixels.push(self.pixels[(row * self.width + x) as usize]);
-            }
-        }
-        Self {
-            width: size,
-            height: size,
-            pixels,
-        }
-    }
-
-    /// Writes linear values sRGB-encoded, or raw when `linear` is false.
-    fn write(&self, dir: &Path, name: &str, srgb: bool) -> Result<()> {
-        let encode = |c: f32| {
-            let c = c.clamp(0.0, 1.0);
-            let s = if !srgb {
-                c
-            } else if c <= 0.003_130_8 {
-                12.92 * c
-            } else {
-                1.055 * c.powf(1.0 / 2.4) - 0.055
-            };
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "s is in [0, 1]"
-            )]
-            let byte = (s * 255.0 + 0.5) as u8;
-            byte
+/// Writes linear RGB rows (top row first) as an 8-bit PNG, sRGB-encoded
+/// when `srgb`.
+fn write_png(path: &Path, width: u32, height: u32, pixels: &[[f32; 3]], srgb: bool) -> Result<()> {
+    let encode = |c: f32| {
+        let c = c.clamp(0.0, 1.0);
+        let s = if !srgb {
+            c
+        } else if c <= 0.003_130_8 {
+            12.92 * c
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
         };
-        let bytes: Vec<u8> = self.pixels.iter().flatten().map(|&c| encode(c)).collect();
-        let path = dir.join(format!("{name}.png"));
-        let mut encoder = png::Encoder::new(
-            BufWriter::new(File::create(&path)?),
-            self.width,
-            self.height,
-        );
-        encoder.set_color(png::ColorType::Rgb);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.write_header()?.write_image_data(&bytes)?;
-        println!("{}", path.display());
-        Ok(())
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "s is in [0, 1]"
+        )]
+        let byte = (s * 255.0 + 0.5) as u8;
+        byte
+    };
+    let bytes: Vec<u8> = pixels.iter().flatten().map(|&c| encode(c)).collect();
+    let mut encoder = png::Encoder::new(BufWriter::new(File::create(path)?), width, height);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.write_header()?.write_image_data(&bytes)?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+/// Texel values in image order: domain `+y` up, so the last row first.
+fn image_rows(m: &Material, f: impl Fn(usize) -> [f32; 3]) -> Vec<[f32; 3]> {
+    let (w, h) = (m.grid().width as usize, m.grid().height as usize);
+    let mut rows = Vec::with_capacity(w * h);
+    for row in 0..h {
+        let y = h - 1 - row;
+        for x in 0..w {
+            rows.push(f(y * w + x));
+        }
     }
+    rows
 }
 
 fn vec3(v: Value) -> Vec3 {
@@ -116,201 +132,85 @@ fn vec3(v: Value) -> Vec3 {
     }
 }
 
-/// A stable color for a key, for label previews.
-fn key_color(key: ElementKey) -> [f32; 3] {
-    let w = key.word();
-    let c = |shift: u32| 0.25 + 0.6 * f32::from(((w >> shift) & 0xff) as u8) / 255.0;
-    [c(0), c(8), c(16)]
+fn scalar(m: &Material, p: Param, i: usize) -> f32 {
+    m.value(ChannelId::Param(p), i).component(0).unwrap_or(0.0)
 }
 
-fn main() -> Result<()> {
-    let out = std::env::args_os().nth(1).map_or_else(
-        || repository().join(".local/gallery/glazed-brick"),
-        PathBuf::from,
-    );
-    std::fs::create_dir_all(&out)?;
-
-    let domain = Domain::periodic(1, 1).expect("a unit period");
-    let set = glazed_brick::layout()?;
-    let instance = glazed_brick::instance(Arc::new(glazed_brick::program()?))?;
-    let composite = |set| Composite {
-        set,
-        instance: &instance,
-        background: &glazed_brick::BACKGROUND,
-        domain,
-        width: SIZE,
-        height: SIZE,
-        tile_size: 64,
-    };
-    let start = std::time::Instant::now();
-    let mut realized = Realized::composite(&composite(&set))?;
-    println!(
-        "composited {} bricks at {SIZE}² in {:.2?}",
-        set.len(),
-        start.elapsed()
-    );
-    let start = std::time::Instant::now();
-    let finished = glazed_brick::finish(&realized, domain)?;
-    println!("finished the mortar in {:.2?}", start.elapsed());
-    write_all(&out, "", &realized, &finished)?;
-    write_maps(&out.join("maps"), &finished)?;
-
-    // Move one brick up and to the right, and update incrementally.
-    let key = set.keys()[set.len() / 2];
-    let i = set.index_of(key).expect("present");
-    let mut moved = set.clone();
-    let p = set.placement(i);
-    moved.set_placement(
-        key,
-        Placement {
-            center: p.center + Vec2::new(0.03, 0.012),
-            rotation: 0.08,
-        },
-    )?;
-    let start = std::time::Instant::now();
-    let report = realized.update(&composite(&moved))?;
-    println!(
-        "moved {key:?}: {} of {} tiles, {} texels, in {:.2?}",
-        report.tiles.len(),
-        (SIZE / 64) * (SIZE / 64),
-        report.texels,
-        start.elapsed()
-    );
-    let clean = Realized::composite(&composite(&moved))?;
-    assert_eq!(
-        realized.digest(),
-        clean.digest(),
-        "incremental equals clean"
-    );
-    write_all(
-        &out,
-        "moved-",
-        &realized,
-        &glazed_brick::finish(&realized, domain)?,
-    )?;
-    Ok(())
-}
-
-fn write_all(
-    out: &Path,
-    prefix: &str,
-    realized: &Realized,
-    finished: &glazed_brick::Finished,
-) -> Result<()> {
-    let color = &finished.base_color;
-    let material = &finished.material;
-    let h = &finished.height;
-    let at = |r: &dapple_raster::typed::TypedRaster, x: u32, y: u32| {
-        r.value_at(i64::from(x), i64::from(y))
-    };
-    let scalar = |r: &Raster, x: u32, y: u32| r.at(i64::from(x), i64::from(y));
-
-    let base = Rgb::from_texels(SIZE, SIZE, |x, y| vec3(at(color, x, y)).to_array());
-    base.write(out, &format!("{prefix}base-color"), true)?;
-
-    let (lo, hi) = h
+fn write_previews(out: &Path, m: &Material) -> Result<()> {
+    let (w, h) = (m.grid().width, m.grid().height);
+    let color = image_rows(m, |i| {
+        vec3(m.value(ChannelId::Param(Param::BaseColor), i)).to_array()
+    });
+    write_png(&out.join("base-color.png"), w, h, &color, true)?;
+    let rough = image_rows(m, |i| [scalar(m, Param::SpecularRoughness, i); 3]);
+    write_png(&out.join("roughness.png"), w, h, &rough, false)?;
+    let coat = image_rows(m, |i| {
+        (vec3(m.value(ChannelId::Param(Param::CoatColor), i)) * scalar(m, Param::CoatWeight, i))
+            .to_array()
+    });
+    write_png(&out.join("coat.png"), w, h, &coat, true)?;
+    let height = m.height()?;
+    let (lo, hi) = height
         .values()
         .iter()
         .fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
-    Rgb::from_texels(SIZE, SIZE, |x, y| [(scalar(h, x, y) - lo) / (hi - lo); 3]).write(
-        out,
-        &format!("{prefix}height"),
-        false,
-    )?;
-    Rgb::from_texels(SIZE, SIZE, |x, y| {
-        [scalar(&finished.specular_roughness, x, y); 3]
-    })
-    .write(out, &format!("{prefix}roughness"), false)?;
-    Rgb::from_texels(SIZE, SIZE, |x, y| match at(material, x, y) {
-        Value::Id(glazed_brick::GLAZE) => [0.1, 0.55, 0.6],
-        Value::Id(glazed_brick::BODY) => [0.9, 0.5, 0.2],
-        _ => [0.35, 0.35, 0.35],
-    })
-    .write(out, &format!("{prefix}material"), false)?;
-    Rgb::from_texels(SIZE, SIZE, |x, y| {
-        realized.owner(x, y).map_or([0.1; 3], key_color)
-    })
-    .write(out, &format!("{prefix}owners"), false)?;
-
-    // Normals from the height (meters), and a shaded preview.
-    let normals: Raster<[f32; 3]> = HeightToNormal { scale: 1.0 }.apply(h)?;
-    Rgb::from_texels(SIZE, SIZE, |x, y| {
-        normals
-            .at(i64::from(x), i64::from(y))
-            .map(|c| c * 0.5 + 0.5)
-    })
-    .write(out, &format!("{prefix}normal"), false)?;
-    let light = Vec3::new(-0.55, 0.6, 0.58).normalize();
-    let view = Vec3::Z;
-    let half = (light + view).normalize();
-    let lit = Rgb::from_texels(SIZE, SIZE, |x, y| {
-        let n = Vec3::from_array(normals.at(i64::from(x), i64::from(y)));
-        let albedo = vec3(at(color, x, y));
-        let r = scalar(&finished.specular_roughness, x, y);
-        let diffuse = n.dot(light).max(0.0);
-        let alpha = (r * r).max(0.02);
-        let shininess = 2.0 / (alpha * alpha) - 2.0;
-        let spec = n.dot(half).max(0.0).powf(shininess) * (1.0 - r) * 0.6;
-        (albedo * (0.25 + 0.9 * diffuse) + Vec3::splat(spec)).to_array()
+    let heights = image_rows(m, |i| [(height.values()[i] - lo) / (hi - lo); 3]);
+    write_png(&out.join("height.png"), w, h, &heights, false)?;
+    let surfaces = image_rows(m, |i| match m.value(ChannelId::Aux(Aux::Surface), i) {
+        Value::Id(GLAZE) => [0.1, 0.55, 0.6],
+        Value::Id(BODY) => [0.9, 0.5, 0.2],
+        Value::Id(MORTAR) => [0.35, 0.35, 0.35],
+        Value::Id(DIRT) => [0.1, 0.08, 0.05],
+        Value::Id(SALT) => [0.95, 0.95, 0.9],
+        Value::Id(STONE) => [0.7, 0.6, 0.3],
+        _ => [1.0, 0.0, 1.0],
     });
-    lit.write(out, &format!("{prefix}lit"), true)?;
-    let row0 = SIZE / 2 - CROP / 2;
-    lit.crop(SIZE / 2 - CROP / 2, row0, CROP)
-        .write(out, &format!("{prefix}close-up-lit"), true)?;
-    base.crop(SIZE / 2 - CROP / 2, row0, CROP).write(
-        out,
-        &format!("{prefix}close-up-base-color"),
-        true,
-    )?;
+    write_png(&out.join("surface.png"), w, h, &surfaces, false)?;
     Ok(())
 }
 
 /// Packs the material for the glTF profile and writes it as PNG files.
-fn write_maps(dir: &Path, finished: &glazed_brick::Finished) -> Result<()> {
-    use dapple_encode::{
-        Edge, Filter, Image, MaterialMaps, PackSettings, PixelFormat, Profile, data_mips,
-        encode_data, pack,
-    };
+fn write_maps(dir: &Path, m: &Material) -> Result<()> {
     std::fs::create_dir_all(dir)?;
-    let Storage::F32x3(color) = finished.base_color.storage() else {
-        unreachable!("colors have three channels")
-    };
-    let h = &finished.height;
-    let normals: Raster<[f32; 3]> = HeightToNormal { scale: 1.0 }.apply(h)?;
-    let maps = MaterialMaps {
-        base_color: Some(Image::new(
-            SIZE,
-            SIZE,
-            3,
-            Edge::Wrap,
-            color.values().iter().flatten().copied().collect(),
-        )?),
-        normal: Some(Image::new(
-            SIZE,
-            SIZE,
-            3,
-            Edge::Wrap,
-            normals.values().iter().flatten().copied().collect(),
-        )?),
-        specular_roughness: Some(Image::new(
-            SIZE,
-            SIZE,
-            1,
-            Edge::Wrap,
-            finished.specular_roughness.values().to_vec(),
-        )?),
-        ..MaterialMaps::default()
-    };
+    let (maps, lowering) = lower::maps(m)?;
+    println!(
+        "lowered: normal from height {}, dropped {:?}",
+        lowering.normal_from_height, lowering.dropped
+    );
     let bundle = pack(&maps, Profile::Gltf, &PackSettings::default())?;
+    println!("packing could not carry {:?}", bundle.report.unsupported);
     let mut textures: Vec<_> = bundle.textures.iter().collect();
-    let (lo, hi) = h
+
+    let grid = m.grid();
+    let height = m.height()?;
+    let (lo, hi) = height
         .values()
         .iter()
         .fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
-    let unit: Vec<f32> = h.values().iter().map(|&v| (v - lo) / (hi - lo)).collect();
-    let chain = data_mips(&Image::new(SIZE, SIZE, 1, Edge::Wrap, unit)?, Filter::Box);
+    let unit: Vec<f32> = height
+        .values()
+        .iter()
+        .map(|&v| (v - lo) / (hi - lo))
+        .collect();
+    let chain = data_mips(
+        &Image::new(grid.width, grid.height, 1, Edge::Wrap, unit)?,
+        Filter::Box,
+    );
     let height_texture = encode_data("height", &chain, PixelFormat::R16Unorm)?;
     textures.push(&height_texture);
+    // The coat's tint, which glTF cannot carry, for renderers that can.
+    let tint: Vec<f32> = (0..grid.len())
+        .flat_map(|i| {
+            let c = vec3(m.value(ChannelId::Param(Param::CoatColor), i));
+            [c.x, c.y, c.z, 1.0]
+        })
+        .collect();
+    let tint_chain = data_mips(
+        &Image::new(grid.width, grid.height, 4, Edge::Wrap, tint)?,
+        Filter::Box,
+    );
+    let tint_texture = encode_data("coat_color", &tint_chain, PixelFormat::Rgba8Srgb)?;
+    textures.push(&tint_texture);
     for texture in textures {
         let path = dir.join(format!("{}.png", texture.name));
         std::fs::write(&path, dapple_encode::png::write(texture)?)?;

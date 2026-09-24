@@ -5,15 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Writes review images of dapple_library's keyed glazed brickwork"
+description = "Builds glazed-brick assets from dapple_library's material modules and writes their maps"
 publish = false
 
 [dependencies]
-dapple_elements.workspace = true
 dapple_encode = { features = ["std"], workspace = true }
 dapple_field.workspace = true
 dapple_library.workspace = true
-dapple_raster.workspace = true
+dapple_material.workspace = true
 glam.workspace = true
 png.workspace = true
 

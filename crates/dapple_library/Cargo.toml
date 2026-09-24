@@ -13,8 +13,10 @@ categories = ["graphics", "no-std"]
 [dependencies]
 dapple_elements.workspace = true
 dapple_field.workspace = true
+dapple_material.workspace = true
 dapple_raster.workspace = true
 glam.workspace = true
+libm.workspace = true
 
 [lints]
 workspace = true

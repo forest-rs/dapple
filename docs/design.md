@@ -202,9 +202,10 @@ as wrong-looking output:
 - `Vector2`, `Vector3`.
 - `Normal` in a declared frame: tangent space with a stated handedness and
   green-channel convention (+Y, OpenGL-style, matching glTF; DirectX-style
-  appears only as an output-profile flip). Normals blend with a normal-aware
-  operator (reoriented normal mapping or UDN, chosen explicitly), never by
-  lerping components.
+  appears only as an output-profile flip). Normals never blend by lerping
+  components: detail composes by reoriented normal mapping in
+  `dapple_material`'s detail application, and selections that must mix
+  them average, renormalize and report it.
 - `Direction` for tangent/anisotropy directions: a 2D angle field in tangent
   space. It needs a π-periodic, sign-free representation when averaged or
   blurred; this matters for mips.
@@ -548,7 +549,7 @@ needs evaluation contexts per splat and is left for later.
   evaluated in linear space);
 - blend modes defined on linear values, including height blend (max-height
   selection with a transition width);
-- normal blending with RNM or UDN.
+- normal detail by RNM, in material detail application (slice 2).
 
 **Rasters:**
 - Gaussian blur, separable and in physical units;
@@ -580,8 +581,8 @@ reusable materials, and come back as modules.
   becomes runtime detail and macro becomes a low-resolution variation map.
 - **Material-level ops:** height-blended layering of two whole OpenPBR
   materials (moss over stone, snow over roof tiles), with each parameter
-  blended by its own rule (colors linear, roughness in α space, normals by
-  RNM).
+  blended by its own rule (colors linear, roughness in α space). Slice 2
+  replaced this with four operations with separate contracts.
 
 ## Output and encoding
 
@@ -653,7 +654,7 @@ starts.
 | `dapple_field` | Field IR, domains, footprints, intervals, the evaluator, the noise/cellular/pattern op set | yes |
 | `dapple_raster` | Tiled rasters, raster ops, kernels and footprints | yes |
 | `dapple_graph` | Material graph value, typed ports, validation, compilation onto `execution_graph`, tile invalidation, caches, budgets, reports | yes |
-| `dapple_material` | OpenPBR bindings, auxiliary outputs, material-level layering | yes |
+| `dapple_material` | Material values (OpenPBR bindings, auxiliary channels), the four material operations and their reports, programs over materials, modules, resources | yes |
 | `dapple_encode` | Per-type mip builders, specular AA, packing profiles; PNG/EXR/KTX2 writing and the `ctt` compressor behind `std` | core yes |
 | `dapple_imaging` | Imaging scenes → coverage fields | yes |
 | `dapple_exedra` | `Chart` domain: rasterized chart layouts, seam gutters | yes |
@@ -1000,6 +1001,104 @@ meaning.
 - **Gates:** the same stone, wood and finish modules reused in several
   assets without duplicating graphs; a material-wide transform moves every
   channel; each material operation reports its approximations.
+- *As built* (`dapple_field::scoped`, `dapple_raster`, `dapple_material`,
+  `dapple_library::modules`). The decisions, in the order they were made:
+  - **The programmable core is `dapple_field::scoped`.** Slice 1a's
+    `SurfaceProgram` moved there as `ScopedProgram`/`ScopedBuilder`;
+    `dapple_elements` keeps only bindings and instances. Its vocabulary
+    grew by division, powers, unary math, comparisons (identifiers compare
+    for equality only), dot and cross products, normalization, monotone
+    tone curves and linear-light color ramps (`dapple_field::shaping`), and
+    calls of other scoped programs as functions, whose results take the
+    scope their arguments give them. Coordinates stay inputs bound by the
+    evaluator. Bounded iteration waits for a workload that needs it; the
+    registered operations with declared contracts are, for now, the field
+    programs a scoped program samples as resources.
+  - **Scopes are a lattice**, not a chain: material, region, element,
+    sample, pass. Region and element values are independent, so their
+    join is per sample. *Pass* is a value that needs a raster pass (a
+    neighborhood or reduction) to exist; an output declared per sample
+    can never depend on one, so per-sample outputs stay point-evaluable
+    and shader-translatable. `RegionMap::evaluate` runs region-scope nodes
+    once per region; a composited region's random stream equals its
+    element's.
+  - **Material values are realized.** A `Material` binds each OpenPBR
+    parameter (the `openpbr` crate, pinned by git revision) to a constant
+    or a `TypedRaster`, and keeps auxiliary channels (height in meters,
+    occlusion, region label, surface identity) apart, all on one `Grid`.
+    One grid is what makes "one decision for every channel" literal, and
+    weathering needs raster passes anyway; modules stay resolution
+    independent until instantiated on a grid. Material operations run
+    whole-raster and do not yet join `dapple_graph`'s tile invalidation.
+  - **Four operations, four contracts** (`dapple_material::ops`), each
+    returning a `Report` of approximations counted on the texels where
+    they made a difference:
+    - `select`: one weight per texel for every channel (a mask, or a
+      height-based transition). Colors, weights and heights mix linearly;
+      roughness in α (`RoughnessInAlpha`); normals and tangents averaged
+      and renormalized (`NormalsAveraged`); indices of refraction
+      interpolated (`IorInterpolated`); identifiers by the larger weight
+      (`WinnerLabel`). Coat parameters mix weighted by each side's coat
+      weight, so a side without a coat leaves the other's coat exact, and
+      differing layer stacks report `LayersMixed`.
+    - `apply_detail`: height and normal perturbation in a stated layer
+      (base, coat, both) in the domain frame, with a bit-exact identity.
+      Reoriented normal mapping lives here and only here:
+      `Op::BlendNormals` left the field IR. A coat-layer height ripples
+      the coat normal and never displaces; a bound base normal follows
+      added height so normal and displacement stay in step.
+    - `coat`: sets OpenPBR's coat over an untouched base, with an
+      optional thickness added to the height. A second coat over a first
+      collapses into OpenPBR's one (`CoatsCollapsed`).
+    - `deposit`: a covering's own material selected over the base by
+      coverage, coat included (what it covers it hides), its thickness
+      added to the height, its surface identity where it covers at least
+      half a texel; region ownership stays the base's.
+    - `transform`: mirror, quarter turns and offset for every bound
+      channel, vector channels turned with the texels; whole-texel moves
+      are exact permutations, fractional ones resample and report
+      `Resampled`.
+  - **`geometry_normal` is the shading normal of the undisplaced frame.**
+    When it is unbound, lowering derives it from the height; a consumer
+    that displaces uses the height and not both.
+  - **Modules are Rust types with data interfaces.** A `Module` publishes
+    an `Interface` (versioned `ModuleId`, parameters with units, ranges
+    and defaults, material, map and resource inputs, named outputs) and
+    builds from checked `Args`. The body is Rust, identified by its
+    `ModuleId` as a registered function is by its name; its inputs,
+    arguments and results are inspectable values, and an instance
+    (module, version, arguments) is data. A serialized form for module
+    *bodies* is not decided yet (see open decision 8).
+    Instances have paths (`wall/glaze`); seeds hash the path and the
+    `seed` parameter, and `Context::record` files every operation's report
+    under the instance that ran it, so diagnostics keep module boundaries
+    though the material is flat.
+  - **Host-resolved resources** (`dapple_material::resource`): a module
+    declares a `ResourceRequest` (semantic type, whether it must tile),
+    an instance names a `ResourceRef`, the host resolves it into a
+    `SampleImage` in meters (physical scale), linear with its primaries
+    (color information), with the host's content fingerprint as its
+    derivation (content identity) and the `ReductionPolicy` of its levels
+    (mip policy), checked against the request. Decoding stays in the
+    host.
+  - **Value shaping and scheduling categories** (`dapple_raster`):
+    `Histogram`, exact `percentiles` and `PercentileRemap` measure by
+    order statistics, so a module states "8% covered" rather than a raw
+    threshold; `Streak` is a one-sided directional smear of physical
+    length. `RasterOp::category` names each op a local stencil, separable
+    pass, reduction, global transform or iterative solve. Slope-driven
+    sampling and advection are still to come.
+  - **Lowering** (`lower::maps`) names what `dapple_encode`'s maps cannot
+    carry, and the packer now packs coats (glTF `clearcoat`; coat tint is
+    reported unsupported there).
+  - **The gate** is `dapple_library`'s
+    `modules_are_reused_across_assets_and_report_approximations`: stone,
+    wood and finish modules appear in several of the assets
+    (`GlazedBrickWall`, `StoneSill`, `VarnishedBoard`, `Threshold`), each
+    module one definition instantiated by path; deposits and selections
+    report their approximations at their instances; a material-wide
+    transform moves every channel. `examples/glazed_brick` builds the wall
+    and the sill at 2048² and renders them in Blender.
 
 #### Slice 3: materials on objects
 
@@ -1096,9 +1195,12 @@ GPU preview backend).
    key; parameter edits that keep topology keep every key; topology changes
    replace elements as each generator documents. Collisions are refused per
    set.
-8. **The module format:** decided for now: Rust builders that produce
-   inspectable values (never opaque closures); whether modules also get a
-   data form beside `dapple_graph::Recipe` is decided in slice 2.
+8. **The module format:** decided in slice 2: modules are Rust types with
+   a data `Interface` and a versioned `ModuleId`; instances (module,
+   version, arguments, path) are data, and bodies are registered Rust
+   builders that produce inspectable values, never opaque closures. A
+   serialized form for module bodies beside `dapple_graph::Recipe` stays
+   open until the portable material package needs it.
 
 ## References
 

@@ -14,8 +14,11 @@
 //! - [`gravel`]: scattered pebbles of three sizes over sand, tileable.
 //! - [`parquet`]: oak planks in herringbone, tileable.
 //! - [`glazed_brick`]: keyed glazed bricks whose identity drives shape,
-//!   glaze and chips (`dapple_elements`), in tooled, sanded mortar,
-//!   tileable.
+//!   glaze thickness and color, and chips (`dapple_elements`).
+//! - [`modules`]: reusable material modules (`dapple_material`): ceramic
+//!   body, mortar, stone, wood, finishes and weathering, and assets built
+//!   from them: a glazed brick wall, a stone sill, a varnished board and a
+//!   threshold.
 
 #![no_std]
 
@@ -26,6 +29,7 @@ use dapple_field::program::{NodeId, Op, ProgramBuilder, ProgramError};
 pub mod brick;
 pub mod glazed_brick;
 pub mod gravel;
+pub mod modules;
 pub mod oak;
 pub mod parquet;
 

@@ -1608,3 +1608,57 @@ fn sampling_policies_are_part_of_the_fingerprint() {
     t.graph.run().unwrap();
     assert_eq!(fp(&t.graph, linear), fp(&t.graph, nearest));
 }
+
+fn opened(x: f32) -> (MaterialGraph, NodeId, NodeId) {
+    let mut g = MaterialGraph::with_tile_size(16);
+    let disk = g.field("disk", disk_op(x), &[]).unwrap();
+    let map = g.realize("map", disk, 64, 64).unwrap();
+    let open = g
+        .raster(
+            "open",
+            RasterParams::Morphology(Morphology {
+                op: MorphologyOp::Close,
+                radius: 0.03,
+            }),
+            map,
+        )
+        .unwrap();
+    (g, disk, open)
+}
+
+#[test]
+fn morphology_nodes_keep_masks_and_recompute_locally() {
+    let (mut g, disk, open) = opened(0.2);
+    assert_eq!(g.port(open), Some(PortType::Mask));
+    g.run().unwrap();
+    g.set_field_op(disk, disk_op(0.25)).unwrap();
+    g.run().unwrap();
+    let report = g.tile_report();
+    assert_eq!(report.whole_recomputes, 0, "{report:?}");
+    assert!(report.tiles_reused > 0, "{report:?}");
+    let (mut fresh, _, fresh_open) = opened(0.25);
+    fresh.run().unwrap();
+    assert_eq!(
+        scalar(&g, open).digest(),
+        scalar(&fresh, fresh_open).digest()
+    );
+    // The recipe predicts the node's fingerprint, radius included.
+    let predicted = g.recipe().fingerprints().unwrap();
+    assert_eq!(
+        predicted["open"],
+        NodeFingerprint::Raster(g.raster_value(open).unwrap().fingerprint)
+    );
+    // Identifiers are refused.
+    let mut t = typed();
+    let close = RasterParams::Morphology(Morphology {
+        op: MorphologyOp::Dilate,
+        radius: 0.02,
+    });
+    assert!(matches!(
+        refusal(t.graph.raster("bad", close, t.ids)),
+        NodeError::TypeRefused {
+            port: PortType::Id,
+            ..
+        }
+    ));
+}

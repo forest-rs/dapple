@@ -138,8 +138,9 @@ use dapple_field::{
 };
 use dapple_raster::typed::{ReductionPolicy, Storage, TypedError, TypedRaster, realize_value};
 use dapple_raster::{
-    AmbientOcclusion, DistanceTransform, Edge, GaussianBlur, HeightToNormal, Raster, RasterError,
-    RasterOp, Realization, TexelRect, realize, realize_into, realize_normals, realize_normals_into,
+    AmbientOcclusion, DistanceTransform, Edge, GaussianBlur, HeightToNormal, Morphology,
+    MorphologyOp, Raster, RasterError, RasterOp, Realization, TexelRect, realize, realize_into,
+    realize_normals, realize_normals_into,
 };
 use execution_graph::{ExecutionGraph, Executor, GraphError, NodeAccess, NodeId, RunSummary};
 use glam::Vec2;
@@ -174,6 +175,8 @@ pub enum RasterParams {
     AmbientOcclusion(AmbientOcclusion),
     /// [`DistanceTransform`].
     DistanceTransform(DistanceTransform),
+    /// [`Morphology`]: dilate, erode, open or close by a disk.
+    Morphology(Morphology),
 }
 
 /// A node's parameters, carried on its `<label>.params` input.
@@ -767,6 +770,18 @@ fn raster_fingerprint(params: RasterParams, input: u64) -> u64 {
             (2, vec![f(op.radius), u64::from(op.directions), f(op.scale)])
         }
         RasterParams::DistanceTransform(op) => (3, vec![f(op.threshold)]),
+        RasterParams::Morphology(op) => (
+            4,
+            vec![
+                match op.op {
+                    MorphologyOp::Dilate => 0,
+                    MorphologyOp::Erode => 1,
+                    MorphologyOp::Open => 2,
+                    MorphologyOp::Close => 3,
+                },
+                f(op.radius),
+            ],
+        ),
     };
     let mut key = vec![tag, input];
     key.extend(words);
@@ -1140,6 +1155,7 @@ fn run_raster(
         RasterParams::HeightToNormal(op) => op.footprint(raster.texel()),
         RasterParams::AmbientOcclusion(op) => op.footprint(raster.texel()),
         RasterParams::DistanceTransform(op) => op.footprint(raster.texel()),
+        RasterParams::Morphology(op) => op.footprint(raster.texel()),
     };
     let source = Source::Raster {
         params,
@@ -1211,6 +1227,10 @@ fn run_raster(
             (RasterData::Scalar(r), t)
         }
         RasterParams::DistanceTransform(op) => {
+            let (r, t) = run_op(&op, raster, grid, &dirty, previous_scalar)?;
+            (RasterData::Scalar(r), t)
+        }
+        RasterParams::Morphology(op) => {
             let (r, t) = run_op(&op, raster, grid, &dirty, previous_scalar)?;
             (RasterData::Scalar(r), t)
         }
@@ -1336,8 +1356,9 @@ fn run_mip(
 /// refuses every other type.
 const fn raster_output(params: RasterParams, port: PortType) -> PortType {
     match params {
-        // Blurring a mask gives a mask: the mean of values in [0, 1].
-        RasterParams::Blur(_) => port,
+        // Blurring a mask gives a mask: the mean of values in [0, 1]; so do
+        // the extremes over a disk.
+        RasterParams::Blur(_) | RasterParams::Morphology(_) => port,
         RasterParams::HeightToNormal(_) => PortType::Normal(NormalFrame::Domain),
         RasterParams::AmbientOcclusion(_) | RasterParams::DistanceTransform(_) => PortType::Scalar,
     }
@@ -1349,6 +1370,7 @@ const fn raster_name(params: RasterParams) -> &'static str {
         RasterParams::HeightToNormal(_) => "height to normal",
         RasterParams::AmbientOcclusion(_) => "ambient occlusion",
         RasterParams::DistanceTransform(_) => "distance transform",
+        RasterParams::Morphology(_) => "morphology",
     }
 }
 

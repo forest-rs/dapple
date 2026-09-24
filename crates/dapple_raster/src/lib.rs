@@ -51,6 +51,7 @@ extern crate alloc;
 mod ao;
 mod blur;
 mod distance;
+mod morphology;
 mod normal;
 pub mod typed;
 
@@ -66,6 +67,7 @@ use glam::Vec2;
 pub use ao::AmbientOcclusion;
 pub use blur::GaussianBlur;
 pub use distance::DistanceTransform;
+pub use morphology::{Morphology, MorphologyOp};
 pub use normal::HeightToNormal;
 
 /// Largest texel count per raster, so indices and sizes stay exact.

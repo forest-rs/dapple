@@ -550,3 +550,217 @@ fn contracts_are_checked() {
         SurfaceBuilder::new("x").finish().fingerprint()
     );
 }
+
+/// The texels any element owns, as a mask.
+fn owned_mask(realized: &Realized) -> dapple_raster::Raster {
+    let labels = realized.owner_labels().unwrap();
+    let dapple_raster::typed::Storage::U32(labels) = labels.storage() else {
+        panic!("owner labels are identifiers")
+    };
+    dapple_raster::Raster::from_values(
+        labels.width(),
+        labels.height(),
+        labels.origin(),
+        labels.texel(),
+        labels.edge(),
+        labels
+            .values()
+            .iter()
+            .map(|&l| if l > 0 { 1.0 } else { 0.0 })
+            .collect(),
+    )
+    .unwrap()
+}
+
+/// Sets `mask` to `value` over the texels whose centers lie in `[lo, hi]`.
+fn paint(mask: &mut dapple_raster::Raster, lo: Vec2, hi: Vec2, value: f32) {
+    let size = mask.width();
+    let mut values = mask.values().to_vec();
+    for y in 0..size {
+        for x in 0..size {
+            let p = Vec2::new((f(x) + 0.5) / f(size), (f(y) + 0.5) / f(size));
+            let q = p.rem_euclid(Vec2::ONE);
+            let inside = |lo: f32, hi: f32, v: f32| {
+                (lo..=hi).contains(&v)
+                    || (lo..=hi).contains(&(v + 1.0))
+                    || (lo..=hi).contains(&(v - 1.0))
+            };
+            if inside(lo.x, hi.x, q.x) && inside(lo.y, hi.y, q.y) {
+                values[(y * size + x) as usize] = value;
+            }
+        }
+    }
+    *mask = dapple_raster::Raster::from_values(
+        size,
+        mask.height(),
+        mask.origin(),
+        mask.texel(),
+        mask.edge(),
+        values,
+    )
+    .unwrap();
+}
+
+// Slice 1b gate: a region round-trips through composite → reconstruct with
+// a correspondence that names every split and merge.
+#[test]
+fn regions_round_trip_and_name_every_split_and_merge() {
+    let inst = instance();
+    let set = bricks(0.1);
+    let realized = Realized::composite(&composite(&set, &inst, 64)).unwrap();
+    let composited = RegionMap::from_composite(&realized).unwrap();
+    assert_eq!(composited.regions().len(), set.len());
+    for (region, &key) in composited.regions().iter().zip(set.keys()) {
+        assert_eq!(region.key, RegionKey::of_element(key));
+        assert_eq!(region.provenance, Provenance::Element(key));
+        assert!(region.neighbors.is_empty(), "joints separate the bricks");
+    }
+
+    // Reconstruction is canonical: keys come from anchors, not elements.
+    let mask = owned_mask(&realized);
+    let canonical = RegionMap::reconstruct(&mask, 0.5, Connectivity::Four).unwrap();
+    assert_eq!(canonical.regions().len(), set.len());
+    assert!(
+        canonical
+            .regions()
+            .iter()
+            .all(|r| composited.region(r.key).is_none())
+    );
+    // Retaining the composite's identities round-trips every region.
+    let (kept, report) = canonical.retaining(&composited, 0.25).unwrap();
+    assert_eq!(kept.labels(), composited.labels());
+    assert_eq!(report.matched.len(), set.len());
+    assert!(report.matched.iter().all(|(a, b)| a == b));
+    assert!(report.splits.is_empty() && report.merges.is_empty());
+
+    // Cut one brick in two, and bridge two others across a head joint.
+    let region_at = |p: Vec2| {
+        let (x, y) = texel_at(p, 64);
+        composited.key_at(i64::from(x), i64::from(y)).unwrap()
+    };
+    let cut = set.placement(3).center;
+    let bridged = set.placement(9).center;
+    let (cut_key, left_key) = (region_at(cut), region_at(bridged));
+    let right_key = region_at(bridged + Vec2::new(0.25, 0.0));
+    let mut edited = mask.clone();
+    paint(
+        &mut edited,
+        cut + Vec2::new(-0.01, -0.1),
+        cut + Vec2::new(0.01, 0.1),
+        0.0,
+    );
+    paint(
+        &mut edited,
+        bridged + Vec2::new(0.05, -0.02),
+        bridged + Vec2::new(0.2, 0.02),
+        1.0,
+    );
+    let rebuilt = RegionMap::reconstruct(&edited, 0.5, Connectivity::Four).unwrap();
+    let (rebuilt, report) = rebuilt.retaining(&composited, 0.25).unwrap();
+    assert_eq!(rebuilt.regions().len(), set.len());
+    // The split is named, and one child keeps the brick's identity.
+    assert_eq!(report.splits.len(), 1, "{report:?}");
+    let split = &report.splits[0];
+    assert_eq!(split.from, cut_key);
+    assert_eq!(split.into.len(), 2);
+    assert!(split.into.contains(&cut_key));
+    // The merge is named and keeps one parent's identity.
+    let mut parents = vec![left_key, right_key];
+    parents.sort_unstable();
+    assert_eq!(report.merges.len(), 1, "{report:?}");
+    assert_eq!(report.merges[0].from, parents);
+    assert!(parents.contains(&report.merges[0].into));
+    // Everything else is matched to itself.
+    assert_eq!(report.matched.len(), set.len() - 3);
+    assert!(report.matched.iter().all(|(a, b)| a == b));
+    assert!(report.regroups.is_empty() && report.appeared.is_empty());
+    assert!(report.vanished.is_empty());
+
+    // Canonical: the same mask and the same retained state give the same
+    // map, whatever edits led to the mask.
+    let mut other_history = mask.clone();
+    paint(
+        &mut other_history,
+        bridged + Vec2::new(0.05, -0.02),
+        bridged + Vec2::new(0.2, 0.02),
+        1.0,
+    );
+    paint(
+        &mut other_history,
+        cut + Vec2::new(-0.01, -0.1),
+        cut + Vec2::new(0.01, 0.1),
+        0.0,
+    );
+    let again = RegionMap::reconstruct(&other_history, 0.5, Connectivity::Four)
+        .unwrap()
+        .retaining(&composited, 0.25)
+        .unwrap()
+        .0;
+    assert_eq!(again, rebuilt);
+    // Without retained state the edited map is canonical: anchors alone.
+    let fresh = RegionMap::reconstruct(&edited, 0.5, Connectivity::Four).unwrap();
+    let plain = composited.correspondence(&fresh, 0.25).unwrap();
+    assert_eq!((plain.splits.len(), plain.merges.len()), (1, 1));
+}
+
+#[test]
+fn region_tables_measure_their_regions() {
+    let inst = instance();
+    let set = bricks(0.1);
+    let realized = Realized::composite(&composite(&set, &inst, 64)).unwrap();
+    let map = RegionMap::from_composite(&realized).unwrap();
+    for (i, region) in map.regions().iter().enumerate() {
+        let p = set.placement(i);
+        let half = set.half_size(i);
+        // Area and centroid of the square brick, to a texel.
+        let texel = 1.0 / 64.0;
+        assert!((region.area - 4.0 * half.x * half.y).abs() < 4.0 * half.x * texel);
+        let d = (region.centroid - p.center.rem_euclid(Vec2::ONE)).abs();
+        let d = d.min(Vec2::ONE - d);
+        assert!(
+            d.max_element() < texel,
+            "{:?} vs {:?}",
+            region.centroid,
+            p.center
+        );
+    }
+    // Insets grow inward from the edges: a brick's center is half its
+    // size in.
+    let inset = map.inset().unwrap();
+    let (x, y) = texel_at(set.placement(0).center, 64);
+    let depth = inset.at(i64::from(x), i64::from(y));
+    assert!((depth - set.half_size(0).x).abs() < 2.0 / 64.0, "{depth}");
+    assert_eq!(map.boundaries().at(i64::from(x), i64::from(y)), 0.0);
+    // Statistics per region: the height output's range on each brick.
+    let height = realized.output("height").unwrap().unwrap();
+    let dapple_raster::typed::Storage::F32(height) = height.storage() else {
+        panic!("height is scalar")
+    };
+    let stats = map.statistics(height).unwrap();
+    assert_eq!(stats.len(), map.regions().len());
+    assert!(stats.iter().all(|s| s.min <= s.mean && s.mean <= s.max));
+    // A region across the period's seam stays one region, its centroid in
+    // the period.
+    let mut seam = vec![0.0; 64 * 64];
+    for y in 20..24 {
+        for x in (0..4).chain(60..64) {
+            seam[y * 64 + x] = 1.0;
+        }
+    }
+    let mask = dapple_raster::Raster::from_values(
+        64,
+        64,
+        Vec2::ZERO,
+        Vec2::splat(1.0 / 64.0),
+        dapple_raster::Edge::Wrap,
+        seam,
+    )
+    .unwrap();
+    let seam = RegionMap::reconstruct(&mask, 0.5, Connectivity::Four).unwrap();
+    assert_eq!(seam.regions().len(), 1);
+    let c = seam.regions()[0].centroid;
+    assert!(c.x < 1.0 / 64.0 || c.x > 63.0 / 64.0, "{c}");
+    // Wide, not tall: oriented along x.
+    let o = seam.regions()[0].orientation;
+    assert!(!(0.01..=core::f32::consts::PI - 0.01).contains(&o), "{o}");
+}

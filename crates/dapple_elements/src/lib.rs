@@ -31,6 +31,12 @@
 //!   surface-material identity (an identifier output such as glaze versus
 //!   body) are separate rasters. [`Realized::update`] recomputes only the
 //!   tiles an edit reaches and matches a clean composite bit for bit.
+//! - **Regions** ([`region`]): a [`RegionMap`] is a label raster and a
+//!   region table (identity, provenance, area, centroid, bounds,
+//!   orientation, neighbors). Composited regions keep their elements'
+//!   identity; regions reconstructed from a mask are canonical, and a
+//!   separate [`RegionCorrespondence`] names every split and merge.
+//!   Per-region insets, edges and statistics feed shape processing.
 
 #![no_std]
 
@@ -40,6 +46,7 @@ pub mod composite;
 pub mod identity;
 mod layout;
 pub mod program;
+pub mod region;
 mod set;
 
 pub use composite::{
@@ -50,6 +57,10 @@ pub use layout::RunningBond;
 pub use program::{
     Binding, ContractError, InstanceId, Node, NodeRef, ProgramInstance, Scope, SurfaceBuilder,
     SurfaceProgram,
+};
+pub use region::{
+    Connectivity, Merge, Overlap, Provenance, Region, RegionCorrespondence, RegionError, RegionKey,
+    RegionMap, RegionStatistics, Regroup, Split,
 };
 pub use set::{
     AttributeDecl, Bounds, Correspondence, Element, ElementError, ElementSet, Placement,

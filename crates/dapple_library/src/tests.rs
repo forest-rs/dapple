@@ -576,3 +576,171 @@ mod packages {
         ));
     }
 }
+
+mod breadth {
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+
+    use dapple_elements::{LayoutId, RunningBond};
+    use dapple_field::{Domain, Value};
+    use dapple_material::module::{Bind, Context, Input, Module};
+    use dapple_material::resource::NoResources;
+    use dapple_material::{Aux, ChannelId, Material, Param, Tiling};
+    use glam::Vec3;
+
+    use crate::masonry::{UnitMaps, unit_id};
+    use crate::modules::calibration::{REFERENCES, luminance};
+    use crate::modules::{
+        AshlarLimestone, Beech, Birch, FlintWall, Marble, RomanBrick, RubbleWall, ScotsPine,
+        Spruce, TerracottaTile,
+    };
+
+    fn build(module: &dyn Module, n: u32, bind: Bind) -> Material {
+        let mut cx = Context::new(super::glazed::tile(n), &NoResources);
+        cx.instantiate(module, "m", bind)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .take_material("material")
+            .unwrap()
+    }
+
+    fn mean(m: &Material, units_only: bool) -> (Vec3, f32) {
+        let (mut c, mut r, mut n) = (Vec3::ZERO, 0.0, 0.0);
+        for i in 0..m.grid().len() {
+            if units_only && m.value(ChannelId::Aux(Aux::Region), i) == Value::Id(0) {
+                continue;
+            }
+            if let Value::Vector3(v) = m.value(ChannelId::Param(Param::BaseColor), i) {
+                c += v;
+            }
+            r += m
+                .value(ChannelId::Param(Param::SpecularRoughness), i)
+                .component(0)
+                .unwrap();
+            n += 1.0;
+        }
+        (c / n, r / n)
+    }
+
+    fn modules() -> Vec<Box<dyn Module>> {
+        alloc::vec![
+            Box::new(Beech),
+            Box::new(Birch),
+            Box::new(ScotsPine),
+            Box::new(Spruce),
+            Box::new(AshlarLimestone),
+            Box::new(RubbleWall),
+            Box::new(FlintWall),
+            Box::new(RomanBrick),
+            Box::new(Marble),
+            Box::new(TerracottaTile),
+        ]
+    }
+
+    /// The calibrated defaults meet their measured references (the
+    /// `library_swatches` example refits them), and every module tiles.
+    #[test]
+    fn defaults_match_measured_references_and_tile() {
+        for (module, reference) in modules().iter().zip(REFERENCES) {
+            assert_eq!(module.interface().id.name, reference.module);
+            let m = build(module.as_ref(), 128, Bind::new());
+            assert_eq!(m.tiling(), Tiling::BOTH, "{}", reference.module);
+            let (c, r) = mean(&m, reference.units_only);
+            if reference.luminance_only {
+                let (y, target) = (luminance(c), reference.albedo.x);
+                if reference.at_most {
+                    assert!(y <= target, "{}: {y}", reference.module);
+                } else {
+                    assert!((y - target).abs() < 0.01, "{}: {y}", reference.module);
+                }
+            } else {
+                let miss = (c - reference.albedo).abs().max_element();
+                assert!(
+                    miss < 0.01,
+                    "{}: {c} vs {}",
+                    reference.module,
+                    reference.albedo
+                );
+            }
+            if let Some(target) = reference.roughness {
+                assert!((r - target).abs() < 0.01, "{}: {r}", reference.module);
+            }
+        }
+    }
+
+    /// Bark follows growth: a birch's dark base climbs with girth, and a
+    /// pine's upper bark is its orange, not its grey plates.
+    #[test]
+    fn bark_follows_girth_and_height() {
+        let birch = |girth| {
+            luminance(
+                mean(
+                    &build(&Birch, 64, Bind::new().scalar("girth", girth)),
+                    false,
+                )
+                .0,
+            )
+        };
+        assert!(
+            birch(2.5) < 0.5 * birch(0.4),
+            "{} {}",
+            birch(2.5),
+            birch(0.4)
+        );
+        let pine = |height| {
+            mean(
+                &build(&ScotsPine, 64, Bind::new().scalar("height", height)),
+                false,
+            )
+            .0
+        };
+        let (low, high) = (pine(1.0), pine(15.0));
+        assert!(high.x / high.z > 2.0 * low.x / low.z, "{low} {high}");
+    }
+
+    /// Masonry takes its units from the host: every unit texel carries the
+    /// host element's identity.
+    #[test]
+    fn masonry_lays_on_the_host_units() {
+        let grid = super::glazed::tile(128);
+        let bond = RunningBond {
+            layout: LayoutId::named("host"),
+            domain: Domain::periodic(1, 1).unwrap(),
+            courses: 4,
+            per_course: 3,
+            joint: 0.01,
+        }
+        .elements(alloc::vec![], |_, _| alloc::vec![])
+        .unwrap();
+        let ids: Vec<u32> = bond.keys().iter().map(|k| unit_id(*k)).collect();
+        let maps = UnitMaps::from_elements(&bond, grid, 0.03).unwrap();
+        let m = build(
+            &AshlarLimestone,
+            128,
+            Bind::new()
+                .input("units", Input::Map(maps.units))
+                .input("edge", Input::Map(maps.edge))
+                .input("local", Input::Map(maps.local)),
+        );
+        let mut seen = alloc::collections::BTreeSet::new();
+        for i in 0..grid.len() {
+            if let Value::Id(id) = m.value(ChannelId::Aux(Aux::Region), i)
+                && id != 0
+            {
+                assert!(ids.contains(&id));
+                seen.insert(id);
+            }
+        }
+        assert_eq!(seen.len(), ids.len(), "every host unit is laid");
+        // Binding only some of the maps is an error, not a silent fallback.
+        let mut cx = Context::new(grid, &NoResources);
+        let partial = UnitMaps::from_elements(&bond, grid, 0.03).unwrap();
+        assert!(
+            cx.instantiate(
+                &AshlarLimestone,
+                "m",
+                Bind::new().input("units", Input::Map(partial.units))
+            )
+            .is_err()
+        );
+    }
+}

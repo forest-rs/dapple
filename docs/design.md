@@ -1205,6 +1205,30 @@ meaning.
   `eval_chart_anisotropic` integrates each tap over its rectangle on the
   surface with 4 × 4 stratified point samples instead. The timber bake's
   rays no longer alias into stair steps at 2 mm texels.
+- **Bark and masonry breadth** (`dapple_library::modules`): bark of
+  European beech, silver birch, Scots pine and Norway spruce, each taking
+  the stem's `girth` and the tile's `height` on the trunk, so a birch's
+  dark fissured base climbs with girth and a pine's thick plates give way
+  to orange flakes up the stem without separate recipes; and ashlar
+  limestone, coursed rubble, flint walling, Roman brick, veined marble (a
+  curve network that closes across the period) and plain roof tiles. The
+  masonry modules read their units through one contract
+  (`dapple_library::masonry`: the nearest unit's identity, the signed
+  distance to its outline, and the position in its frame), so a host binds
+  the construction layer's layout (`UnitMaps::from_elements` rasterizes any
+  element set) and a module without one lays out its own element set and
+  rasterizes it the same way; appearance follows element keys. Default
+  colors (and fired clay's roughness) are fitted with `dapple_lab::fit` to
+  measured reflectance: stem bark spectra (Juola et al. 2022) and ECOSTRESS
+  laboratory spectra of limestone, marble, brick and terracotta, integrated
+  to linear Rec. 709; `modules::calibration` cites them and states which
+  roughnesses are authored rather than measured. Spruce is a revision of
+  the bark sylva ships, whose color is under half the measured
+  reflectance. `examples/library_swatches` refits and renders them.
+- **Fit bounds scale with the loss**: `dapple_lab::fit` penalizes a sample
+  outside the box in proportion to the loss at the point it stands for, so
+  with tight tolerances (large losses) the search no longer drifts out of
+  a dimension it can no longer see.
 - **Deposits matte what they cover**: `Deposit::matting` moves roughness
   toward the deposit's faster than coverage, so a thin haze of grime dulls
   a glaze's reflection before it hides its color.

@@ -13,7 +13,7 @@ env:
   # This should be limited to packages that are intended for publishing.
   RUST_MIN_VER_PKGS: "-p dapple_field -p dapple_raster -p dapple_elements -p dapple_encode -p dapple_graph -p dapple_imaging -p dapple_exedra -p dapple_library -p dapple_material -p dapple_lab -p dapple_package"
   # List of packages that don't support `no_std`.
-  RUST_STD_ONLY_PKGS: "--exclude field_gallery --exclude glazed_brick --exclude material_lab --exclude material_fit --exclude imaging_gallery --exclude timber_bake --exclude dapple_compress --exclude dapple_bake"
+  RUST_STD_ONLY_PKGS: "--exclude field_gallery --exclude glazed_brick --exclude material_lab --exclude material_fit --exclude library_swatches --exclude imaging_gallery --exclude timber_bake --exclude dapple_compress --exclude dapple_bake"
   # List of packages that don't support wasip1
   RUST_NO_WASIP1_PKGS: "--exclude dapple_compress --exclude field_gallery --exclude timber_bake --exclude dapple_bake"
   # List of packages that don't support wasm32

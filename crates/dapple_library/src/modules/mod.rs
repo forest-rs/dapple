@@ -20,6 +20,11 @@
 //! | [`EdgeWear`] | Wear through to the material beneath on convex edges, from curvature. |
 //! | [`Moss`] | Moss where the surface faces up, is hollow or damp, with a fuzz sheen. |
 //! | [`ByExample`] | A material tiled from a host-supplied exemplar by histogram-preserving blending. |
+//! | [`Beech`], [`Birch`], [`ScotsPine`], [`Spruce`] | Bark that follows the stem's girth and height on the trunk. |
+//! | [`AshlarLimestone`], [`RubbleWall`], [`FlintWall`], [`RomanBrick`], [`Marble`], [`TerracottaTile`] | Masonry on a unit layout, the host's or their own ([`crate::masonry`]). |
+//!
+//! The bark and masonry modules' colors are calibrated against measured
+//! reflectance: see [`calibration`].
 //!
 //! Assets compose them without copying their graphs:
 //! [`GlazedBrickWall`] (ceramic body, glaze finish, mortar, weathering),
@@ -45,8 +50,11 @@ use dapple_raster::{PercentileRemap, Raster, RasterOp, Realization};
 use glam::{Vec2, Vec3};
 
 mod assets;
+mod bark;
+pub mod calibration;
 mod ceramic;
 mod finish;
+mod masonry;
 mod mortar;
 mod stone;
 mod wear;
@@ -54,8 +62,10 @@ mod weathering;
 mod wood;
 
 pub use assets::{GlazedBrickWall, StoneSill, Threshold, VarnishedBoard};
+pub use bark::{Beech, Birch, ScotsPine, Spruce};
 pub use ceramic::CeramicBody;
 pub use finish::Finish;
+pub use masonry::{AshlarLimestone, FlintWall, Marble, RomanBrick, RubbleWall, TerracottaTile};
 pub use mortar::Mortar;
 pub use stone::Stone;
 pub use wear::{ByExample, EdgeWear, Moss};

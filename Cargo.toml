@@ -16,6 +16,7 @@ members = [
     "examples/field_gallery",
     "examples/glazed_brick",
     "examples/imaging_gallery",
+    "examples/library_swatches",
     "examples/material_fit",
     "examples/material_lab",
     "examples/timber_bake",

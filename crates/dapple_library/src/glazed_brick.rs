@@ -61,6 +61,12 @@ pub const STONE: u32 = 6;
 pub const WOOD: u32 = 7;
 /// Surface-material identifier of moss.
 pub const MOSS: u32 = 8;
+/// Surface-material identifier of bark.
+pub const BARK: u32 = 9;
+/// Surface-material identifier of flint.
+pub const FLINT: u32 = 10;
+/// Surface-material identifier of marble.
+pub const MARBLE: u32 = 11;
 
 /// Bricks per course and courses per 1 m tile: 250 × 71 mm courses
 /// including the joints.

@@ -19,6 +19,11 @@
 //!   body, mortar, stone, wood, finishes and weathering, and assets built
 //!   from them: a glazed brick wall, a stone sill, a varnished board and a
 //!   threshold.
+//! - [`modules`] also holds bark (beech, silver birch, Scots pine, Norway
+//!   spruce) that follows a stem's girth and height, and masonry (ashlar,
+//!   rubble, flint, Roman brick, marble, roof tile) laid on a unit layout,
+//!   the host's or its own ([`masonry`]), all calibrated against measured
+//!   reflectance ([`modules::calibration`]).
 //! - [`packages`]: those modules offered to portable packages
 //!   (`dapple_package`), and the varnished board written as one.
 
@@ -31,6 +36,7 @@ use dapple_field::program::{NodeId, Op, ProgramBuilder, ProgramError};
 pub mod brick;
 pub mod glazed_brick;
 pub mod gravel;
+pub mod masonry;
 pub mod modules;
 pub mod oak;
 pub mod packages;

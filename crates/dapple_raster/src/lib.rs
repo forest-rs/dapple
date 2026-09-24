@@ -25,6 +25,11 @@
 //!   length, for trails running from their sources.
 //! - [`PercentileRemap`] and [`Histogram`] ([`shaping`]): measured value
 //!   shaping, remapping by exact order statistics.
+//! - Directional processing: [`SlopeSample`] (sampling along a height's fall
+//!   lines), [`Displace`] (vector displacement) and [`Advect`] (carrying
+//!   values along a flow's streamlines).
+//! - [`synthesis::ByExample`]: Heitz and Neyret's histogram-preserving
+//!   by-example blending of an exemplar.
 //!
 //! Each op states its [`OpCategory`] (local stencil, separable pass,
 //! reduction, global transform or iterative solve), so schedulers know what
@@ -59,11 +64,13 @@ extern crate alloc;
 
 mod ao;
 mod blur;
+mod directional;
 mod distance;
 mod morphology;
 mod normal;
 pub mod shaping;
 mod streak;
+pub mod synthesis;
 pub mod typed;
 
 use alloc::vec::Vec;
@@ -77,6 +84,7 @@ use glam::Vec2;
 
 pub use ao::AmbientOcclusion;
 pub use blur::GaussianBlur;
+pub use directional::{Advect, Displace, SlopeMode, SlopeSample};
 pub use distance::DistanceTransform;
 pub use morphology::{Morphology, MorphologyOp};
 pub use normal::HeightToNormal;

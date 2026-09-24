@@ -93,6 +93,7 @@ impl Module for GlazedBrickWall {
                 ),
                 fraction("variation", d.variation, "brick-to-brick glaze variation"),
                 fraction("battered", d.battered, "how chipped the bricks are"),
+                fraction("glaze_roughness", 0.035, "the glaze coat's roughness"),
                 flag("weathered", true, "whether to add dirt, streaks and salts"),
                 fraction("dirt", 0.35, "share of the surface dirtied"),
                 fraction("streaks", 0.06, "share of the surface streaked"),
@@ -193,7 +194,7 @@ impl Module for GlazedBrickWall {
                     .scalar("opacity", 0.94)
                     .scalar("full_thickness", 0.0003)
                     .scalar("tint", 0.15)
-                    .scalar("roughness", 0.035)
+                    .scalar("roughness", args.scalar("glaze_roughness"))
                     .scalar("roughness_variation", 0.03)
                     .scalar("peel", 0.000006)
                     .scalar("peel_size", 0.004)

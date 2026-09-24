@@ -7,8 +7,9 @@
 //!   and named checks, written as deterministic JSON. The model knows
 //!   nothing of materials, so any harness can use it: a tree generator's
 //!   reference renders as well as a material bake.
-//! - **Measurements** ([`measure`]): value statistics, and a
-//!   resolution-independent feature size.
+//! - **Measurements** ([`measure`]): value statistics, a
+//!   resolution-independent feature size, band energies (a simple spectral
+//!   descriptor), and CIELAB and ΔE.
 //! - **Material reports and relationship checks** ([`material`]): ranges,
 //!   invalid values, seams against the material's tiling promise, what
 //!   lowering drops; a material-wide transform leaves no channel behind;
@@ -17,6 +18,9 @@
 //! - **Previews** ([`preview`]): tiled, raking-light (grazing) and mip
 //!   views, and contact sheets for parameter sweeps, as software renders;
 //!   PNG output behind the `std` feature.
+//! - **Fitting** ([`fit`]): parameters searched with a deterministic
+//!   CMA-ES for target measurements with tolerances, reported in the same
+//!   format; generic over the objective.
 
 #![no_std]
 
@@ -24,6 +28,7 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod fit;
 pub mod material;
 pub mod measure;
 pub mod preview;

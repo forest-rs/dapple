@@ -1,0 +1,20 @@
+[package]
+name = "material_fit"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fits dapple_library module parameters to target measurements with dapple_lab's CMA-ES"
+publish = false
+
+[dependencies]
+dapple_field.workspace = true
+dapple_lab = { features = ["std"], workspace = true }
+dapple_library.workspace = true
+dapple_material.workspace = true
+dapple_raster.workspace = true
+glam.workspace = true
+
+[lints]
+workspace = true

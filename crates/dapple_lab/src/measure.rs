@@ -86,6 +86,89 @@ pub fn feature_size(r: &Raster) -> f64 {
     }
 }
 
+/// The energy of a scalar raster in octave bands: for each consecutive
+/// pair of `scales` (Gaussian sigmas in domain units, increasing), the
+/// variance of the difference of the two blurs, as a fraction of the
+/// raster's variance. A simple spectral descriptor: how much of the
+/// variation lives at each scale.
+///
+/// # Errors
+///
+/// Blur errors, for a scale that is not finite and positive.
+pub fn band_energies(
+    r: &Raster,
+    scales: &[f32],
+) -> Result<alloc::vec::Vec<f64>, dapple_raster::RasterError> {
+    use dapple_raster::{GaussianBlur, RasterOp};
+    let variance = |v: &[f32]| {
+        #[expect(clippy::cast_precision_loss, reason = "texel counts fit f64")]
+        let n = v.len().max(1) as f64;
+        let mean = v.iter().map(|x| f64::from(*x)).sum::<f64>() / n;
+        v.iter()
+            .map(|x| (f64::from(*x) - mean) * (f64::from(*x) - mean))
+            .sum::<f64>()
+            / n
+    };
+    let total = variance(r.values()).max(1e-30);
+    let blurs: alloc::vec::Vec<Raster> = scales
+        .iter()
+        .map(|&s| GaussianBlur { sigma: s }.apply(r))
+        .collect::<Result<_, _>>()?;
+    Ok(blurs
+        .windows(2)
+        .map(|w| {
+            let d: alloc::vec::Vec<f32> = w[0]
+                .values()
+                .iter()
+                .zip(w[1].values())
+                .map(|(a, b)| a - b)
+                .collect();
+            variance(&d) / total
+        })
+        .collect())
+}
+
+/// An sRGB-encoded component in `[0, 1]` decoded to linear.
+#[must_use]
+pub fn srgb_to_linear(c: f64) -> f64 {
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        libm::pow((c + 0.055) / 1.055, 2.4)
+    }
+}
+
+/// CIE L*a*b* (D65) of a linear Rec. 709 color.
+#[must_use]
+pub fn lab(linear: [f64; 3]) -> [f64; 3] {
+    let [r, g, b] = linear;
+    let x = 0.412_456_4 * r + 0.357_576_1 * g + 0.180_437_5 * b;
+    let y = 0.212_672_9 * r + 0.715_152_2 * g + 0.072_175 * b;
+    let z = 0.019_333_9 * r + 0.119_192 * g + 0.950_304_1 * b;
+    let f = |t: f64| {
+        if t > 0.008_856 {
+            libm::cbrt(t)
+        } else {
+            7.787 * t + 16.0 / 116.0
+        }
+    };
+    let (fx, fy, fz) = (f(x / 0.950_47), f(y), f(z / 1.088_83));
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
+
+/// The CIE 1976 color difference ΔE*ab between a linear Rec. 709 color and
+/// an 8-bit sRGB one.
+#[must_use]
+pub fn delta_e(linear: [f64; 3], srgb8: [u8; 3]) -> f64 {
+    let target = lab(srgb8.map(|c| srgb_to_linear(f64::from(c) / 255.0)));
+    let got = lab(linear);
+    libm::sqrt(
+        (0..3)
+            .map(|i| (got[i] - target[i]) * (got[i] - target[i]))
+            .sum(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::vec::Vec;

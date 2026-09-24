@@ -1165,6 +1165,19 @@ meaning.
   equals clean); software previews (tiled, raking-light grazing, mip
   strips, contact sheets for sweeps). `material_lab` sweeps stone
   bedding, grime and moss and fails when any check does.
+- **Fitting by measurement** (`dapple_lab::fit`, `examples/material_fit`):
+  targets (equal, at least, at most, each with a tolerance) over a
+  parameter space (linear or log ranges); the loss is the sum of squared
+  tolerance-normalized misses, so a target is met when its miss is at most
+  one. A small in-house CMA-ES searches the normalized box with keyed-hash
+  draws, so a fit is deterministic under its seed. The objective is any
+  closure from parameters to measurements, and nothing is material
+  specific, so sylva can fit trees with it. `material_fit` fits the glazed
+  wall's weathering, chips, cream and glaze roughness to stated targets,
+  and recovers a stone's hidden parameters from an exemplar's L*
+  percentiles, mean chroma and band energies at four scales. The wall
+  needed a `glaze_roughness` parameter: a roughness target nothing public
+  could reach was the finding.
 - **Deposits matte what they cover**: `Deposit::matting` moves roughness
   toward the deposit's faster than coverage, so a thin haze of grime dulls
   a glaze's reflection before it hides its color.

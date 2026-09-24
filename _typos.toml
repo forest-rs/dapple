@@ -9,3 +9,5 @@ locale = "en-us"
 [default.extend-words]
 # OpenPBR parameter names (`base_metalness`).
 metalness = "metalness"
+# A brick's edges (plural of arris).
+arrises = "arrises"

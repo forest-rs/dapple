@@ -270,6 +270,7 @@ version = "0.0.1"
 dependencies = [
  "dapple_elements",
  "dapple_field",
+ "dapple_raster",
  "glam",
 ]
 

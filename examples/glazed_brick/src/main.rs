@@ -149,8 +149,11 @@ fn main() -> Result<()> {
         set.len(),
         start.elapsed()
     );
-    write_all(&out, "", &realized)?;
-    write_maps(&out.join("maps"), &realized)?;
+    let start = std::time::Instant::now();
+    let finished = glazed_brick::finish(&realized, domain)?;
+    println!("finished the mortar in {:.2?}", start.elapsed());
+    write_all(&out, "", &realized, &finished)?;
+    write_maps(&out.join("maps"), &finished)?;
 
     // Move one brick up and to the right, and update incrementally.
     let key = set.keys()[set.len() / 2];
@@ -179,38 +182,46 @@ fn main() -> Result<()> {
         clean.digest(),
         "incremental equals clean"
     );
-    write_all(&out, "moved-", &realized)?;
+    write_all(
+        &out,
+        "moved-",
+        &realized,
+        &glazed_brick::finish(&realized, domain)?,
+    )?;
     Ok(())
 }
 
-fn write_all(out: &Path, prefix: &str, realized: &Realized) -> Result<()> {
-    let color = realized.output("base_color")?.expect("declared");
-    let height = realized.output("height")?.expect("declared");
-    let roughness = realized.output("specular_roughness")?.expect("declared");
-    let material = realized.output("material")?.expect("declared");
+fn write_all(
+    out: &Path,
+    prefix: &str,
+    realized: &Realized,
+    finished: &glazed_brick::Finished,
+) -> Result<()> {
+    let color = &finished.base_color;
+    let material = &finished.material;
+    let h = &finished.height;
     let at = |r: &dapple_raster::typed::TypedRaster, x: u32, y: u32| {
         r.value_at(i64::from(x), i64::from(y))
     };
+    let scalar = |r: &Raster, x: u32, y: u32| r.at(i64::from(x), i64::from(y));
 
-    let base = Rgb::from_texels(SIZE, SIZE, |x, y| vec3(at(&color, x, y)).to_array());
+    let base = Rgb::from_texels(SIZE, SIZE, |x, y| vec3(at(color, x, y)).to_array());
     base.write(out, &format!("{prefix}base-color"), true)?;
 
-    let Storage::F32(h) = height.storage() else {
-        unreachable!("height is scalar")
-    };
     let (lo, hi) = h
         .values()
         .iter()
         .fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+    Rgb::from_texels(SIZE, SIZE, |x, y| [(scalar(h, x, y) - lo) / (hi - lo); 3]).write(
+        out,
+        &format!("{prefix}height"),
+        false,
+    )?;
     Rgb::from_texels(SIZE, SIZE, |x, y| {
-        [(at(&height, x, y).component(0).unwrap_or(0.0) - lo) / (hi - lo); 3]
-    })
-    .write(out, &format!("{prefix}height"), false)?;
-    Rgb::from_texels(SIZE, SIZE, |x, y| {
-        [at(&roughness, x, y).component(0).unwrap_or(0.0); 3]
+        [scalar(&finished.specular_roughness, x, y); 3]
     })
     .write(out, &format!("{prefix}roughness"), false)?;
-    Rgb::from_texels(SIZE, SIZE, |x, y| match at(&material, x, y) {
+    Rgb::from_texels(SIZE, SIZE, |x, y| match at(material, x, y) {
         Value::Id(glazed_brick::GLAZE) => [0.1, 0.55, 0.6],
         Value::Id(glazed_brick::BODY) => [0.9, 0.5, 0.2],
         _ => [0.35, 0.35, 0.35],
@@ -234,8 +245,8 @@ fn write_all(out: &Path, prefix: &str, realized: &Realized) -> Result<()> {
     let half = (light + view).normalize();
     let lit = Rgb::from_texels(SIZE, SIZE, |x, y| {
         let n = Vec3::from_array(normals.at(i64::from(x), i64::from(y)));
-        let albedo = vec3(at(&color, x, y));
-        let r = at(&roughness, x, y).component(0).unwrap_or(1.0);
+        let albedo = vec3(at(color, x, y));
+        let r = scalar(&finished.specular_roughness, x, y);
         let diffuse = n.dot(light).max(0.0);
         let alpha = (r * r).max(0.02);
         let shininess = 2.0 / (alpha * alpha) - 2.0;
@@ -255,30 +266,25 @@ fn write_all(out: &Path, prefix: &str, realized: &Realized) -> Result<()> {
 }
 
 /// Packs the material for the glTF profile and writes it as PNG files.
-fn write_maps(dir: &Path, realized: &Realized) -> Result<()> {
+fn write_maps(dir: &Path, finished: &glazed_brick::Finished) -> Result<()> {
     use dapple_encode::{
         Edge, Filter, Image, MaterialMaps, PackSettings, PixelFormat, Profile, data_mips,
         encode_data, pack,
     };
     std::fs::create_dir_all(dir)?;
-    let floats = |name: &str| -> Result<(usize, Vec<f32>)> {
-        let raster = realized.output(name)?.expect("declared");
-        Ok(match raster.storage() {
-            Storage::F32(r) => (1, r.values().to_vec()),
-            Storage::F32x3(r) => (3, r.values().iter().flatten().copied().collect()),
-            _ => unreachable!("colors and scalars"),
-        })
+    let Storage::F32x3(color) = finished.base_color.storage() else {
+        unreachable!("colors have three channels")
     };
-    let image = |(channels, values): (usize, Vec<f32>)| {
-        Image::new(SIZE, SIZE, channels, Edge::Wrap, values)
-    };
-    let height = realized.output("height")?.expect("declared");
-    let Storage::F32(h) = height.storage() else {
-        unreachable!("height is scalar")
-    };
+    let h = &finished.height;
     let normals: Raster<[f32; 3]> = HeightToNormal { scale: 1.0 }.apply(h)?;
     let maps = MaterialMaps {
-        base_color: Some(image(floats("base_color")?)?),
+        base_color: Some(Image::new(
+            SIZE,
+            SIZE,
+            3,
+            Edge::Wrap,
+            color.values().iter().flatten().copied().collect(),
+        )?),
         normal: Some(Image::new(
             SIZE,
             SIZE,
@@ -286,7 +292,13 @@ fn write_maps(dir: &Path, realized: &Realized) -> Result<()> {
             Edge::Wrap,
             normals.values().iter().flatten().copied().collect(),
         )?),
-        specular_roughness: Some(image(floats("specular_roughness")?)?),
+        specular_roughness: Some(Image::new(
+            SIZE,
+            SIZE,
+            1,
+            Edge::Wrap,
+            finished.specular_roughness.values().to_vec(),
+        )?),
         ..MaterialMaps::default()
     };
     let bundle = pack(&maps, Profile::Gltf, &PackSettings::default())?;

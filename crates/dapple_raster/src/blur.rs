@@ -60,6 +60,10 @@ fn radius(sigma_texels: f32) -> i64 {
 impl RasterOp for GaussianBlur {
     type Output = f32;
 
+    fn category(&self) -> crate::OpCategory {
+        crate::OpCategory::SeparablePass
+    }
+
     fn footprint(&self, texel: Vec2) -> Option<[u32; 2]> {
         let r = |t: f32| u32::try_from(radius(self.sigma / t)).ok();
         Some([r(texel.x)?, r(texel.y)?])

@@ -20,6 +20,15 @@
 //! - [`AmbientOcclusion`]: horizon-based occlusion from a height raster.
 //! - [`DistanceTransform`]: exact Euclidean distance to the nearest feature
 //!   texel (Felzenszwalb–Huttenlocher).
+//! - [`Morphology`]: dilate, erode, open and close by an exact disk.
+//! - [`Streak`]: a one-sided directional smear that fades over a physical
+//!   length, for trails running from their sources.
+//! - [`PercentileRemap`] and [`Histogram`] ([`shaping`]): measured value
+//!   shaping, remapping by exact order statistics.
+//!
+//! Each op states its [`OpCategory`] (local stencil, separable pass,
+//! reduction, global transform or iterative solve), so schedulers know what
+//! runs in parallel and what a tile depends on.
 //!
 //! **Edges.** A raster realized over one period of a periodic field wraps
 //! ([`Edge::Wrap`]): every operation treats it as a torus, so its results tile
@@ -53,6 +62,8 @@ mod blur;
 mod distance;
 mod morphology;
 mod normal;
+pub mod shaping;
+mod streak;
 pub mod typed;
 
 use alloc::vec::Vec;
@@ -69,6 +80,8 @@ pub use blur::GaussianBlur;
 pub use distance::DistanceTransform;
 pub use morphology::{Morphology, MorphologyOp};
 pub use normal::HeightToNormal;
+pub use shaping::{Histogram, PercentileRemap, percentiles};
+pub use streak::{Flow, Streak};
 
 /// Largest texel count per raster, so indices and sizes stay exact.
 pub const MAX_TEXELS: u64 = 1 << 28;
@@ -763,6 +776,28 @@ fn check_realization_grid<T: Copy>(
     Ok(())
 }
 
+/// How an operation reaches across a raster, for scheduling: what can run
+/// in parallel, what a tile depends on, how work is reported and where it
+/// can be cancelled.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum OpCategory {
+    /// Each output texel reads a bounded neighborhood ([`RasterOp::footprint`]);
+    /// tiles recompute locally and in parallel.
+    LocalStencil,
+    /// Passes along one axis at a time (separable filters, scans, distance
+    /// transforms); lines are independent, and a line may reach across the
+    /// whole raster.
+    SeparablePass,
+    /// Measures the whole raster into a small summary (a histogram,
+    /// percentiles) in a fixed order.
+    Reduction,
+    /// A reduction followed by a pointwise map that uses it: every input
+    /// texel may change every output texel.
+    GlobalTransform,
+    /// Repeats a pass until it converges or a bounded number of times.
+    IterativeSolve,
+}
+
 /// An operation on a scalar raster.
 pub trait RasterOp {
     /// The output value type.
@@ -771,6 +806,17 @@ pub trait RasterOp {
     /// Texels read on each side of an output texel, per axis, at `texel`
     /// size; `None` when the whole raster may contribute.
     fn footprint(&self, texel: Vec2) -> Option<[u32; 2]>;
+
+    /// How the operation reaches across the raster. The default is a
+    /// [`OpCategory::LocalStencil`] for operations with a footprint and a
+    /// [`OpCategory::GlobalTransform`] otherwise.
+    fn category(&self) -> OpCategory {
+        if self.footprint(Vec2::ONE).is_some() {
+            OpCategory::LocalStencil
+        } else {
+            OpCategory::GlobalTransform
+        }
+    }
 
     /// Applies the operation.
     fn apply(&self, input: &Raster) -> Result<Raster<Self::Output>, RasterError>;

@@ -30,6 +30,10 @@ pub struct DistanceTransform {
 impl RasterOp for DistanceTransform {
     type Output = f32;
 
+    fn category(&self) -> crate::OpCategory {
+        crate::OpCategory::SeparablePass
+    }
+
     fn footprint(&self, _texel: Vec2) -> Option<[u32; 2]> {
         None
     }

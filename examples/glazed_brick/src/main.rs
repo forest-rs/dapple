@@ -11,6 +11,14 @@
 //! highlight on the glaze), `close-up-*.png` crops one corner at full
 //! resolution, and `moved-*.png` shows one brick moved by an edit and
 //! updated incrementally.
+//!
+//! `maps/` holds the material as textures for a renderer, packed by
+//! `dapple_encode` for the glTF profile: `base_color.png` (sRGB),
+//! `normal.png` (tangent-space, `+Y` toward the image top), `orm.png`
+//! (occlusion, roughness, metalness), and `height.png`, 16-bit height over
+//! the range `height.txt` gives in meters. Rows run from domain `y = 0` at
+//! the image top, as glTF reads textures. `tools/render.py` renders them in
+//! Blender as a displaced wall.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -142,6 +150,7 @@ fn main() -> Result<()> {
         start.elapsed()
     );
     write_all(&out, "", &realized)?;
+    write_maps(&out.join("maps"), &realized)?;
 
     // Move one brick up and to the right, and update incrementally.
     let key = set.keys()[set.len() / 2];
@@ -242,6 +251,60 @@ fn write_all(out: &Path, prefix: &str, realized: &Realized) -> Result<()> {
         &format!("{prefix}close-up-base-color"),
         true,
     )?;
+    Ok(())
+}
+
+/// Packs the material for the glTF profile and writes it as PNG files.
+fn write_maps(dir: &Path, realized: &Realized) -> Result<()> {
+    use dapple_encode::{
+        Edge, Filter, Image, MaterialMaps, PackSettings, PixelFormat, Profile, data_mips,
+        encode_data, pack,
+    };
+    std::fs::create_dir_all(dir)?;
+    let floats = |name: &str| -> Result<(usize, Vec<f32>)> {
+        let raster = realized.output(name)?.expect("declared");
+        Ok(match raster.storage() {
+            Storage::F32(r) => (1, r.values().to_vec()),
+            Storage::F32x3(r) => (3, r.values().iter().flatten().copied().collect()),
+            _ => unreachable!("colors and scalars"),
+        })
+    };
+    let image = |(channels, values): (usize, Vec<f32>)| {
+        Image::new(SIZE, SIZE, channels, Edge::Wrap, values)
+    };
+    let height = realized.output("height")?.expect("declared");
+    let Storage::F32(h) = height.storage() else {
+        unreachable!("height is scalar")
+    };
+    let normals: Raster<[f32; 3]> = HeightToNormal { scale: 1.0 }.apply(h)?;
+    let maps = MaterialMaps {
+        base_color: Some(image(floats("base_color")?)?),
+        normal: Some(Image::new(
+            SIZE,
+            SIZE,
+            3,
+            Edge::Wrap,
+            normals.values().iter().flatten().copied().collect(),
+        )?),
+        specular_roughness: Some(image(floats("specular_roughness")?)?),
+        ..MaterialMaps::default()
+    };
+    let bundle = pack(&maps, Profile::Gltf, &PackSettings::default())?;
+    let mut textures: Vec<_> = bundle.textures.iter().collect();
+    let (lo, hi) = h
+        .values()
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+    let unit: Vec<f32> = h.values().iter().map(|&v| (v - lo) / (hi - lo)).collect();
+    let chain = data_mips(&Image::new(SIZE, SIZE, 1, Edge::Wrap, unit)?, Filter::Box);
+    let height_texture = encode_data("height", &chain, PixelFormat::R16Unorm)?;
+    textures.push(&height_texture);
+    for texture in textures {
+        let path = dir.join(format!("{}.png", texture.name));
+        std::fs::write(&path, dapple_encode::png::write(texture)?)?;
+        println!("{}", path.display());
+    }
+    std::fs::write(dir.join("height.txt"), format!("{lo} {hi}\n"))?;
     Ok(())
 }
 

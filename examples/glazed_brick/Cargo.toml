@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 dapple_elements.workspace = true
+dapple_encode = { features = ["std"], workspace = true }
 dapple_field.workspace = true
 dapple_library.workspace = true
 dapple_raster.workspace = true

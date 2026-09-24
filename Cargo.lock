@@ -525,6 +525,7 @@ name = "glazed_brick"
 version = "0.0.0"
 dependencies = [
  "dapple_elements",
+ "dapple_encode",
  "dapple_field",
  "dapple_library",
  "dapple_raster",

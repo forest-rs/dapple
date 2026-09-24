@@ -13,6 +13,10 @@
 //! Texels are filtered anisotropically along their footprint on the
 //! surface (`SolidProgram::eval_chart_anisotropic`), so a chart stretched
 //! over a face is filtered along its length without blurring across it.
+//! The wood's rays are a `fract` of the angle around the pith, which no
+//! footprint evaluation can filter: the program's sampling guarantee is
+//! point-only, so each texel is integrated by stratified point samples
+//! instead, and the rays stay clean rather than aliasing into stair steps.
 //! Chart textures are baked for one region each and never tile, so they
 //! declare no periodicity and have no seam to check.
 //!

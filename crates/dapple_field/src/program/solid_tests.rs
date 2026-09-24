@@ -3,6 +3,7 @@
 
 //! Solid nodes, slices and chart evaluation in field programs.
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use glam::{Mat3, Vec2, Vec3};
@@ -364,4 +365,82 @@ fn angles_around_an_axis() {
     let above = sectors.eval(Vec3::new(-1.0, 1e-4, 0.0), Footprint::POINT);
     let gap = (above - below).abs();
     assert!(gap.min(1.0 - gap) < 1e-3, "{below} {above}");
+}
+
+/// A program that cannot honor a footprint is integrated over each texel
+/// by chart evaluation; one that can is evaluated at its footprint.
+#[test]
+fn chart_evaluation_integrates_point_only_programs() {
+    use super::sampling::Sampling;
+
+    // A sawtooth of 0.02 period along x: a `fract`, so point-only.
+    let mut b = ProgramBuilder::new();
+    let p = b.add(Op::Position3).unwrap();
+    let x = b.add(Op::Component { input: p, index: 0 }).unwrap();
+    let saw = b
+        .add(Op::Remap {
+            input: x,
+            from: [0.0, 0.02],
+            to: [0.13, 1.13],
+        })
+        .unwrap();
+    let saw = b.add(Op::Fract { input: saw }).unwrap();
+    let program = b.finish_solid(saw).unwrap();
+    assert_eq!(program.program().sampling(), Sampling::PointOnly);
+    // Texels 0.45 periods wide, so about half of them hold a jump: a
+    // point sample there is off by up to the jump, the texel's mean is not.
+    let texel = 0.009;
+    let samples: Vec<ChartSample> = points3(64, 1.0)
+        .into_iter()
+        .map(|position| ChartSample {
+            position,
+            footprint: Footprint::new(texel).unwrap(),
+            basis: [Vec3::new(texel, 0.0, 0.0), Vec3::new(0.0, texel, 0.0)],
+        })
+        .collect();
+    let mut points = vec![0.0; samples.len()];
+    program.eval_chart(&samples, &mut points);
+    let mut integrated = vec![0.0; samples.len()];
+    program.eval_chart_anisotropic(&samples, &mut integrated, 8);
+    // The largest and root-mean-square errors.
+    let error = |v: &[f32]| {
+        let e: Vec<f32> = v
+            .iter()
+            .zip(&samples)
+            .map(|(v, s)| {
+                // The exact box mean of the sawtooth over the texel's x extent.
+                let f = |x: f32| {
+                    let t = x / 0.02 + 0.13;
+                    0.5 * libm::floorf(t) + 0.5 * (t - libm::floorf(t)).powi(2)
+                };
+                let x = s.position.x;
+                let mean = 0.02 * (f(x + 0.5 * texel) - f(x - 0.5 * texel)) / texel;
+                (v - mean).abs()
+            })
+            .collect();
+        let max = e.iter().copied().fold(0.0_f32, f32::max);
+        let rms = libm::sqrtf(e.iter().map(|e| e * e).sum::<f32>() / e.len() as f32);
+        (max, rms)
+    };
+    let (point_max, point_rms) = error(&points);
+    let (max, rms) = error(&integrated);
+    // Four strata leave at most an eighth of the jump.
+    assert!(max <= 0.126, "{max}");
+    assert!(point_max > 0.3, "point samples alias: {point_max}");
+    assert!(rms < 0.3 * point_rms, "{rms} vs {point_rms}");
+
+    // A footprint-honoring program keeps its single footprint evaluation.
+    let mut b = ProgramBuilder::new();
+    let n = fbm3(&mut b, Domain3::Space);
+    let noise = b.finish_solid(n).unwrap();
+    assert_ne!(noise.program().sampling(), Sampling::PointOnly);
+    let mut a = vec![0.0; samples.len()];
+    noise.eval_chart_anisotropic(&samples, &mut a, 8);
+    let direct: Vec<f32> = samples
+        .iter()
+        .map(|s| noise.eval(s.position, Footprint::new(texel).unwrap()))
+        .collect();
+    for (a, d) in a.iter().zip(&direct) {
+        assert!((a - d).abs() < 1e-6, "{a} {d}");
+    }
 }

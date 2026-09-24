@@ -2691,6 +2691,11 @@ impl SolidProgram {
     }
 }
 
+/// Point samples per side of a tap's square when a program cannot honor a
+/// footprint ([`sampling::Sampling::PointOnly`]) and a chart evaluation
+/// integrates it instead: 4 × 4 per tap.
+pub const POINT_ONLY_STRATA: u32 = 4;
+
 impl SolidProgram {
     /// As [`Self::eval_chart`], but where a sample has a basis, averaged
     /// over up to `max_taps` taps along its footprint's major axis in the
@@ -2698,6 +2703,18 @@ impl SolidProgram {
     /// ([`crate::anisotropic::SurfaceFootprint`]): a texel stretched over a
     /// grazing face is filtered along its length without being blurred
     /// across it.
+    ///
+    /// The evaluation follows the program's sampling guarantee
+    /// ([`FieldProgram::sampling`]). A program that honors footprints
+    /// evaluates each tap once, at the tap's footprint. A
+    /// [`PointOnly`](sampling::Sampling::PointOnly) program, one with a
+    /// discontinuity of varying input such as a `fract` of an angle,
+    /// cannot: a footprint evaluation of it is a point sample, and aliases.
+    /// Each of its taps is instead integrated over the tap's rectangle in
+    /// the surface by [`POINT_ONLY_STRATA`]² stratified point samples, the
+    /// box integral [`sampling::reference_box`] defines, so the texel
+    /// holds the mean of what it covers. Samples without a basis have no
+    /// surface directions to integrate over and stay point samples.
     ///
     /// # Panics
     ///
@@ -2707,6 +2724,7 @@ impl SolidProgram {
             out.len() >= samples.len(),
             "output shorter than the samples"
         );
+        let integrate = self.program.sampling() == sampling::Sampling::PointOnly;
         let mut evaluator = self.program.evaluator();
         for (value, sample) in out.iter_mut().zip(samples) {
             let mut eval = |p: Vec3, fp: Footprint| {
@@ -2719,13 +2737,44 @@ impl SolidProgram {
                 *value = eval(sample.position, sample.footprint);
                 continue;
             }
-            let taps = crate::anisotropic::SurfaceFootprint::texel(sample.basis).taps(max_taps);
-            let sum: f32 = taps
-                .iter()
-                .map(|&(d, fp)| eval(sample.position + d, fp))
-                .sum();
+            let surface = crate::anisotropic::SurfaceFootprint::texel(sample.basis);
+            let taps = surface.taps(max_taps);
             #[expect(clippy::cast_precision_loss, reason = "tap counts are small")]
             let n = taps.len() as f32;
+            let sum: f32 = if integrate {
+                // Each tap covers `major_width / n` along the major axis and
+                // `minor_width` across it.
+                let axes = surface.axes();
+                let along = axes.major * (axes.major_width / n);
+                let across = axes.minor * axes.minor_width;
+                let strata = POINT_ONLY_STRATA;
+                #[expect(clippy::cast_precision_loss, reason = "strata counts are small")]
+                let (k, per) = (strata as f32, (strata * strata) as f32);
+                taps.iter()
+                    .map(|&(d, _)| {
+                        let mut tap = 0.0;
+                        for j in 0..strata {
+                            for i in 0..strata {
+                                #[expect(
+                                    clippy::cast_precision_loss,
+                                    reason = "strata counts are small"
+                                )]
+                                let (u, v) =
+                                    ((i as f32 + 0.5) / k - 0.5, (j as f32 + 0.5) / k - 0.5);
+                                tap += eval(
+                                    sample.position + d + along * u + across * v,
+                                    Footprint::POINT,
+                                );
+                            }
+                        }
+                        tap / per
+                    })
+                    .sum()
+            } else {
+                taps.iter()
+                    .map(|&(d, fp)| eval(sample.position + d, fp))
+                    .sum()
+            };
             *value = sum / n;
         }
     }

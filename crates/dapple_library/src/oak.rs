@@ -351,13 +351,17 @@ pub fn wood_color(b: &mut ProgramBuilder) -> Result<NodeId, ProgramError> {
         let extent = ramp(b, extent, extent_cut, [0.0, 1.0])?;
         b.add(Op::Mul { a: ray, b: extent })
     };
+    // Broad rays run centimeters radially and along the trunk, so their
+    // extent varies slowly (40 cells a meter): on end grain they read as
+    // radial streaks, not flecks. They stay wide enough (about a
+    // millimeter at a 15 cm radius) to survive 2 mm texels.
     let broad = rays(
         b,
         131.0,
-        0.1,
-        [90.0, 90.0, 45.0],
-        [300.0, 300.0, 45.0],
-        [0.1, 0.3],
+        0.12,
+        [60.0, 60.0, 30.0],
+        [60.0, 60.0, 25.0],
+        [0.05, 0.3],
         SEED + 16,
     )?;
     let fine = rays(
@@ -379,7 +383,7 @@ pub fn wood_color(b: &mut ProgramBuilder) -> Result<NodeId, ProgramError> {
     let early_color = color(b, [0.42, 0.27, 0.14])?;
     let late_color = color(b, [0.27, 0.16, 0.075])?;
     let pore_color = color(b, [0.1, 0.055, 0.025])?;
-    let ray_color = color(b, [0.52, 0.37, 0.21])?;
+    let ray_color = color(b, [0.54, 0.39, 0.225])?;
     let wood = b.add(Op::Mix {
         a: early_color,
         b: late_color,

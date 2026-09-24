@@ -589,8 +589,7 @@ fn node_bounds(op: &Op, all: &[Bounds]) -> Bounds {
         | Op::Component { .. }
         | Op::ToId { .. }
         | Op::Normalize { .. }
-        | Op::Direction { .. }
-        | Op::BlendNormals { .. } => UNKNOWN,
+        | Op::Direction { .. } => UNKNOWN,
     }
 }
 

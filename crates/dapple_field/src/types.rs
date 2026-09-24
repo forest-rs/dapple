@@ -30,25 +30,11 @@ pub enum NormalFrame {
     Domain,
 }
 
-/// How [`Op::BlendNormals`](crate::program::Op::BlendNormals) combines a
-/// detail normal with a base normal.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
-pub enum NormalBlend {
-    /// Reoriented normal mapping (Barré-Brisebois and Hill, 2012): the detail
-    /// is rotated onto the base, preserving both.
-    Reoriented,
-    /// "Unreal Developer Network" blending: the detail's slopes are added to
-    /// the base's. Cheaper, flatter at strong angles.
-    Udn,
-}
-
 /// The type of a program node's value.
 ///
 /// Types are derived when a node is added, so misuse is a build error rather
-/// than wrong-looking output: normals blend only with
-/// [`Op::BlendNormals`](crate::program::Op::BlendNormals), identifiers are
+/// than wrong-looking output: normals never blend in a field program,
+/// identifiers are
 /// never interpolated, and directional values are never rotated by a domain
 /// transform they cannot follow.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]

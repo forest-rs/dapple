@@ -275,6 +275,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dapple_material"
+version = "0.0.1"
+dependencies = [
+ "dapple_encode",
+ "dapple_field",
+ "dapple_raster",
+ "glam",
+ "libm",
+ "openpbr",
+]
+
+[[package]]
 name = "dapple_raster"
 version = "0.0.1"
 dependencies = [
@@ -743,6 +755,14 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
  "libm",
+]
+
+[[package]]
+name = "openpbr"
+version = "0.1.0"
+source = "git+https://github.com/forest-rs/openpbr?rev=374ddf3512e7bb4d369708777be6b3ff60754964#374ddf3512e7bb4d369708777be6b3ff60754964"
+dependencies = [
+ "color",
 ]
 
 [[package]]

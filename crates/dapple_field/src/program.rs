@@ -13,8 +13,9 @@
 //! **Typed ports.** Every node has a [`PortType`], derived when it is added:
 //! scalars, masks, identifiers, vectors, linear colors with declared
 //! primaries, normals in a declared frame, and undirected directions. Type
-//! rules reject misuse at build time: normals combine only through
-//! [`Op::BlendNormals`], never by lerping; directions only blend, sign-free,
+//! rules reject misuse at build time: normals never blend here (detail
+//! composition belongs to `dapple_material`'s detail application, and only
+//! there); directions only blend, sign-free,
 //! through their doubled-angle vectors; identifiers never blend; masks stay masks only through operations
 //! that keep them in `[0, 1]`; and a transform that rotates or scales cannot
 //! move a vector-valued field, whose values it would leave unrotated.
@@ -66,7 +67,7 @@ use crate::scatter::{Placement, Scatter, ScatterField, ScatterOutput, Stamp};
 use crate::shape::Disk;
 use crate::solid::{Cellular3, CellularField3, Fractal3, Noise3, SolidField};
 use crate::tiling::{Pattern, TileOutput, Tiling, TilingField};
-use crate::types::{NormalBlend, NormalFrame, PortType, Primaries, Value};
+use crate::types::{NormalFrame, PortType, Primaries, Value};
 
 mod bounds;
 mod flat;
@@ -412,15 +413,6 @@ pub enum Op {
     Sample {
         /// The image and its domain.
         image: SampleImage,
-    },
-    /// A detail normal applied to a base normal, both in the same frame.
-    BlendNormals {
-        /// The base normal.
-        base: NodeId,
-        /// The detail normal.
-        detail: NodeId,
-        /// The blend.
-        method: NormalBlend,
     },
     /// A constant value over a solid domain.
     Constant3 {
@@ -838,10 +830,6 @@ impl Op {
             Self::Warp { amount, .. } => words.push(float(amount)),
             Self::Component { index, .. } => words.push(u64::from(index)),
             Self::ToId { levels, .. } => words.push(u64::from(levels)),
-            Self::BlendNormals { method, .. } => words.push(match method {
-                NormalBlend::Reoriented => 0,
-                NormalBlend::Udn => 1,
-            }),
             Self::Constant3 { domain: d, value } => {
                 domain3(&mut words, d);
                 words.push(float(value));
@@ -993,10 +981,7 @@ impl Op {
             | Self::Min { a, b }
             | Self::Max { a, b }
             | Self::Atan2 { y: a, x: b }
-            | Self::Vector2 { x: a, y: b }
-            | Self::BlendNormals {
-                base: a, detail: b, ..
-            } => {
+            | Self::Vector2 { x: a, y: b } => {
                 inputs.push(a);
                 inputs.push(b);
             }
@@ -1060,10 +1045,7 @@ impl Op {
             | Self::Min { a, b }
             | Self::Max { a, b }
             | Self::Atan2 { y: a, x: b }
-            | Self::Vector2 { x: a, y: b }
-            | Self::BlendNormals {
-                base: a, detail: b, ..
-            } => {
+            | Self::Vector2 { x: a, y: b } => {
                 *a = f(*a);
                 *b = f(*b);
             }
@@ -1119,7 +1101,6 @@ impl Op {
             Self::Direction { .. } => "direction",
             Self::Angle { .. } => "angle",
             Self::Coherence { .. } => "coherence",
-            Self::BlendNormals { .. } => "blend-normals",
             Self::Sample { .. } => "sample",
             Self::Constant3 { .. } => "constant3",
             Self::Noise3 { .. } => "noise3",
@@ -1166,8 +1147,7 @@ impl Inputs {
 ///   ([`Basis`], [`FractalKind`], [`CellOutput`]) as their declaration index;
 /// - [`FractalParams`] as kind, octaves, lacunarity and gain bits;
 /// - an [`Affine2`] as its matrix columns, then its translation;
-/// - a component index or identifier level count as itself, and a
-///   [`NormalBlend`] as its declaration index;
+/// - a component index or identifier level count as itself;
 /// - an [`Op::Sample`] image as the two halves of its derivation
 ///   ([`SampleImage::derivation`]), then its [`SamplePolicy::word`]; its
 ///   texels, type and shape are not encoded (the derivation names them);
@@ -1347,7 +1327,6 @@ enum Kernel {
     AsMask(NodeId),
     ToId(NodeId, u32),
     Normalize(NodeId),
-    BlendNormals(NodeId, NodeId, NormalBlend),
     Direction(NodeId),
     Angle(NodeId),
     Coherence(NodeId),
@@ -1716,11 +1695,6 @@ impl ProgramBuilder {
             Op::Direction { angle } => Kernel::Direction(angle),
             Op::Angle { input } => Kernel::Angle(input),
             Op::Coherence { input } => Kernel::Coherence(input),
-            Op::BlendNormals {
-                base,
-                detail,
-                method,
-            } => Kernel::BlendNormals(base, detail, method),
             Op::Constant3 { value, .. } => {
                 finite("value", &[value])?;
                 Kernel::Constant(value)
@@ -1829,7 +1803,6 @@ fn op_tag(op: &Op) -> u64 {
         Op::AsMask { .. } => 20,
         Op::ToId { .. } => 21,
         Op::Normalize { .. } => 22,
-        Op::BlendNormals { .. } => 23,
         Op::Direction { .. } => 24,
         Op::Angle { .. } => 25,
         Op::Coherence { .. } => 26,
@@ -2497,12 +2470,6 @@ impl Kernel {
                 };
                 Value::Scalar(v.length().min(1.0))
             }
-            Self::BlendNormals(_, _, method) => {
-                let (Value::Vector3(base), Value::Vector3(detail)) = (args[0], args[1]) else {
-                    unreachable!("blend inputs were type-checked");
-                };
-                Value::Vector3(blend_normals(base, detail, method))
-            }
             Self::Transform { .. }
             | Self::Transform3 { .. }
             | Self::Slice { .. }
@@ -2534,20 +2501,6 @@ fn componentwise(a: Value, b: Value, f: impl Fn(f32, f32) -> f32) -> Value {
         }
         _ => unreachable!("operand types were checked"),
     }
-}
-
-/// `detail` applied to `base`; both unit normals in one frame.
-fn blend_normals(base: Vec3, detail: Vec3, method: NormalBlend) -> Vec3 {
-    let n = match method {
-        NormalBlend::Reoriented => {
-            // Barré-Brisebois and Hill: rotate `detail` from +Z onto `base`.
-            let t = base + Vec3::Z;
-            let u = detail * Vec3::new(-1.0, -1.0, 1.0);
-            t * t.dot(u) / t.z - u
-        }
-        NormalBlend::Udn => Vec3::new(base.x + detail.x, base.y + detail.y, base.z),
-    };
-    n.try_normalize().unwrap_or(Vec3::Z)
 }
 
 impl ScalarField for FieldProgram {
@@ -2958,16 +2911,6 @@ fn derive_port(op: &Op, port: &dyn Fn(NodeId) -> PortType) -> Result<PortType, P
             } else {
                 PortType::Mask
             }
-        }
-        Op::BlendNormals { base, detail, .. } => {
-            let (tb, td) = (port(base), port(detail));
-            if !matches!(tb, PortType::Normal(_)) {
-                return Err(mismatch(tb, "needs normals"));
-            }
-            if td != tb {
-                return Err(mismatch(td, "needs a normal in the base's frame"));
-            }
-            tb
         }
     })
 }
@@ -3493,85 +3436,6 @@ mod tests {
             })
             .collect();
         assert_eq!(values, [0, 0, 0, 1, 1, 1].map(Value::Id));
-    }
-
-    #[test]
-    fn normal_blends_keep_detail_on_a_flat_base() {
-        let d = torus();
-        let mut b = ProgramBuilder::new();
-        let constant =
-            |b: &mut ProgramBuilder, value| b.add(Op::Constant { domain: d, value }).unwrap();
-        let (zero, one, tilt) = (
-            constant(&mut b, 0.0),
-            constant(&mut b, 1.0),
-            constant(&mut b, 0.6),
-        );
-        let flat_v = b
-            .add(Op::Vector3 {
-                x: zero,
-                y: zero,
-                z: one,
-            })
-            .unwrap();
-        let flat = b.add(Op::Normalize { input: flat_v }).unwrap();
-        let detail_v = b
-            .add(Op::Vector3 {
-                x: tilt,
-                y: zero,
-                z: one,
-            })
-            .unwrap();
-        let detail = b.add(Op::Normalize { input: detail_v }).unwrap();
-        let expected = Vec3::new(0.6, 0.0, 1.0).normalize();
-        // Reoriented blending reproduces the detail exactly; UDN keeps the
-        // base's z, so it flattens the detail slightly.
-        let udn = Vec3::new(expected.x, 0.0, 1.0).normalize();
-        for (method, expected) in [(NormalBlend::Reoriented, expected), (NormalBlend::Udn, udn)] {
-            let blended = b
-                .add(Op::BlendNormals {
-                    base: flat,
-                    detail,
-                    method,
-                })
-                .unwrap();
-            let Value::Vector3(n) = b
-                .clone()
-                .finish_value(blended)
-                .unwrap()
-                .eval(Vec2::ZERO, Footprint::POINT)
-            else {
-                panic!("normals are vectors");
-            };
-            assert!((n - expected).length() < 1e-6, "{method:?}: {n}");
-        }
-        // Reoriented blending of a tilted base and tilted detail tilts further.
-        let tilted = b
-            .add(Op::BlendNormals {
-                base: detail,
-                detail,
-                method: NormalBlend::Reoriented,
-            })
-            .unwrap();
-        let Value::Vector3(n) = b
-            .clone()
-            .finish_value(tilted)
-            .unwrap()
-            .eval(Vec2::ZERO, Footprint::POINT)
-        else {
-            panic!("normals are vectors");
-        };
-        assert!(n.x > expected.x && (n.length() - 1.0).abs() < 1e-6, "{n}");
-        assert!(matches!(
-            b.add(Op::BlendNormals {
-                base: flat,
-                detail: flat_v,
-                method: NormalBlend::Udn
-            }),
-            Err(ProgramError::TypeMismatch {
-                op: "blend-normals",
-                ..
-            })
-        ));
     }
 
     #[test]

@@ -110,7 +110,7 @@ pub use scatter::{Placement, Scatter, ScatterField, ScatterOutput, SplatPlacemen
 pub use shape::Disk;
 pub use solid::{Cellular3, CellularField3, Fractal3, Noise3, SolidField, central_difference3};
 pub use tiling::{MAX_HERRINGBONE_RATIO, Pattern, TileOutput, TileSample, Tiling, TilingField};
-pub use types::{NormalBlend, NormalFrame, PortType, Primaries, Value};
+pub use types::{NormalFrame, PortType, Primaries, Value};
 
 #[cfg(test)]
 mod golden_tests;

@@ -50,7 +50,8 @@ pub enum Transition {
 /// texel shared by every channel.
 ///
 /// Where the weight is fractional, colors, weights, heights and occlusion
-/// mix linearly; roughness mixes in `α = r²`
+/// mix linearly; coat parameters mix weighted by each side's coat weight,
+/// so where only one side is coated its coat is kept exactly; roughness mixes in `α = r²`
 /// ([`ApproximationKind::RoughnessInAlpha`]); normals and tangents average
 /// and renormalize ([`ApproximationKind::NormalsAveraged`]); indices of
 /// refraction interpolate ([`ApproximationKind::IorInterpolated`]);
@@ -202,10 +203,25 @@ fn mix(
             continue;
         }
         let r = rule(c);
+        let coated = is_coat_param(c);
+        let coat_weight = ChannelId::Param(Param::CoatWeight);
         let mut approximated = 0_u64;
         let values = (0..grid.len()).map(|i| {
             let (va, vb) = (a.value(c, i), b.value(c, i));
-            let t = w[i];
+            let mut t = w[i];
+            if coated && t > 0.0 && t < 1.0 {
+                // A coat parameter matters only where there is coat: weight
+                // each side by its coat's presence, so a side without coat
+                // leaves the other's coat parameters exact.
+                let (ca, cb) = (
+                    scalar(a.value(coat_weight, i)),
+                    scalar(b.value(coat_weight, i)),
+                );
+                let total = ca * (1.0 - t) + cb * t;
+                if total > 0.0 {
+                    t = cb * t / total;
+                }
+            }
             if t <= 0.0 {
                 return va;
             }
@@ -271,6 +287,22 @@ fn mix(
         layered,
     );
     Ok(out)
+}
+
+/// Parameters of the coat layer, whose mixing is weighted by coat presence.
+fn is_coat_param(c: ChannelId) -> bool {
+    matches!(
+        c,
+        ChannelId::Param(
+            Param::CoatColor
+                | Param::CoatRoughness
+                | Param::CoatRoughnessAnisotropy
+                | Param::CoatIor
+                | Param::CoatDarkening
+                | Param::GeometryCoatNormal
+                | Param::GeometryCoatTangent
+        )
+    )
 }
 
 fn lerp(a: Value, b: Value, t: f32) -> Value {

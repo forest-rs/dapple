@@ -1220,11 +1220,21 @@ meaning.
   rasterizes it the same way; appearance follows element keys. Default
   colors (and fired clay's roughness) are fitted with `dapple_lab::fit` to
   measured reflectance: stem bark spectra (Juola et al. 2022) and ECOSTRESS
-  laboratory spectra of limestone, marble, brick and terracotta, integrated
-  to linear Rec. 709; `modules::calibration` cites them and states which
-  roughnesses are authored rather than measured. Spruce is a revision of
-  the bark sylva ships, whose color is under half the measured
-  reflectance. `examples/library_swatches` refits and renders them.
+  laboratory spectra of limestone, marble and brick, integrated to linear
+  sRGB with the CIE 1931 observer under D65 (checked against ColorChecker
+  patches). Every reference and default must also pass a plausibility gate
+  from a second source (another laboratory's limestones, a second birch
+  study, Physically Based's brick and marble); `modules::calibration`
+  cites them, states which gates have no independent source (beech,
+  flint) and which roughnesses are authored, and records disagreements: the
+  only measured roofing tile is nearly neutral and is rejected, and
+  measured white birch bark (about 0.33) is darker than the commonly
+  quoted 0.4-0.6. `examples/library_swatches` embeds the spectra,
+  rederives every reference, refits the defaults and renders a sheet.
+  Plate barks use warped, stretched cells with merging plates, varying
+  fissure depth and scaling layers; spruce is overlapping, curled scales
+  that shadow the scale below; knapped flint is coursed, rounded nodules;
+  roof tiles shade under the course above.
 - **Fit bounds scale with the loss**: `dapple_lab::fit` penalizes a sample
   outside the box in proportion to the loss at the point it stands for, so
   with tight tolerances (large losses) the search no longer drifts out of

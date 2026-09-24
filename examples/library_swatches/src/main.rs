@@ -19,6 +19,8 @@
 //! default is the repository's git-ignored `.local/gallery/swatches`. Then
 //! `blender --background --python examples/library_swatches/tools/render.py -- <output-dir>`.
 
+mod spectra;
+
 use std::path::{Path, PathBuf};
 
 use dapple_elements::{LayoutId, RunningBond};
@@ -28,7 +30,9 @@ use dapple_lab::material::unit_tile;
 use dapple_lab::preview::{Picture, base_color, contact_sheet, raking};
 use dapple_lab::report::Report;
 use dapple_library::masonry::UnitMaps;
-use dapple_library::modules::calibration::{REFERENCES, Reference, luminance};
+use dapple_library::modules::calibration::{
+    BIRCH_BREAST_HEIGHT, REFERENCES, REJECTED, Reference, luminance,
+};
 use dapple_library::modules::{
     AshlarLimestone, Beech, Birch, FlintWall, Marble, RomanBrick, RubbleWall, ScotsPine, Spruce,
     TerracottaTile,
@@ -141,6 +145,12 @@ fn calibrate(module: &dyn Module, reference: &Reference, n: u32) -> Result<Repor
     if reference.roughness.is_some() {
         start.push(0.85);
     }
+    let conditions = |mut b: Bind| {
+        for (name, value) in reference.conditions {
+            b = b.scalar(name, *value);
+        }
+        b
+    };
     let bind = |p: &[f64]| {
         let mut b = if reference.luminance_only {
             Bind::new().color("color", (default * f(p[0])).min(Vec3::ONE))
@@ -150,7 +160,7 @@ fn calibrate(module: &dyn Module, reference: &Reference, n: u32) -> Result<Repor
         if reference.roughness.is_some() {
             b = b.scalar("roughness", f(p[p.len() - 1]));
         }
-        b
+        conditions(b)
     };
     let options = Cmaes {
         sigma: 0.15,
@@ -177,7 +187,7 @@ fn calibrate(module: &dyn Module, reference: &Reference, n: u32) -> Result<Repor
         Ok::<_, Box<dyn std::error::Error>>(out)
     })?;
     // What the defaults measure, beside what the fit found.
-    let at_defaults = build(module, n, Bind::new())?;
+    let at_defaults = build(module, n, conditions(Bind::new()))?;
     let (c, r) = means(&at_defaults, reference.units_only);
     let fitted = if reference.luminance_only {
         default * f(result.params[0])
@@ -218,6 +228,25 @@ fn calibrate(module: &dyn Module, reference: &Reference, n: u32) -> Result<Repor
         );
     }
     report.measure("defaults.roughness", f64::from(r), "", None);
+    let plausible = reference.plausible;
+    report.check(
+        "plausible",
+        plausible.holds(c) || (reference.at_most && luminance(c) <= plausible.luminance[1]),
+        format!(
+            "luminance {:.3} in {:?}{}{}",
+            luminance(c),
+            plausible.luminance,
+            plausible.red_over_blue.map_or(String::new(), |r| format!(
+                ", red/blue {:.2} in {r:?}",
+                c.x / c.z
+            )),
+            if plausible.independent {
+                ""
+            } else {
+                " (no independent second source)"
+            }
+        ),
+    );
     Ok(report)
 }
 
@@ -274,6 +303,9 @@ fn main() -> Result<()> {
     );
     std::fs::create_dir_all(&out)?;
 
+    // 0. The references, rederived from the spectra.
+    derive_references()?;
+
     // 1. Calibration.
     let mut report = Report::new("dapple_library calibration");
     for ((_, module), reference) in modules().iter().zip(REFERENCES.iter()) {
@@ -281,6 +313,19 @@ fn main() -> Result<()> {
         let r = calibrate(module.as_ref(), reference, 128)?;
         report.merge(reference.module, r);
     }
+    // The birch's breast-height mean on a default stem, against the
+    // measured spread.
+    let (c, _) = means(&build(&Birch, 128, Bind::new())?, false);
+    let y = luminance(c);
+    println!(
+        "birch at 1.3 m, default girth: luminance {y:.3}, measured interquartile {BIRCH_BREAST_HEIGHT:?}"
+    );
+    report.measure(
+        "dapple_library.birch_bark.breast_height_luminance",
+        f64::from(y),
+        "",
+        Some(BIRCH_BREAST_HEIGHT.map(f64::from)),
+    );
     std::fs::write(out.join("calibration.json"), report.to_json())?;
 
     // 2. Swatches at the defaults.
@@ -291,6 +336,10 @@ fn main() -> Result<()> {
     }
     // Bark following growth: a young and an old birch at breast height,
     // and a pine high and low on the stem.
+    swatches.push((
+        "birch_upper".into(),
+        build(&Birch, n, Bind::new().scalar("height", 6.0))?,
+    ));
     swatches.push((
         "birch_young".into(),
         build(&Birch, n, Bind::new().scalar("girth", 0.3))?,
@@ -340,6 +389,137 @@ fn main() -> Result<()> {
     std::fs::write(out.join("swatches.txt"), names)?;
     contact_sheet(&sheet, 5, 8).write_png(&out.join("sheet.png"))?;
     println!("{}", out.display());
+    Ok(())
+}
+
+/// Linear sRGB of a reflectance spectrum sampled as [`spectra::WAVELENGTHS`],
+/// under D65 with the CIE 1931 2° observer.
+fn linear_srgb(r: &[f32; 31]) -> Vec3 {
+    let (mut xyz, mut norm) = (Vec3::ZERO, 0.0);
+    for ((cmf, e), v) in spectra::CMF.iter().zip(spectra::D65).zip(r) {
+        xyz += Vec3::from_array(*cmf) * e * v;
+        norm += cmf[1] * e;
+    }
+    let xyz = xyz / norm;
+    Vec3::new(
+        3.240_454_2 * xyz.x - 1.537_138_5 * xyz.y - 0.498_531_4 * xyz.z,
+        -0.969_266 * xyz.x + 1.876_010_8 * xyz.y + 0.041_556 * xyz.z,
+        0.055_643_4 * xyz.x - 0.204_025_9 * xyz.y + 1.057_225_2 * xyz.z,
+    )
+}
+
+fn srgb8(c: Vec3) -> [i32; 3] {
+    c.to_array().map(|v| {
+        let v = v.clamp(0.0, 1.0);
+        let e = if v <= 0.003_130_8 {
+            12.92 * v
+        } else {
+            1.055 * libm::powf(v, 1.0 / 2.4) - 0.055
+        };
+        #[expect(clippy::cast_possible_truncation, reason = "an 8-bit value")]
+        let q = libm::roundf(255.0 * e) as i32;
+        q
+    })
+}
+
+fn mean_spectrum(spectra: &[&[f32; 31]]) -> [f32; 31] {
+    #[expect(clippy::cast_precision_loss, reason = "small counts")]
+    let n = spectra.len() as f32;
+    core::array::from_fn(|k| spectra.iter().map(|s| s[k]).sum::<f32>() / n)
+}
+
+/// Checks the conversion on color-checker patches, rederives every
+/// reference in `calibration` from the embedded spectra, and applies the
+/// plausibility gate to the references and the rejected samples.
+fn derive_references() -> Result<()> {
+    for (name, spectrum, published) in &spectra::COLORCHECKER {
+        let ours = srgb8(linear_srgb(spectrum));
+        let off = ours
+            .iter()
+            .zip(published)
+            .map(|(a, b)| (a - i32::from(*b)).abs())
+            .max()
+            .unwrap_or(0);
+        println!("ColorChecker {name}: {ours:?}, published {published:?}");
+        if off > 6 {
+            return Err(format!("the conversion misses ColorChecker {name} by {off}/255").into());
+        }
+    }
+    let mut birch: Vec<&[f32; 31]> = spectra::BIRCH.iter().collect();
+    birch.sort_by(|a, b| luminance(linear_srgb(a)).total_cmp(&luminance(linear_srgb(b))));
+    let lum: Vec<f32> = birch.iter().map(|s| luminance(linear_srgb(s))).collect();
+    let bricks = mean_spectrum(&[&spectra::RED_BRICK_WEATHERED, &spectra::RED_BRICK_BARE]);
+    let derived: [(&str, Vec3); 10] = [
+        (
+            "dapple_library.beech_bark",
+            Vec3::splat(luminance(linear_srgb(&spectra::GREY_ALDER))),
+        ),
+        (
+            "dapple_library.birch_bark",
+            linear_srgb(&mean_spectrum(&birch[15..])),
+        ),
+        (
+            "dapple_library.scots_pine_bark",
+            linear_srgb(&spectra::PINE),
+        ),
+        ("dapple_library.spruce_bark", linear_srgb(&spectra::SPRUCE)),
+        (
+            "dapple_library.ashlar_limestone",
+            linear_srgb(&spectra::OOLITIC_LIMESTONE),
+        ),
+        (
+            "dapple_library.rubble_wall",
+            linear_srgb(&spectra::CRINOIDAL_LIMESTONE),
+        ),
+        ("dapple_library.flint_wall", Vec3::splat(0.1)),
+        ("dapple_library.roman_brick", linear_srgb(&bricks)),
+        ("dapple_library.marble", linear_srgb(&spectra::WHITE_MARBLE)),
+        ("dapple_library.terracotta_tile", linear_srgb(&bricks)),
+    ];
+    for ((module, color), reference) in derived.iter().zip(&REFERENCES) {
+        assert_eq!(*module, reference.module, "table order");
+        let miss = (*color - reference.albedo).abs().max_element();
+        let gate = reference.plausible.holds(*color)
+            || (reference.at_most && luminance(*color) <= reference.plausible.luminance[1]);
+        println!(
+            "reference {module}: {color:.3} (Y {:.3}), stated {:.3}; plausible: {gate}",
+            luminance(*color),
+            reference.albedo
+        );
+        if miss > 0.002 {
+            return Err(
+                format!("{module}: the stated reference is not what the spectra give").into(),
+            );
+        }
+        if !gate {
+            return Err(format!("{module}: the reference fails its plausibility gate").into());
+        }
+    }
+    println!(
+        "birch at breast height: luminance {:.3}..{:.3}, interquartile {:.3}..{:.3} (stated {BIRCH_BREAST_HEIGHT:?})",
+        lum[0], lum[19], lum[5], lum[15]
+    );
+    let usgs: Vec<f32> = spectra::USGS_LIMESTONES
+        .iter()
+        .map(|s| luminance(linear_srgb(s)))
+        .collect();
+    println!(
+        "USGS limestones: luminance {:.3}..{:.3}",
+        usgs.iter().copied().fold(f32::INFINITY, f32::min),
+        usgs.iter().copied().fold(0.0, f32::max)
+    );
+    let tile = linear_srgb(&spectra::TERRACOTTA_TILE);
+    for rejected in &REJECTED {
+        println!(
+            "rejected {}: {tile:.3}, red/blue {:.2}; plausible: {}",
+            rejected.sample,
+            tile.x / tile.z,
+            rejected.plausible.holds(tile)
+        );
+        if rejected.plausible.holds(tile) || (tile - rejected.albedo).abs().max_element() > 0.002 {
+            return Err("the rejected tile is not what the spectra give, or passes".into());
+        }
+    }
     Ok(())
 }
 

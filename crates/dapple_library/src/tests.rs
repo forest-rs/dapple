@@ -589,7 +589,7 @@ mod breadth {
     use glam::Vec3;
 
     use crate::masonry::{UnitMaps, unit_id};
-    use crate::modules::calibration::{REFERENCES, luminance};
+    use crate::modules::calibration::{BIRCH_BREAST_HEIGHT, REFERENCES, REJECTED, luminance};
     use crate::modules::{
         AshlarLimestone, Beech, Birch, FlintWall, Marble, RomanBrick, RubbleWall, ScotsPine,
         Spruce, TerracottaTile,
@@ -636,21 +636,31 @@ mod breadth {
         ]
     }
 
-    /// The calibrated defaults meet their measured references (the
-    /// `library_swatches` example refits them), and every module tiles.
+    /// The calibrated defaults meet their measured references under the
+    /// references' conditions (the `library_swatches` example refits them
+    /// and rederives the references from spectra), pass the plausibility
+    /// gate of a second source, and tile; the rejected sample fails its
+    /// gate; a default birch's breast-height mean lies in the measured
+    /// spread.
     #[test]
     fn defaults_match_measured_references_and_tile() {
         for (module, reference) in modules().iter().zip(REFERENCES) {
             assert_eq!(module.interface().id.name, reference.module);
-            let m = build(module.as_ref(), 128, Bind::new());
+            let bind = reference
+                .conditions
+                .iter()
+                .fold(Bind::new(), |b, (n, v)| b.scalar(n, *v));
+            let m = build(module.as_ref(), 128, bind);
             assert_eq!(m.tiling(), Tiling::BOTH, "{}", reference.module);
             let (c, r) = mean(&m, reference.units_only);
+            let plausible = reference.plausible;
             if reference.luminance_only {
                 let (y, target) = (luminance(c), reference.albedo.x);
                 if reference.at_most {
                     assert!(y <= target, "{}: {y}", reference.module);
                 } else {
                     assert!((y - target).abs() < 0.01, "{}: {y}", reference.module);
+                    assert!(plausible.holds(c), "{}: {c}", reference.module);
                 }
             } else {
                 let miss = (c - reference.albedo).abs().max_element();
@@ -660,11 +670,25 @@ mod breadth {
                     reference.module,
                     reference.albedo
                 );
+                assert!(plausible.holds(c), "{}: {c} implausible", reference.module);
+                assert!(plausible.holds(reference.albedo), "{}", reference.module);
             }
             if let Some(target) = reference.roughness {
                 assert!((r - target).abs() < 0.01, "{}: {r}", reference.module);
             }
         }
+        for rejected in REJECTED {
+            assert!(
+                !rejected.plausible.holds(rejected.albedo),
+                "{}",
+                rejected.sample
+            );
+        }
+        let y = luminance(mean(&build(&Birch, 128, Bind::new()), false).0);
+        assert!(
+            (BIRCH_BREAST_HEIGHT[0]..=BIRCH_BREAST_HEIGHT[1]).contains(&y),
+            "birch at breast height: {y}"
+        );
     }
 
     /// Bark follows growth: a birch's dark base climbs with girth, and a

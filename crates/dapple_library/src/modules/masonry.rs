@@ -1,8 +1,8 @@
 // Copyright 2026 the Dapple Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Stone and masonry on unit layouts: ashlar, rubble, flint, Roman brick,
-//! marble and plain roof tiles.
+//! Stone and masonry on unit layouts: ashlar, rubble, knapped flint, Roman
+//! brick, marble and plain roof tiles.
 //!
 //! Every module here reads its units through [`crate::masonry`]'s contract
 //! (`units`, `edge` and `local` maps). A host that has a unit layout, such
@@ -118,6 +118,10 @@ struct Coursing {
     joint: f32,
     stagger: bool,
     seed: u64,
+    /// Rounded units (knapped nodules) rather than squared ones: ellipses
+    /// that touch their neighbors at mid-sides, leaving mortar in the
+    /// corners.
+    rounded: bool,
 }
 
 impl Coursing {
@@ -163,11 +167,19 @@ impl Coursing {
                 elements.push(Element {
                     key: ElementKey::new(layout, anchor, 0),
                     placement: Placement::at(Vec2::new(x + 0.5 * l, y + 0.5 * h)),
-                    half_size: Vec2::new(
-                        (0.5 * (l - self.joint)).max(1e-4),
-                        (0.5 * (h - self.joint)).max(1e-4),
-                    ),
-                    outline: Outline::Rectangle,
+                    half_size: if self.rounded {
+                        Vec2::new(0.58 * l - 0.5 * self.joint, 0.58 * h - 0.5 * self.joint)
+                    } else {
+                        Vec2::new(
+                            (0.5 * (l - self.joint)).max(1e-4),
+                            (0.5 * (h - self.joint)).max(1e-4),
+                        )
+                    },
+                    outline: if self.rounded {
+                        Outline::Ellipse
+                    } else {
+                        Outline::Rectangle
+                    },
                     variant: 0,
                     attributes: vec![],
                 });
@@ -177,59 +189,6 @@ impl Coursing {
         }
         ElementSet::new(vec![], elements)
     }
-}
-
-/// Units scattered one per lattice cell `spacing` apart, as ellipses
-/// `radius` wide (a range) and turned at random: flints in a wall.
-fn scattered(
-    layout: &'static str,
-    size: Vec2,
-    spacing: f32,
-    radius: [f32; 2],
-    seed: u64,
-) -> Result<ElementSet, ElementError> {
-    let layout = LayoutId::named(layout);
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "cell counts are small and positive"
-    )]
-    let (nx, ny) = (
-        libm::roundf(size.x / spacing).max(1.0) as u32,
-        libm::roundf(size.y / spacing).max(1.0) as u32,
-    );
-    #[expect(clippy::cast_precision_loss, reason = "cell counts are small")]
-    let cell = size / Vec2::new(nx as f32, ny as f32);
-    let mut elements = Vec::new();
-    for cy in 0..ny {
-        for cx in 0..nx {
-            let r = |k: u64| unit_f32(hash(seed, &[u64::from(cx), u64::from(cy), k]));
-            #[expect(clippy::cast_precision_loss, reason = "cell counts are small")]
-            let center = cell
-                * Vec2::new(
-                    cx as f32 + 0.5 + 0.5 * (r(1) - 0.5),
-                    cy as f32 + 0.5 + 0.5 * (r(2) - 0.5),
-                );
-            let rad = radius[0] + (radius[1] - radius[0]) * r(3);
-            let aspect = 0.5 + 0.5 * r(4);
-            let anchor = Anchor([
-                i32::try_from(cx).unwrap_or(i32::MAX),
-                i32::try_from(cy).unwrap_or(i32::MAX),
-            ]);
-            elements.push(Element {
-                key: ElementKey::new(layout, anchor, 0),
-                placement: Placement {
-                    center,
-                    rotation: core::f32::consts::PI * r(5),
-                },
-                half_size: Vec2::new(rad, rad * aspect),
-                outline: Outline::Ellipse,
-                variant: 0,
-                attributes: vec![],
-            });
-        }
-    }
-    ElementSet::new(vec![], elements)
 }
 
 /// What a unit material is made of, per texel.
@@ -371,6 +330,7 @@ impl Module for AshlarLimestone {
                 joint,
                 stagger: true,
                 seed: args.seed("layout"),
+                rounded: false,
             }
             .elements(size)
         })?;
@@ -462,6 +422,7 @@ impl Module for RubbleWall {
                 joint,
                 stagger: false,
                 seed: args.seed("layout"),
+                rounded: false,
             }
             .elements(size)
         })?;
@@ -504,12 +465,15 @@ impl Module for RubbleWall {
     }
 }
 
-/// Flint walling: knapped flint nodules set in abundant lime mortar, their
-/// broken faces glassy black-grey with conchoidal ripples, some ringed by
-/// their white chalky cortex.
+/// Knapped flint walling: flint nodules split to show their glassy,
+/// near-black faces, squared roughly and laid in rough courses in lime
+/// mortar, the joints kept narrow. Each face is its own shade from
+/// blue-black to grey-brown, clouded with milky translucent patches and
+/// rippled around its point of percussion; some keep a white, chalky rim
+/// of cortex where the knapping left the nodule's skin.
 ///
-/// Calibrated ([`super::calibration`]): the knapped faces stay under the
-/// 10 % visible reflectance measured for black chert.
+/// Calibrated ([`super::calibration`]): the faces stay under the upper
+/// bound on dark chert's reflectance.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct FlintWall;
 
@@ -518,17 +482,18 @@ impl Module for FlintWall {
         let mut params = common_params(
             super::calibration::FLINT_COLOR,
             "the knapped faces' mean color",
-            0.35,
-            Vec3::new(0.50, 0.48, 0.42),
+            0.25,
+            Vec3::new(0.40, 0.38, 0.33),
         );
         params.extend([
-            meters("spacing", [0.04, 0.3], 0.1, "mean spacing of the flints"),
-            meters("size", [0.01, 0.15], 0.047, "mean half size of a flint"),
-            fraction("cortex", 0.35, "share of flints showing their cortex"),
+            meters("course", [0.04, 0.2], 0.08, "mean course height"),
+            meters("length", [0.04, 0.25], 0.09, "mean flint length"),
+            meters("joint", [0.004, 0.04], 0.008, "joint width"),
+            fraction("cortex", 0.3, "share of flints showing their cortex"),
         ]);
         Interface {
             id: ModuleId::new("dapple_library.flint_wall", 1),
-            doc: "knapped flint in lime mortar".into(),
+            doc: "knapped, coursed flint in lime mortar".into(),
             params,
             inputs: unit_inputs(),
             outputs: material_output("the wall, surface identity FLINT on the flints"),
@@ -537,31 +502,41 @@ impl Module for FlintWall {
 
     fn build(&self, cx: &mut Context<'_>, args: &Args) -> Result<Outputs, ModuleError> {
         let grid = cx.grid();
-        let size = args.scalar("size");
-        let units = units_for(args, grid, 0.05, |extent| {
-            scattered(
-                "dapple_library.flint",
-                extent,
-                args.scalar("spacing"),
-                [0.75 * size, 1.2 * size],
-                args.seed("layout"),
-            )
+        let (course, length, joint) = (
+            args.scalar("course"),
+            args.scalar("length"),
+            args.scalar("joint"),
+        );
+        let units = units_for(args, grid, 0.03, |extent| {
+            Coursing {
+                layout: "dapple_library.flint",
+                course: [0.75 * course, 1.25 * course],
+                length: [0.55 * length, 1.45 * length],
+                joint,
+                stagger: false,
+                seed: args.seed("layout"),
+                rounded: true,
+            }
+            .elements(extent)
         })?;
-        let ragged = realize_scalar(grid, |b, d| fbm(b, d, [14.0, 14.0], args.seed("ragged"), 5))?;
-        let cloud = realize_scalar(grid, |b, d| fbm(b, d, [60.0, 60.0], args.seed("cloud"), 4))?;
-        // Knapped nodules are angular and lumpy, not ellipses.
+        let ragged = realize_scalar(grid, |b, d| fbm(b, d, [20.0, 20.0], args.seed("ragged"), 4))?;
+        let cloud = realize_scalar(grid, |b, d| fbm(b, d, [45.0, 45.0], args.seed("cloud"), 4))?;
+        let rind_n = realize_scalar(grid, |b, d| fbm(b, d, [70.0, 70.0], args.seed("rind"), 3))?;
+        // Knapped nodules are lumpy and their corners broken: ragged
+        // outlines, rounded where corners would be.
         let edge: Vec<f32> = units
             .edge
             .iter()
             .zip(ragged.values())
-            .map(|(e, n)| e + 0.03 * n)
+            .map(|(e, n)| e + 0.01 * n)
             .collect();
         let (base, rough, cortex) = (
             args.color("color"),
             args.scalar("roughness"),
             args.scalar("cortex"),
         );
-        let white = Vec3::new(0.52, 0.50, 0.45);
+        let white = Vec3::new(0.55, 0.53, 0.47);
+        let milky = Vec3::new(0.2, 0.21, 0.22);
         let seed = args.seed("units");
         let mut s = UnitSurface {
             color: Vec::with_capacity(grid.len()),
@@ -574,36 +549,36 @@ impl Module for FlintWall {
         )]
         for i in 0..grid.len() {
             let id = units.id[i];
-            // Flints range from blue-black to grey and brown.
+            // Flints range from blue-black to grey-brown.
             let hue = unit_random(seed, id, "hue");
-            let tint = Vec3::new(0.9 + 0.35 * hue, 1.0, 1.15 - 0.35 * hue);
-            let c = base
-                * tint
-                * (0.7 + 0.7 * unit_random(seed, id, "tone"))
-                * (1.0 + 0.3 * cloud.values()[i]);
-            // Cortex: a white rind a few millimeters wide on some flints.
+            let tint = Vec3::new(0.9 + 0.3 * hue, 1.0, 1.12 - 0.3 * hue);
+            let tone = 0.7 + 0.6 * unit_random(seed, id, "tone");
+            let c = base * tint * tone;
+            // Milky, translucent clouds in the flint.
+            let cl = smoothstep(0.15, 0.55, cloud.values()[i]) * unit_random(seed, id, "milk");
+            let c = c + (milky - c) * (0.5 * cl);
+            // A white cortex rind, of varying width, on some flints.
             let has = if unit_random(seed, id, "cortex") < cortex {
                 1.0
             } else {
                 0.0
             };
-            let width = 0.002 + 0.006 * unit_random(seed, id, "rind");
-            let rind = has * smoothstep(width, 0.5 * width, -edge[i]);
-            // Conchoidal ripples around the point of percussion.
-            let r = units.local[i].length();
-            let ripple = 0.0002 * libm::sinf(r * 40.0 + 6.0 * unit_random(seed, id, "strike"));
+            let width =
+                (0.003 + 0.007 * unit_random(seed, id, "rind")) * (1.0 + 0.6 * rind_n.values()[i]);
+            let rind = has * smoothstep(width, 0.6 * width, -edge[i]);
+            // Conchoidal ripples around the point of percussion, off center.
+            let strike = Vec2::new(
+                unit_random(seed, id, "sx") - 0.5,
+                unit_random(seed, id, "sy") - 0.5,
+            );
+            let r = (units.local[i] - strike).length();
+            let ripple = 0.00015 * libm::sinf(r * 28.0 + 6.0 * unit_random(seed, id, "phase"));
             s.color.push(c + (white - c) * rind);
-            s.roughness.push(rough + (0.9 - rough) * rind);
+            s.roughness.push(rough + 0.1 * cl + (0.92 - rough) * rind);
             s.height
-                .push(arris(edge[i], 0.006, 0.004) + ripple * (1.0 - rind));
+                .push(arris(edge[i], 0.004, 0.003) + ripple * (1.0 - rind));
         }
-        let joints = mortar(
-            cx,
-            &edge,
-            args.color("mortar_color"),
-            0.004,
-            args.scalar("spacing") - 2.0 * size,
-        )?;
+        let joints = mortar(cx, &edge, args.color("mortar_color"), 0.003, joint)?;
         let m = lay(cx, &units, &edge, &s, FLINT, &joints)?;
         Ok(Outputs::new().with("material", Output::Material(m)))
     }
@@ -654,6 +629,7 @@ impl Module for RomanBrick {
                 joint,
                 stagger: false,
                 seed: args.seed("layout"),
+                rounded: false,
             }
             .elements(size)
         })?;
@@ -729,6 +705,7 @@ impl Module for Marble {
                 joint: 0.0015,
                 stagger: false,
                 seed: args.seed("layout"),
+                rounded: false,
             }
             .elements(size)
         })?;
@@ -870,6 +847,7 @@ impl Module for TerracottaTile {
                 joint: 0.003,
                 stagger: true,
                 seed: args.seed("layout"),
+                rounded: false,
             }
             .elements(size)
         })?;
@@ -899,11 +877,14 @@ impl Module for TerracottaTile {
             let g = grain.values()[i];
             // Dirt gathers toward the tile's tail, under the course above.
             let tail = smoothstep(-0.2, 1.0, l.y) * weathering;
+            // The course above lies on this tile's tail: its butt casts a
+            // shadow down onto the exposed face just below it.
+            let lap_shadow = smoothstep(0.35, 1.0, l.y);
             let c = base * tone * (Vec3::ONE + (orange - Vec3::ONE) * fresh) * (1.0 + 0.08 * g);
             let c = c * (1.0 - 0.3 * tail);
             let spots = smoothstep(0.35, 0.55, lichen.values()[i]) * weathering;
             let c = c + (Vec3::new(0.30, 0.30, 0.24) - c) * (0.5 * spots);
-            s.color.push(c);
+            s.color.push(c * (1.0 - 0.55 * lap_shadow * lap_shadow));
             s.roughness.push((rough + 0.03 * g).clamp(0.0, 1.0));
             // Thickest at the lower edge (local y = -1), cambered across.
             let lap = thick * (0.5 - 0.5 * l.y);

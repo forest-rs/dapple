@@ -333,7 +333,9 @@ fn eigen(a: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
 /// The search runs in each dimension's normalized `[0, 1]` range from
 /// `start` (in the space's units; the middle of every range when `None`).
 /// Samples outside the range are evaluated at the nearest point inside it
-/// and penalized by their squared distance, so the search stays inside.
+/// and penalized in proportion to their distance and to the loss there, so
+/// an outside sample always ranks below the inside point it stands for,
+/// whatever the loss's scale, and the search stays inside.
 ///
 /// # Errors
 ///
@@ -400,7 +402,11 @@ pub fn fit<E>(
         let inside: Vec<f64> = x.iter().map(|t| t.clamp(0.0, 1.0)).collect();
         let penalty: f64 = x.iter().zip(&inside).map(|(a, b)| (a - b) * (a - b)).sum();
         let measured = objective(&to_params(&inside))?;
-        Ok((loss(targets, &measured) + 1e3 * penalty, measured))
+        let base = loss(targets, &measured);
+        Ok((
+            base * (1.0 + 10.0 * libm::sqrt(penalty)) + 1e3 * penalty,
+            measured,
+        ))
     };
 
     let (first_loss, first_measured) = evaluate(&mean)?;
@@ -490,7 +496,8 @@ mod tests {
     #[test]
     fn cmaes_recovers_hidden_parameters_deterministically() {
         // Three parameters, measured through a nonlinear model with
-        // coupling; the targets are the model at hidden values.
+        // coupling and a single solution in the space; the targets are the
+        // model at hidden values.
         let space = Space {
             dimensions: vec![
                 Dimension::linear("a", 0.0, 1.0),
@@ -502,7 +509,7 @@ mod tests {
             Ok(vec![
                 p[0] + 0.1 * p[2],
                 libm::log(p[1]) * (1.0 + p[0]),
-                p[2] * p[2] + p[0],
+                p[2] + p[0] * p[0],
             ])
         };
         let hidden = [0.3, 0.5, 1.5];

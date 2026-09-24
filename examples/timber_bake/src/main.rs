@@ -10,6 +10,11 @@
 //! surface point it stands for, so the end cuts show rings and rays and the
 //! long faces show grain. Each timber sits in its own place in the log: the
 //! post is boxed heart, the beam flat sawn and the rafter off-center.
+//! Texels are filtered anisotropically along their footprint on the
+//! surface (`SolidProgram::eval_chart_anisotropic`), so a chart stretched
+//! over a face is filtered along its length without blurring across it.
+//! Chart textures are baked for one region each and never tile, so they
+//! declare no periodicity and have no seam to check.
 //!
 //! Run with `cargo run -p timber_bake --release -- [output-dir]`; the default
 //! output directory is the repository's git-ignored `.local/gallery/timber-bake`.
@@ -201,7 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 vec![0.0; bake.samples().len()],
             ];
             for (program, values) in wood.iter().zip(&mut channels) {
-                program.eval_chart(bake.samples(), values);
+                program.eval_chart_anisotropic(bake.samples(), values, 8);
             }
             let colors: Vec<[f32; 3]> = (0..bake.samples().len())
                 .map(|i| [channels[0][i], channels[1][i], channels[2][i]])

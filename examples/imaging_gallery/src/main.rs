@@ -21,6 +21,7 @@ use dapple_imaging::imaging::kurbo::{Affine, BezPath, Cap, Circle, Point, Rounde
 use dapple_imaging::imaging::peniko::Color;
 use dapple_imaging::imaging::{Painter, record::Scene};
 use dapple_imaging::{coverage_image, rasterize};
+use dapple_raster::seam::{Axis, seam};
 use dapple_raster::{Raster, Realization, realize};
 use glam::Vec2;
 
@@ -223,7 +224,15 @@ fn decal() -> Scene {
 }
 
 /// The raster repeated 2 × 2, to show that wrapping masks tile.
+/// `raster` repeated 2 × 2. Anything tiled here is declared periodic, so it
+/// must be seamless along both axes.
 fn tile_2x2(raster: &Raster) -> Result<Raster, Box<dyn std::error::Error>> {
+    for axis in [Axis::X, Axis::Y] {
+        let s = seam(raster, axis);
+        if !s.is_seamless() {
+            return Err(format!("a declared-periodic preview has a seam: {s:?}").into());
+        }
+    }
     let (w, h) = (raster.width(), raster.height());
     let mut values = Vec::with_capacity(4 * (w * h) as usize);
     for y in 0..2 * i64::from(h) {

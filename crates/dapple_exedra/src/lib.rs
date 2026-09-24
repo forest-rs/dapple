@@ -256,6 +256,14 @@ impl SurfaceBake {
             let chart_area = area.abs() * texel * texel;
             let stretch = libm::sqrtf(geometric.length() / chart_area);
             let footprint = Footprint::new(stretch * texel).unwrap_or(Footprint::POINT);
+            // The differential basis: solid-space steps per texel along the
+            // chart's x and y, from the triangle's affine map.
+            let (e1, e2) = (uv[1] - uv[0], uv[2] - uv[0]);
+            let (d1, d2) = (solid[1] - solid[0], solid[2] - solid[0]);
+            let basis = [
+                (d1 * e2.y - d2 * e1.y) / area,
+                (d2 * e1.x - d1 * e2.x) / area,
+            ];
             let vertex_normals = [a, b, c].map(|v| {
                 let n = if has_normals {
                     Vec3A::from(mesh.normals[v])
@@ -296,6 +304,7 @@ impl SurfaceBake {
                     samples.push(ChartSample {
                         position,
                         footprint,
+                        basis,
                     });
                     normals.push(normal);
                     uvs.push(uv_origin + center * texel);

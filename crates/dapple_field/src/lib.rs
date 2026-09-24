@@ -83,6 +83,7 @@
 
 extern crate alloc;
 
+pub mod anisotropic;
 mod cellular;
 mod domain;
 mod field;

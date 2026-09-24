@@ -71,6 +71,7 @@ use crate::types::{NormalFrame, PortType, Primaries, Value};
 
 mod bounds;
 mod flat;
+pub mod sampling;
 #[cfg(test)]
 mod solid_tests;
 
@@ -2632,6 +2633,22 @@ pub struct ChartSample {
     pub position: Vec3,
     /// The side of the solid region the texel stands for, in domain units.
     pub footprint: Footprint,
+    /// The texel's differential basis: how far one texel step along the
+    /// chart's x and y moves in the solid, the columns of the 3 × 2
+    /// Jacobian. Zero where unknown; then only `footprint` is used.
+    pub basis: [Vec3; 2],
+}
+
+impl ChartSample {
+    /// A sample with an isotropic footprint and no basis.
+    #[must_use]
+    pub const fn isotropic(position: Vec3, footprint: Footprint) -> Self {
+        Self {
+            position,
+            footprint,
+            basis: [Vec3::ZERO; 2],
+        }
+    }
 }
 
 impl SolidProgram {
@@ -2670,6 +2687,46 @@ impl SolidProgram {
                 .eval_value_at(sample.position, sample.footprint)
                 .scalar()
                 .expect("finish_solid checks the output is scalar");
+        }
+    }
+}
+
+impl SolidProgram {
+    /// As [`Self::eval_chart`], but where a sample has a basis, averaged
+    /// over up to `max_taps` taps along its footprint's major axis in the
+    /// solid, each as wide as the minor axis
+    /// ([`crate::anisotropic::SurfaceFootprint`]): a texel stretched over a
+    /// grazing face is filtered along its length without being blurred
+    /// across it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `out` is shorter than `samples`.
+    pub fn eval_chart_anisotropic(&self, samples: &[ChartSample], out: &mut [f32], max_taps: u32) {
+        assert!(
+            out.len() >= samples.len(),
+            "output shorter than the samples"
+        );
+        let mut evaluator = self.program.evaluator();
+        for (value, sample) in out.iter_mut().zip(samples) {
+            let mut eval = |p: Vec3, fp: Footprint| {
+                evaluator
+                    .eval_value_at(p, fp)
+                    .scalar()
+                    .expect("finish_solid checks the output is scalar")
+            };
+            if sample.basis == [Vec3::ZERO; 2] {
+                *value = eval(sample.position, sample.footprint);
+                continue;
+            }
+            let taps = crate::anisotropic::SurfaceFootprint::texel(sample.basis).taps(max_taps);
+            let sum: f32 = taps
+                .iter()
+                .map(|&(d, fp)| eval(sample.position + d, fp))
+                .sum();
+            #[expect(clippy::cast_precision_loss, reason = "tap counts are small")]
+            let n = taps.len() as f32;
+            *value = sum / n;
         }
     }
 }

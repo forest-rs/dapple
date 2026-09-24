@@ -24,6 +24,7 @@ use dapple_field::{
     Basis, CellOutput, Cellular, Domain, DomainError, Footprint, Fractal, FractalKind,
     FractalParams, ImageLevel, Noise, SampleImage, ScalarField,
 };
+use dapple_raster::seam::{Axis, seam};
 use dapple_raster::{
     AmbientOcclusion, DistanceTransform, Edge, GaussianBlur, HeightToNormal, Raster, RasterOp,
     Realization, realize,
@@ -521,14 +522,14 @@ fn wood(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .map(|i| {
             let (x, y) = (i % width, i / width);
             let angle = (x as f32 + 0.5) / width as f32 * core::f32::consts::TAU;
-            ChartSample {
-                position: Vec3::new(
+            ChartSample::isotropic(
+                Vec3::new(
                     radius * angle.cos(),
                     radius * angle.sin(),
                     (y as f32 + 0.5) * texel,
                 ),
                 footprint,
-            }
+            )
         })
         .collect();
     let chart = chart_color(&solids, &samples);
@@ -548,10 +549,10 @@ fn wood(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
         if px.abs() < radius {
             let normal = Vec3::new(px / radius, -(1.0 - (px / radius).powi(2)).sqrt(), 0.0);
             let slant = (-normal.y).max(0.05);
-            samples.push(ChartSample {
-                position: normal * radius + Vec3::Z * z,
-                footprint: Footprint::new(pixel / slant).expect("finite"),
-            });
+            samples.push(ChartSample::isotropic(
+                normal * radius + Vec3::Z * z,
+                Footprint::new(pixel / slant).expect("finite"),
+            ));
             shading.push(Some(0.2 + 0.8 * normal.dot(to_light).max(0.0)));
         } else {
             shading.push(None);
@@ -693,7 +694,25 @@ fn sample_points(field: &impl ScalarField, region: Region, size: u32) -> Grid {
     }
 }
 
+/// `grid` repeated 2 × 2. Anything tiled here is declared periodic, so it
+/// must be seamless along both axes; a seam is a bug, not a preview.
 fn tile_2x2(grid: &Grid) -> Grid {
+    let raster = Raster::from_values(
+        grid.width,
+        grid.height,
+        Vec2::ZERO,
+        Vec2::ONE,
+        Edge::Wrap,
+        grid.values.clone(),
+    )
+    .expect("a grid is a raster");
+    for axis in [Axis::X, Axis::Y] {
+        let s = seam(&raster, axis);
+        assert!(
+            s.is_seamless(),
+            "a declared-periodic preview has a seam: {s:?}"
+        );
+    }
     let (w, h) = (grid.width as usize, grid.height as usize);
     let mut values = Vec::with_capacity(4 * w * h);
     for y in 0..2 * h {

@@ -30,6 +30,8 @@
 //!   values along a flow's streamlines).
 //! - [`synthesis::ByExample`]: Heitz and Neyret's histogram-preserving
 //!   by-example blending of an exemplar.
+//! - [`seam::seam`]: whether a raster that claims to tile does, by
+//!   comparing the step across the wrap with the steps beside it.
 //!
 //! Each op states its [`OpCategory`] (local stencil, separable pass,
 //! reduction, global transform or iterative solve), so schedulers know what
@@ -68,6 +70,7 @@ mod directional;
 mod distance;
 mod morphology;
 mod normal;
+pub mod seam;
 pub mod shaping;
 mod streak;
 pub mod synthesis;

@@ -52,10 +52,7 @@ fn solid_programs_evaluate_like_the_direct_fields() {
     let footprint = Footprint::new(0.01).unwrap();
     let samples: Vec<ChartSample> = points3(64, 4.0)
         .into_iter()
-        .map(|position| ChartSample {
-            position,
-            footprint,
-        })
+        .map(|position| ChartSample::isotropic(position, footprint))
         .collect();
     let mut chart = alloc::vec![0.0; samples.len()];
     program.eval_chart(&samples, &mut chart);

@@ -45,6 +45,9 @@ fn covered_texels_carry_their_surface_point() {
     for (sample, uv) in bake.samples().iter().zip(bake.uvs()) {
         assert!((sample.footprint.width() - 0.125).abs() < 1e-5);
         assert!((sample.position - Vec3::new(uv.x, uv.y, 0.0)).length() < 1e-5);
+        // Its differential basis: one texel step is 1/8 m along x and y.
+        assert!((sample.basis[0] - Vec3::new(0.125, 0.0, 0.0)).length() < 1e-5);
+        assert!((sample.basis[1] - Vec3::new(0.0, 0.125, 0.0)).length() < 1e-5);
     }
     assert!(
         bake.normals()

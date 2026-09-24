@@ -1120,6 +1120,55 @@ meaning.
     `Efflorescence` rises from the foot, and the sill's drip line feeds
     `Streaks`.
 
+#### Cross-cutting, as built (sampling, footprints, the lab)
+
+- **Periodic by construction, checked.** A `Material` carries a `Tiling`
+  promise (both axes on a wrapping grid unless narrowed); operations keep
+  what both inputs promise. Scoped programs that read the position are
+  **evaluated across the wrap** by `dapple_material::program::evaluate`
+  (the same texels one period away must give the same outputs), and
+  report the axes they are periodic along, so modules narrow tiling from
+  what their formulas do: the foot-driven weathering tiles along x only,
+  by measurement rather than declaration. The stone's tooling bands and
+  pitch snap to whole divisions of the period, which that check caught.
+  Instantiation also measures every map's raster seam
+  (`dapple_raster::seam`) along promised axes and refuses a gross one.
+  The raster measure compares the wrap with the roughest interior
+  position, so periodic features that line up with the wrap (joints, cell
+  borders) never fail it; it catches gross seams only, and the exact
+  across-wrap evaluation carries the rest. Every example checks: the
+  galleries' 2 × 2 tiles, the glazed brick's lab report; timber charts
+  declare no periodicity.
+- **Sampling guarantees** (`dapple_field::program::sampling`): every node
+  of a field program is `Exact` (box integration), `Attenuated`
+  (frequency attenuation), `Heuristic` (fading to a mean) or `PointOnly`,
+  from its op and its inputs': linear ops keep the weakest input's,
+  continuous nonlinear ops of varying inputs are at best heuristic,
+  discontinuous ones point-only. `reference_box` integrates the complete
+  expression at stratified points, and `measure` holds footprint
+  evaluation to it; tests check whole expressions (linearity scales the
+  error exactly; `n²` shows the mean-of-squares bias).
+- **Anisotropic footprints** (`dapple_field::anisotropic`): `Covariance2`
+  (`J Σ Jᵀ`, eigen-axes, taps along the major axis as wide as the minor)
+  and `SurfaceFootprint` (a 2D covariance plus the 3 × 2 basis; the
+  material covariance keeps orientation, rank ≤ 2). `ChartSample` gains
+  its differential basis, which `dapple_exedra` computes per triangle,
+  and `SolidProgram::eval_chart_anisotropic` filters along it; the timber
+  bake uses it. Against an integrated parallelogram, taps beat either
+  single width.
+- **The lab** (`dapple_lab`, `examples/material_lab`): a generic report
+  model (measurements with units and bounds, checks, deterministic JSON)
+  that other harnesses can reuse; material reports (ranges, invalid
+  values, seams against the promise, lowering losses); relationship
+  checks (a transform leaves no channel behind; a coarse realization
+  matches the fine one box-filtered down in feature size; incremental
+  equals clean); software previews (tiled, raking-light grazing, mip
+  strips, contact sheets for sweeps). `material_lab` sweeps stone
+  bedding, grime and moss and fails when any check does.
+- **Deposits matte what they cover**: `Deposit::matting` moves roughness
+  toward the deposit's faster than coverage, so a thin haze of grime dulls
+  a glaze's reflection before it hides its color.
+
 #### Slice 3: materials on objects
 
 - **Surface evaluation context** through a host interface, with explicitly

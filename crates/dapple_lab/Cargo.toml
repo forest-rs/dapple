@@ -1,0 +1,33 @@
+[package]
+name = "dapple_lab"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A headless material laboratory for dapple: measurement reports, relationship checks, previews and sweeps"
+readme = "README.md"
+keywords = ["procedural", "material", "testing", "no_std"]
+categories = ["graphics", "no-std"]
+
+[dependencies]
+dapple_encode.workspace = true
+dapple_field.workspace = true
+dapple_material.workspace = true
+dapple_raster.workspace = true
+glam.workspace = true
+libm.workspace = true
+png = { optional = true, workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Writing previews as PNG files.
+std = ["dep:png"]
+
+[package.metadata.docs.rs]
+all-features = true
+default-target = "x86_64-unknown-linux-gnu"
+targets = []

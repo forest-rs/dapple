@@ -8,12 +8,14 @@ members = [
     "crates/dapple_field",
     "crates/dapple_graph",
     "crates/dapple_imaging",
+    "crates/dapple_lab",
     "crates/dapple_library",
     "crates/dapple_material",
     "crates/dapple_raster",
     "examples/field_gallery",
     "examples/glazed_brick",
     "examples/imaging_gallery",
+    "examples/material_lab",
     "examples/timber_bake",
     "tools/dapple_bake",
 ]
@@ -88,6 +90,7 @@ dapple_exedra = { path = "crates/dapple_exedra" }
 dapple_field = { path = "crates/dapple_field" }
 dapple_graph = { path = "crates/dapple_graph" }
 dapple_imaging = { path = "crates/dapple_imaging" }
+dapple_lab = { path = "crates/dapple_lab" }
 dapple_library = { path = "crates/dapple_library" }
 dapple_material = { path = "crates/dapple_material" }
 dapple_raster = { path = "crates/dapple_raster" }

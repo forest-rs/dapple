@@ -23,7 +23,8 @@
 //!
 //! `diagnostics.txt` lists every module instance by path and every
 //! material operation's approximation report, attributed to the instance
-//! that made it.
+//! that made it; `report.json` is `dapple_lab`'s machine-readable report,
+//! and the run fails when it does.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -80,6 +81,22 @@ fn main() -> Result<()> {
 
     write_previews(&out, &material)?;
     write_maps(&out.join("maps"), &material)?;
+
+    // The lab's report: ranges, invalid values, seams against the tiling
+    // promise (checked across the wrap when the asset was built), lowering
+    // losses, and a material-wide transform that must move every channel.
+    let mut report = dapple_lab::material::material_report(&asset, &material);
+    report.merge(
+        "relationships",
+        dapple_lab::material::transform_check(&material),
+    );
+    std::fs::write(out.join("report.json"), report.to_json())?;
+    if !report.passed() {
+        for f in report.failures() {
+            eprintln!("FAILED: {f:?}");
+        }
+        return Err("the lab report has failures".into());
+    }
     Ok(())
 }
 

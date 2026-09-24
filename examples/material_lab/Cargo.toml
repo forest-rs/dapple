@@ -1,21 +1,20 @@
 [package]
-name = "glazed_brick"
+name = "material_lab"
 version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Builds glazed-brick assets from dapple_library's material modules and writes their maps"
+description = "Runs dapple_lab over dapple_library's modules: sweeps, previews and a machine-readable report"
 publish = false
 
 [dependencies]
-dapple_encode = { features = ["std"], workspace = true }
+dapple_elements.workspace = true
 dapple_field.workspace = true
-dapple_lab.workspace = true
+dapple_lab = { features = ["std"], workspace = true }
 dapple_library.workspace = true
 dapple_material.workspace = true
 glam.workspace = true
-png.workspace = true
 
 [lints]
 workspace = true

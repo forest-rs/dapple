@@ -54,6 +54,9 @@ fn material() -> MaterialMaps {
         subsurface_weight: None,
         subsurface_color: None,
         transmission_weight: None,
+        coat_weight: None,
+        coat_roughness: None,
+        coat_color: None,
     }
 }
 

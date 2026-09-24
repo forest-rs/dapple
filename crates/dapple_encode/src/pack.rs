@@ -68,6 +68,13 @@ pub struct MaterialMaps {
     /// OpenPBR `transmission_weight`, 1 channel: specular transmission, as
     /// through glass.
     pub transmission_weight: Option<Image>,
+    /// OpenPBR `coat_weight`, 1 channel: the fraction covered by the
+    /// dielectric coat.
+    pub coat_weight: Option<Image>,
+    /// OpenPBR `coat_roughness`, 1 channel.
+    pub coat_roughness: Option<Image>,
+    /// OpenPBR `coat_color`, 3 channels: the coat's absorption tint.
+    pub coat_color: Option<Image>,
 }
 
 /// Settings for [`pack()`].
@@ -91,6 +98,11 @@ pub struct PackSettings {
     pub subsurface_weight: f32,
     /// `subsurface_color` where a weight map is given but no color map.
     pub subsurface_color: [f32; 3],
+    /// `coat_weight` where a coat roughness map is given but no weight map.
+    pub coat_weight: f32,
+    /// `coat_roughness` where a coat weight map is given but no roughness
+    /// map.
+    pub coat_roughness: f32,
     /// Widen roughness mips by the variance of the normals they cover
     /// (Toksvig). Off, roughness is filtered alone and the textures match a
     /// plain bake of the same maps.
@@ -100,7 +112,8 @@ pub struct PackSettings {
 impl Default for PackSettings {
     /// Box filtering, no coverage preservation, normal variance folded into
     /// roughness, and OpenPBR's defaults: roughness 0.3, base color 0.8,
-    /// metalness 0, anisotropy 0, subsurface weight 0 and color 0.8.
+    /// metalness 0, anisotropy 0, subsurface weight 0 and color 0.8, coat
+    /// weight and roughness 0.
     fn default() -> Self {
         Self {
             filter: Filter::Box,
@@ -111,6 +124,8 @@ impl Default for PackSettings {
             specular_roughness_anisotropy: 0.0,
             subsurface_weight: 0.0,
             subsurface_color: [0.8; 3],
+            coat_weight: 0.0,
+            coat_roughness: 0.0,
             fold_normal_variance: true,
         }
     }
@@ -168,8 +183,8 @@ pub struct Bundle {
     pub profile: Profile,
     /// The textures, in a fixed order: `base_color`, `normal`, `orm`,
     /// `anisotropy`, then translucency: `diffuse_transmission` (glTF) and
-    /// `transmission` (raw: one per parameter, in [`MaterialMaps`] field
-    /// order).
+    /// `transmission`, then the coat: `clearcoat` (glTF) (raw: one per
+    /// parameter, in [`MaterialMaps`] field order).
     pub textures: Vec<EncodedTexture>,
     /// Measurements.
     pub report: PackReport,
@@ -293,6 +308,13 @@ fn encode(
 ///   color by opacity.
 /// - Lightweald has no subsurface slot yet, so its profile lists the
 ///   subsurface maps in [`PackReport::unsupported`] instead of packing them.
+///
+/// Coat: glTF packs `clearcoat` (linear R `coat_weight`, G `coat_roughness`),
+/// the layout `KHR_materials_clearcoat`'s `clearcoatTexture` (R) and
+/// `clearcoatRoughnessTexture` (G) read from one image. The extension has no
+/// tint, so `coat_color` is reported unsupported; Lightweald has no coat
+/// slot and reports all three. Coat roughness mips are filtered in `α²`,
+/// like specular roughness.
 pub fn pack(
     maps: &MaterialMaps,
     profile: Profile,
@@ -317,6 +339,9 @@ pub fn pack(
     check(maps.subsurface_weight.as_ref(), "subsurface_weight", 1)?;
     check(maps.subsurface_color.as_ref(), "subsurface_color", 3)?;
     check(maps.transmission_weight.as_ref(), "transmission_weight", 1)?;
+    check(maps.coat_weight.as_ref(), "coat_weight", 1)?;
+    check(maps.coat_roughness.as_ref(), "coat_roughness", 1)?;
+    check(maps.coat_color.as_ref(), "coat_color", 3)?;
     let present = [
         ("base_color", maps.base_color.as_ref()),
         ("opacity", maps.opacity.as_ref()),
@@ -332,6 +357,9 @@ pub fn pack(
         ("subsurface_weight", maps.subsurface_weight.as_ref()),
         ("subsurface_color", maps.subsurface_color.as_ref()),
         ("transmission_weight", maps.transmission_weight.as_ref()),
+        ("coat_weight", maps.coat_weight.as_ref()),
+        ("coat_roughness", maps.coat_roughness.as_ref()),
+        ("coat_color", maps.coat_color.as_ref()),
     ];
     let Some(first) = present.iter().find_map(|(_, i)| *i) else {
         return Ok(Bundle {
@@ -710,6 +738,97 @@ pub fn pack(
             size,
         ));
     }
+    let coat = maps.coat_weight.is_some() || maps.coat_roughness.is_some();
+    if !(0.0..=1.0).contains(&settings.coat_weight)
+        || !(0.0..=1.0).contains(&settings.coat_roughness)
+    {
+        return Err(EncodeError::InvalidParameter { name: "coat" });
+    }
+    let coat_weight = maps
+        .coat_weight
+        .as_ref()
+        .map(|w| data_mips(w, settings.filter));
+    let coat_roughness = maps
+        .coat_roughness
+        .as_ref()
+        .map(|r| roughness_mips(r, settings.filter));
+    match profile {
+        Profile::Lightweald => {
+            for (name, image) in [
+                ("coat_weight", &maps.coat_weight),
+                ("coat_roughness", &maps.coat_roughness),
+                ("coat_color", &maps.coat_color),
+            ] {
+                if image.is_some() {
+                    report.unsupported.push(name);
+                }
+            }
+        }
+        Profile::Gltf => {
+            if coat {
+                textures.push(encode(
+                    "clearcoat",
+                    PixelFormat::Rgba8Unorm,
+                    level_count,
+                    edge,
+                    |level, i, out| {
+                        out.push(quantize_unorm8(value(
+                            &coat_weight,
+                            level,
+                            i,
+                            settings.coat_weight,
+                        )));
+                        out.push(quantize_unorm8(value(
+                            &coat_roughness,
+                            level,
+                            i,
+                            settings.coat_roughness,
+                        )));
+                        out.push(0);
+                        out.push(255);
+                    },
+                    size,
+                ));
+            }
+            if maps.coat_color.is_some() {
+                report.unsupported.push("coat_color");
+            }
+        }
+        Profile::Raw => {
+            for (name, chain) in [
+                ("coat_weight", &coat_weight),
+                ("coat_roughness", &coat_roughness),
+            ] {
+                if chain.is_some() {
+                    textures.push(encode(
+                        name,
+                        PixelFormat::R8Unorm,
+                        level_count,
+                        edge,
+                        |level, i, out| out.push(quantize_unorm8(value(chain, level, i, 0.0))),
+                        size,
+                    ));
+                }
+            }
+            if let Some(color) = &maps.coat_color {
+                let chain = data_mips(color, settings.filter);
+                textures.push(encode(
+                    "coat_color",
+                    PixelFormat::Rgba8Unorm,
+                    level_count,
+                    edge,
+                    |level, i, out| {
+                        let t = &chain.levels()[level].values[i * 3..i * 3 + 3];
+                        for &c in t {
+                            out.push(quantize_unorm8(c));
+                        }
+                        out.push(255);
+                    },
+                    size,
+                ));
+            }
+        }
+    }
     if profile != Profile::Raw {
         for texture in &mut textures {
             if texture.name == "normal" {
@@ -1076,5 +1195,31 @@ mod tests {
             ..MaterialMaps::default()
         };
         assert!(pack(&mismatched, Profile::Gltf, &settings).is_err());
+    }
+
+    #[test]
+    fn coats_pack_per_profile() {
+        let maps = MaterialMaps {
+            coat_weight: Some(flat(1, &[0.75])),
+            coat_roughness: Some(flat(1, &[0.2])),
+            coat_color: Some(flat(3, &[0.9, 0.8, 0.5])),
+            ..MaterialMaps::default()
+        };
+        let settings = PackSettings::default();
+        let gltf = pack(&maps, Profile::Gltf, &settings).unwrap();
+        let clearcoat = gltf.texture("clearcoat").unwrap();
+        assert_eq!(clearcoat.levels[0][0], quantize_unorm8(0.75), "weight in R");
+        assert_eq!(
+            clearcoat.levels[0][1],
+            quantize_unorm8(0.2),
+            "roughness in G"
+        );
+        assert_eq!(gltf.report.unsupported, ["coat_color"], "no tint in glTF");
+        let lightweald = pack(&maps, Profile::Lightweald, &settings).unwrap();
+        assert!(lightweald.textures.is_empty(), "no coat slot");
+        assert_eq!(lightweald.report.unsupported.len(), 3);
+        let raw = pack(&maps, Profile::Raw, &settings).unwrap();
+        let names: Vec<_> = raw.textures.iter().map(|t| t.name).collect();
+        assert_eq!(names, ["coat_weight", "coat_roughness", "coat_color"]);
     }
 }

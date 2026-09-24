@@ -764,3 +764,71 @@ fn region_tables_measure_their_regions() {
     let o = seam.regions()[0].orientation;
     assert!(!(0.01..=core::f32::consts::PI - 0.01).contains(&o), "{o}");
 }
+
+// Slice 1b gate: curve-driven element spacing is independent of
+// realization resolution.
+#[test]
+fn curve_stitch_spacing_is_independent_of_resolution() {
+    let seam = Curve::open(
+        vec![
+            Vec2::new(0.1, 0.2),
+            Vec2::new(0.6, 0.35),
+            Vec2::new(0.8, 0.8),
+        ],
+        vec![0.004; 3],
+    )
+    .unwrap();
+    let net = CurveNetwork::new(domain(), vec![seam.clone()]);
+    let spacing = 0.06;
+    let stitches = net
+        .stitches(
+            LayoutId::named("test.seam"),
+            spacing,
+            Vec2::new(0.018, 0.006),
+            schema(),
+            |key, _, _| vec![Value::Scalar(key.unit(1)), Value::Scalar(0.5)],
+        )
+        .unwrap();
+    let inst = instance();
+    let maps: Vec<RegionMap> = [128_u32, 512]
+        .iter()
+        .map(|&size| {
+            let realized = Realized::composite(&composite(&stitches, &inst, size)).unwrap();
+            RegionMap::from_composite(&realized).unwrap()
+        })
+        .collect();
+    // The same stitches at every resolution, each where its arc length
+    // puts it, to within the resolution's texel.
+    for (map, size) in maps.iter().zip([128_u32, 512]) {
+        assert_eq!(map.regions().len(), stitches.len());
+        let texel = 1.0 / f(size);
+        for (i, &key) in stitches.keys().iter().enumerate() {
+            let region = map.region(RegionKey::of_element(key)).unwrap();
+            let expected = stitches.placement(i).center;
+            assert!(
+                (region.centroid - expected).length() < texel,
+                "{size}: {:?} vs {expected}",
+                region.centroid
+            );
+        }
+    }
+    // Consecutive stitches along the curve are `spacing` apart in arc
+    // length, whatever the resolution: centroids agree across resolutions.
+    for key in stitches.keys() {
+        let key = RegionKey::of_element(*key);
+        let (a, b) = (maps[0].region(key).unwrap(), maps[1].region(key).unwrap());
+        assert!((a.centroid - b.centroid).length() < 1.0 / 128.0);
+    }
+    // The seam as a field: the stroke's area is its length times its width
+    // at both resolutions.
+    for size in [128_u32, 512] {
+        let realization = dapple_raster::Realization::period(domain(), size, size).unwrap();
+        let stroke = dapple_raster::realize(&net.field(CurveOutput::Stroke), realization).unwrap();
+        let area: f32 = stroke.values().iter().sum::<f32>() / f(size * size);
+        let expected = seam.length() * 0.004;
+        assert!(
+            (area - expected).abs() < 0.08 * expected,
+            "{size}: {area} vs {expected}"
+        );
+    }
+}

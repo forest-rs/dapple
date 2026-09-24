@@ -37,12 +37,17 @@
 //!   identity; regions reconstructed from a mask are canonical, and a
 //!   separate [`RegionCorrespondence`] names every split and merge.
 //!   Per-region insets, edges and statistics feed shape processing.
+//! - **Curves** ([`curve`]): a [`CurveNetwork`] of polylines with arc
+//!   length and width profiles, exposed as fields (distance, along,
+//!   across, stroke) and as element layouts spaced in domain units along
+//!   each curve ([`CurveNetwork::stitches`]).
 
 #![no_std]
 
 extern crate alloc;
 
 pub mod composite;
+pub mod curve;
 pub mod identity;
 mod layout;
 pub mod program;
@@ -51,6 +56,9 @@ mod set;
 
 pub use composite::{
     Composite, CompositeError, Contribution, Contributors, Realized, UpdateReport,
+};
+pub use curve::{
+    Curve, CurveError, CurveField, CurveNetwork, CurveOutput, CurvePoint, CurveSample, Intersection,
 };
 pub use identity::{Anchor, ElementKey, LayoutId};
 pub use layout::RunningBond;

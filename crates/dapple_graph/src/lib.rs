@@ -21,11 +21,13 @@
 //! - **Reduce nodes** reduce a raster of any type to one mip level under an
 //!   explicit, type-checked `ReductionPolicy`, computed from the level-0
 //!   texels the level's texels cover.
-//! - **Sample nodes** read scalar rasters back as a field
-//!   ([`Op::Sample`]): a base raster, optionally with its mip chain, sampled
-//!   bilinearly and filtered by footprint. Field nodes build on them like on
-//!   any other field, so a realized, blurred or eroded height can be warped,
-//!   combined and realized again.
+//! - **Sample nodes** read rasters of any type back as a field
+//!   ([`Op::Sample`]): a base raster, optionally with its mip chain, under an
+//!   explicit, type-checked `SamplePolicy` (linear, filtered by footprint, or
+//!   nearest, the only policy for identifiers). Field nodes build on them
+//!   like on any other field, so a realized, blurred or eroded height can be
+//!   warped, combined and realized again, and a realized color, normal or
+//!   cell label read back with its type.
 //!
 //! Each node's parameters (the op, the resolution, the raster operation) are
 //! an input of that node, named `<label>.params`. Editing them with
@@ -35,10 +37,14 @@
 //! and reports.
 //!
 //! Every raster carries its semantic type ([`RasterValue::port`]): a mask
-//! stays a mask, a normal a normal, an identifier an identifier. Operations
-//! check it and refuse types they do not accept: a blur, mip or sample of
-//! identifiers, directions or normals is [`NodeError::TypeRefused`], and an
-//! average of identifiers is a refused reduction policy.
+//! stays a mask, a normal a normal, an identifier an identifier. Types are
+//! known when a node is added ([`MaterialGraph::port`]), so misuse is
+//! refused then, as [`MaterialError::Refused`], rather than when the graph
+//! runs: a blur or mip of identifiers, directions or normals is
+//! [`NodeError::TypeRefused`], an average of identifiers a refused
+//! reduction policy, and linear sampling of identifiers a refused sampling
+//! policy. An edit that would make any node's inputs invalid is refused
+//! the same way and leaves the graph unchanged. Running checks again.
 //!
 //! Values on edges are cheap handles: field programs and rasters are
 //! reference-counted, with fingerprints for caching and comparison.
@@ -127,7 +133,9 @@ use dapple_field::program::{
     Change, Fingerprint, NodeId as FieldNode, Op, ProgramBuilder, ProgramError, ValueProgram,
 };
 use dapple_field::raster::Region;
-use dapple_field::{Domain, DomainError, ImageLevel, NormalFrame, PortType, SampleImage};
+use dapple_field::{
+    Domain, DomainError, ImageLevel, NormalFrame, PortType, SampleImage, SamplePolicy,
+};
 use dapple_raster::typed::{ReductionPolicy, Storage, TypedError, TypedRaster, realize_value};
 use dapple_raster::{
     AmbientOcclusion, DistanceTransform, Edge, GaussianBlur, HeightToNormal, Raster, RasterError,
@@ -191,8 +199,8 @@ pub enum Params {
         /// The mip level, at least 1.
         level: u32,
     },
-    /// A sample node, which has no parameters of its own.
-    Sample,
+    /// A sample node's policy.
+    Sample(SamplePolicy),
     /// A normals node's resolution and height scale.
     Normals {
         /// Texels per row.
@@ -252,12 +260,34 @@ impl RasterData {
     }
 
     fn grid(&self, tile_size: u32) -> Grid {
-        let (w, h, edge) = match self {
-            Self::Scalar(r) => (r.width(), r.height(), r.edge()),
-            Self::Vector3(r) => (r.width(), r.height(), r.edge()),
-            Self::Typed(r) => (r.width(), r.height(), r.edge()),
-        };
+        let (w, h, _, _, edge) = self.shape();
         Grid::new(w, h, tile_size, edge)
+    }
+
+    /// Width, height, origin, texel size and edge policy.
+    fn shape(&self) -> (u32, u32, Vec2, Vec2, Edge) {
+        match self {
+            Self::Scalar(r) => (r.width(), r.height(), r.origin(), r.texel(), r.edge()),
+            Self::Vector3(r) => (r.width(), r.height(), r.origin(), r.texel(), r.edge()),
+            Self::Typed(r) => (r.width(), r.height(), r.origin(), r.texel(), r.edge()),
+        }
+    }
+
+    /// The texels as one level of a sampled image.
+    fn image_level(&self) -> Result<ImageLevel, DomainError> {
+        let (w, h, _, texel, _) = self.shape();
+        let floats =
+            |channels, values: Vec<f32>| ImageLevel::with_channels(w, h, texel, channels, values);
+        match self {
+            Self::Scalar(r) => ImageLevel::new(w, h, texel, r.values().to_vec()),
+            Self::Vector3(r) => floats(3, r.values().iter().flatten().copied().collect()),
+            Self::Typed(r) => match r.storage() {
+                Storage::F32(r) => ImageLevel::new(w, h, texel, r.values().to_vec()),
+                Storage::U32(r) => ImageLevel::ids(w, h, texel, r.values().to_vec()),
+                Storage::F32x2(r) => floats(2, r.values().iter().flatten().copied().collect()),
+                Storage::F32x3(r) => floats(3, r.values().iter().flatten().copied().collect()),
+            },
+        }
     }
 
     /// The texels as a [`TypedRaster`] of type `port`.
@@ -326,8 +356,21 @@ pub enum NodeKind {
     Mip,
     /// Reduces a typed raster to one mip level under an explicit policy.
     Reduce,
-    /// Samples scalar rasters, with their mips, as a field.
+    /// Samples rasters, with their mips, as a field.
     Sample,
+}
+
+impl NodeKind {
+    /// Whether nodes of this kind output a field (rather than a raster).
+    #[must_use]
+    pub const fn outputs_field(self) -> bool {
+        matches!(self, Self::Field | Self::Sample)
+    }
+
+    /// Whether nodes of this kind read fields (rather than rasters).
+    const fn reads_fields(self) -> bool {
+        matches!(self, Self::Field | Self::Realize | Self::Normals)
+    }
 }
 
 /// State a field node keeps between runs.
@@ -443,6 +486,21 @@ pub enum NodeError {
         /// The raster's type.
         port: PortType,
     },
+    /// A sampling policy that is not meaningful for the rasters' type:
+    /// linear interpolation of identifiers.
+    SamplingRefused {
+        /// The rasters' type.
+        port: PortType,
+        /// The refused policy.
+        policy: SamplePolicy,
+    },
+    /// A sample node's mip levels hold another type than its base.
+    MixedLevels {
+        /// The base raster's type.
+        base: PortType,
+        /// A level's differing type.
+        found: PortType,
+    },
 }
 
 impl fmt::Display for NodeError {
@@ -460,6 +518,12 @@ impl fmt::Display for NodeError {
             Self::TypeRefused { operation, port } => {
                 write!(f, "{operation} does not accept {port} rasters")
             }
+            Self::SamplingRefused { port, policy } => {
+                write!(f, "{policy:?} is not a sampling policy for {port} rasters")
+            }
+            Self::MixedLevels { base, found } => {
+                write!(f, "a {base} base cannot have {found} mip levels")
+            }
         }
     }
 }
@@ -473,6 +537,16 @@ pub enum MaterialError {
     DuplicateLabel(String),
     /// A node is not part of this graph, or has the wrong kind for the call.
     UnknownNode,
+    /// A node, or an edit, was refused when it was made: the node named
+    /// `label` would receive inputs it does not accept, for example a mip of
+    /// identifiers or a reduction policy the input's type does not permit.
+    /// The graph is unchanged.
+    Refused {
+        /// The refusing node's label.
+        label: String,
+        /// Why it refuses its inputs.
+        error: NodeError,
+    },
     /// The graph rejected a call or a node failed.
     Graph(GraphError<NodeError>),
 }
@@ -488,6 +562,7 @@ impl fmt::Display for MaterialError {
         match self {
             Self::DuplicateLabel(label) => write!(f, "label {label:?} is already used"),
             Self::UnknownNode => f.write_str("unknown node, or a node of another kind"),
+            Self::Refused { label, error } => write!(f, "node {label:?}: {error}"),
             Self::Graph(error) => write!(f, "{error:?}"),
         }
     }
@@ -1355,20 +1430,21 @@ fn run_reduce(
     )
 }
 
-/// The domain an image of `raster` samples over: the period a wrapping
+/// The domain an image of `data` samples over: the period a wrapping
 /// raster covers, or the plane.
-fn image_domain(raster: &Raster) -> Result<Domain, NodeError> {
+fn image_domain(data: &RasterData) -> Result<Domain, NodeError> {
     let invalid = NodeError::Program(ProgramError::Domain(DomainError::InvalidParameter {
         name: "image",
     }));
-    match raster.edge() {
+    let (width, height, _, texel, edge) = data.shape();
+    match edge {
         Edge::Clamp => Ok(Domain::Plane),
         Edge::Wrap => {
             #[expect(
                 clippy::cast_precision_loss,
                 reason = "raster sizes are far below f32's exact integer range"
             )]
-            let covered = Vec2::new(raster.width() as f32, raster.height() as f32) * raster.texel();
+            let covered = Vec2::new(width as f32, height as f32) * texel;
             let whole = |v: f32| {
                 #[expect(
                     clippy::cast_possible_truncation,
@@ -1386,46 +1462,48 @@ fn image_domain(raster: &Raster) -> Result<Domain, NodeError> {
     }
 }
 
+/// The type of what a sample node reads from rasters of types `levels`
+/// (base first) under `policy`, or why it refuses them.
+fn sample_port(levels: &[PortType], policy: SamplePolicy) -> Result<PortType, NodeError> {
+    let &base = levels
+        .first()
+        .ok_or(NodeError::WrongValue { expected: "raster" })?;
+    if let Some(&found) = levels.iter().find(|&&port| port != base) {
+        return Err(NodeError::MixedLevels { base, found });
+    }
+    if !policy.permits(base) {
+        return Err(NodeError::SamplingRefused { port: base, policy });
+    }
+    Ok(base)
+}
+
 fn run_sample(
     tiles: &mut Tiles,
     node: u32,
     state: &mut SampleState,
+    policy: SamplePolicy,
     inputs: &[GraphValue],
 ) -> Result<GraphValue, NodeError> {
     let domain_error = |e: DomainError| NodeError::Program(ProgramError::Domain(e));
-    let mut rasters = Vec::with_capacity(inputs.len());
-    for input in inputs {
-        let value = raster_input(input)?;
-        let (RasterData::Scalar(raster), PortType::Scalar | PortType::Mask) =
-            (&value.data, value.port)
-        else {
-            return Err(NodeError::TypeRefused {
-                operation: "sampling",
-                port: value.port,
-            });
-        };
-        rasters.push((value, raster));
-    }
-    let Some(&(_, base)) = rasters.first() else {
-        return Err(NodeError::WrongValue { expected: "raster" });
-    };
+    let rasters = inputs
+        .iter()
+        .map(raster_input)
+        .collect::<Result<Vec<_>, _>>()?;
+    let ports: Vec<PortType> = rasters.iter().map(|value| value.port).collect();
+    let port = sample_port(&ports, policy)?;
+    let base = &rasters[0].data;
     let domain = image_domain(base)?;
-    let mut levels = Vec::with_capacity(rasters.len());
-    for (_, raster) in &rasters {
-        levels.push(
-            ImageLevel::new(
-                raster.width(),
-                raster.height(),
-                raster.texel(),
-                raster.values().to_vec(),
-            )
-            .map_err(domain_error)?,
-        );
-    }
-    let fingerprints: Vec<u64> = rasters.iter().map(|(v, _)| v.fingerprint).collect();
-    let image = SampleImage::new(
+    let levels = rasters
+        .iter()
+        .map(|value| value.data.image_level())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(domain_error)?;
+    let fingerprints: Vec<u64> = rasters.iter().map(|v| v.fingerprint).collect();
+    let image = SampleImage::typed(
+        port,
+        policy,
         domain,
-        base.origin(),
+        base.shape().2,
         levels,
         sample_derivation(&fingerprints),
     )
@@ -1440,12 +1518,7 @@ fn run_sample(
     // leave say where the image changed.
     let grids: Vec<(u32, Grid)> = rasters
         .iter()
-        .map(|(value, raster)| {
-            (
-                value.tile_space,
-                Grid::new(raster.width(), raster.height(), tiles.size(), raster.edge()),
-            )
-        })
+        .map(|value| (value.tile_space, value.data.grid(tiles.size())))
         .collect();
     let same = state.output.is_some()
         && state.levels.len() == grids.len()
@@ -1475,8 +1548,7 @@ fn run_sample(
     let mut change = Change::Nowhere;
     for (level, (_, grid, keys)) in state.levels.iter().enumerate() {
         let marked = tiles.take_marked(keys);
-        let raster = rasters[level].1;
-        let (origin, texel) = (raster.origin(), raster.texel());
+        let (_, _, origin, texel, _) = rasters[level].data.shape();
         let regions: Vec<Region> = marked
             .into_iter()
             .map(|t| {
@@ -1507,6 +1579,67 @@ fn run_sample(
         previous,
         change: if same { change } else { Change::Everywhere },
     })))
+}
+
+/// The type a node of `kind` with `params` outputs from inputs of types
+/// `inputs`, or why it refuses them: the same checks its run makes, made
+/// when the node is added or edited.
+fn output_port(
+    kind: NodeKind,
+    params: &Params,
+    inputs: &[PortType],
+) -> Result<PortType, NodeError> {
+    let first = || {
+        inputs.first().copied().ok_or(NodeError::WrongValue {
+            expected: "an input",
+        })
+    };
+    let scalar_only = |operation: &'static str| {
+        let port = first()?;
+        if port.is_scalar() {
+            Ok(port)
+        } else {
+            Err(NodeError::TypeRefused { operation, port })
+        }
+    };
+    match (kind, params) {
+        (NodeKind::Field, Params::Field(op)) => {
+            if let Some(operand) = op
+                .inputs()
+                .iter()
+                .find(|operand| operand.index() as usize >= inputs.len())
+            {
+                return Err(NodeError::MissingOperand {
+                    index: operand.index(),
+                });
+            }
+            op.port_type_with(|operand| inputs[operand.index() as usize])
+                .map_err(NodeError::Program)
+        }
+        (NodeKind::Realize, Params::Realize { .. }) => first(),
+        (NodeKind::Normals, Params::Normals { .. }) => {
+            scalar_only("normals")?;
+            Ok(PortType::Normal(NormalFrame::Domain))
+        }
+        (NodeKind::Raster, Params::Raster(params)) => {
+            Ok(raster_output(*params, scalar_only(raster_name(*params))?))
+        }
+        (NodeKind::Mip, Params::Mip(_)) => scalar_only("mip filtering"),
+        (NodeKind::Reduce, Params::Reduce { policy, level }) => {
+            let port = first()?;
+            policy.check(port).map_err(NodeError::Typed)?;
+            if *level == 0 {
+                return Err(NodeError::WrongValue {
+                    expected: "a mip level of at least 1",
+                });
+            }
+            Ok(port)
+        }
+        (NodeKind::Sample, Params::Sample(policy)) => sample_port(inputs, *policy),
+        _ => Err(NodeError::WrongValue {
+            expected: "params of the node's kind",
+        }),
+    }
 }
 
 impl Executor for DappleExecutor {
@@ -1572,9 +1705,13 @@ impl Executor for DappleExecutor {
                 (*policy, *level),
                 &upstream[0],
             )?,
-            (NodeKind::Sample, Params::Sample) => {
-                run_sample(&mut self.tiles, node.key, &mut node.sample, upstream)?
-            }
+            (NodeKind::Sample, Params::Sample(policy)) => run_sample(
+                &mut self.tiles,
+                node.key,
+                &mut node.sample,
+                *policy,
+                upstream,
+            )?,
             _ => {
                 return Err(NodeError::WrongValue {
                     expected: "params of the node's kind",
@@ -1630,6 +1767,8 @@ struct Entry {
     label: String,
     params: Params,
     upstream: Vec<NodeId>,
+    /// The output's type, derived when the node was added or last edited.
+    port: PortType,
 }
 
 /// An incremental material graph; see the [crate docs](crate).
@@ -1681,6 +1820,9 @@ impl MaterialGraph {
         if upstream.iter().any(|n| !self.entries.contains_key(n)) {
             return Err(MaterialError::UnknownNode);
         }
+        let port = self.check_node(kind, label, &params, upstream, |node| {
+            self.entries[&node].port
+        })?;
         let params_name = Self::params_name(label);
         let mut inputs: Vec<Box<str>> = vec![params_name.clone().into()];
         inputs.extend((0..upstream.len()).map(|i| Box::from(format!("{label}.in{i}"))));
@@ -1709,14 +1851,57 @@ impl MaterialGraph {
                 label: label.into(),
                 params,
                 upstream: upstream.to_vec(),
+                port,
             },
         );
         self.order.push(node);
         Ok(node)
     }
 
+    /// The type of `kind` node `label`'s output with `params` over
+    /// `upstream`, whose types `port` gives, or [`MaterialError::Refused`].
+    fn check_node(
+        &self,
+        kind: NodeKind,
+        label: &str,
+        params: &Params,
+        upstream: &[NodeId],
+        port: impl Fn(NodeId) -> PortType,
+    ) -> Result<PortType, MaterialError> {
+        let refused = |error| MaterialError::Refused {
+            label: label.into(),
+            error,
+        };
+        for node in upstream {
+            if self.entries[node].kind.outputs_field() != kind.reads_fields() {
+                return Err(refused(NodeError::WrongValue {
+                    expected: if kind.reads_fields() {
+                        "field"
+                    } else {
+                        "raster"
+                    },
+                }));
+            }
+        }
+        let inputs: Vec<PortType> = upstream.iter().map(|&node| port(node)).collect();
+        output_port(kind, params, &inputs).map_err(refused)
+    }
+
+    /// The type of `node`'s output, known from the graph's structure alone:
+    /// the type of its field, or of every texel of its raster.
+    #[must_use]
+    pub fn port(&self, node: NodeId) -> Option<PortType> {
+        self.entries.get(&node).map(|entry| entry.port)
+    }
+
     /// Adds a field node computing `op` over the fields of `upstream`, which
     /// its operands name by position ([`operand`]).
+    ///
+    /// # Errors
+    ///
+    /// [`MaterialError::Refused`] when `op` does not accept its operands'
+    /// types; [`MaterialError::DuplicateLabel`] or
+    /// [`MaterialError::UnknownNode`].
     pub fn field(
         &mut self,
         label: &str,
@@ -1726,8 +1911,8 @@ impl MaterialGraph {
         self.add(NodeKind::Field, label, Params::Field(op), upstream)
     }
 
-    /// Adds a node realizing the scalar periodic field of `field` over one
-    /// period at `width` × `height` texels.
+    /// Adds a node realizing the periodic field of `field` over one period
+    /// at `width` × `height` texels, as a raster of the field's type.
     pub fn realize(
         &mut self,
         label: &str,
@@ -1766,6 +1951,11 @@ impl MaterialGraph {
     }
 
     /// Adds a node applying `params` to the scalar raster of `raster`.
+    ///
+    /// # Errors
+    ///
+    /// [`MaterialError::Refused`] with [`NodeError::TypeRefused`] unless
+    /// `raster` holds scalars or masks.
     pub fn raster(
         &mut self,
         label: &str,
@@ -1792,13 +1982,14 @@ impl MaterialGraph {
     /// least 1) under `policy`, computed from the level-0 texels each output
     /// texel covers (`dapple_raster::typed::reduce`).
     ///
-    /// The policy is explicit: the node fails when it is not meaningful for
-    /// the raster's type ([`NodeError::Typed`]), and it is part of the
-    /// output's fingerprint. `ReductionPolicy::default_for` names the usual
-    /// choice for a type. Reduce nodes compute whole.
+    /// The policy is explicit and part of the output's fingerprint.
+    /// `ReductionPolicy::default_for` names the usual choice for a type.
+    /// Reduce nodes compute whole.
     ///
     /// # Errors
     ///
+    /// [`MaterialError::Refused`] with [`NodeError::Typed`] for a policy
+    /// that is not meaningful for the raster's type, or a level of 0;
     /// [`MaterialError::DuplicateLabel`] or [`MaterialError::UnknownNode`].
     pub fn reduce(
         &mut self,
@@ -1816,6 +2007,11 @@ impl MaterialGraph {
     }
 
     /// Changes a reduce node's policy and level.
+    ///
+    /// # Errors
+    ///
+    /// [`MaterialError::Refused`], leaving the node unchanged, for a policy
+    /// the input's type does not permit.
     pub fn set_reduction(
         &mut self,
         node: NodeId,
@@ -1825,16 +2021,41 @@ impl MaterialGraph {
         self.set_params(node, NodeKind::Reduce, Params::Reduce { policy, level })
     }
 
-    /// Adds a node sampling the scalar rasters of `levels` as a field: the
-    /// base raster first, then its mip chain, finest to coarsest (mip nodes
-    /// chained from the base, for example). With one level the field is not
-    /// band-limited; with mips it is filtered by footprint (see
-    /// `dapple_field::SampleImage`).
+    /// Adds a node sampling the rasters of `levels` as a field of their
+    /// type under `policy`: the base raster first, then its mip chain,
+    /// finest to coarsest (mip or reduce nodes from the base, for example).
+    /// With one level the field is not band-limited; with mips it is
+    /// filtered by footprint (see `dapple_field::SampleImage`).
+    ///
+    /// `SamplePolicy::default_for` names the usual policy for a type:
+    /// nearest for identifiers, which is the only one they permit, and
+    /// linear otherwise. The policy is part of the field's fingerprint.
     ///
     /// A wrapping raster, such as a realization over one period, samples as
     /// a periodic field over that period; a clamping one as a plane field.
-    pub fn sample(&mut self, label: &str, levels: &[NodeId]) -> Result<NodeId, MaterialError> {
-        self.add(NodeKind::Sample, label, Params::Sample, levels)
+    ///
+    /// # Errors
+    ///
+    /// [`MaterialError::Refused`] with [`NodeError::SamplingRefused`] for a
+    /// policy the rasters' type does not permit, or
+    /// [`NodeError::MixedLevels`] for levels of different types;
+    /// [`MaterialError::DuplicateLabel`] or [`MaterialError::UnknownNode`].
+    pub fn sample(
+        &mut self,
+        label: &str,
+        levels: &[NodeId],
+        policy: SamplePolicy,
+    ) -> Result<NodeId, MaterialError> {
+        self.add(NodeKind::Sample, label, Params::Sample(policy), levels)
+    }
+
+    /// Changes a sample node's policy.
+    pub fn set_sample_policy(
+        &mut self,
+        node: NodeId,
+        policy: SamplePolicy,
+    ) -> Result<(), MaterialError> {
+        self.set_params(node, NodeKind::Sample, Params::Sample(policy))
     }
 
     fn set_params(
@@ -1843,13 +2064,25 @@ impl MaterialGraph {
         kind: NodeKind,
         params: Params,
     ) -> Result<(), MaterialError> {
-        let entry = self
-            .entries
-            .get_mut(&node)
-            .ok_or(MaterialError::UnknownNode)?;
+        let entry = self.entries.get(&node).ok_or(MaterialError::UnknownNode)?;
         if entry.kind != kind {
             return Err(MaterialError::UnknownNode);
         }
+        // Retype every node with the edit applied, refusing it if any node
+        // would receive inputs it does not accept.
+        let mut ports: BTreeMap<NodeId, PortType> = BTreeMap::new();
+        for &id in &self.order {
+            let e = &self.entries[&id];
+            let p = if id == node { &params } else { &e.params };
+            let port = self.check_node(e.kind, &e.label, p, &e.upstream, |n| ports[&n])?;
+            ports.insert(id, port);
+        }
+        for (id, port) in ports {
+            if let Some(e) = self.entries.get_mut(&id) {
+                e.port = port;
+            }
+        }
+        let entry = self.entries.get_mut(&node).expect("checked above");
         let name = Self::params_name(&entry.label);
         entry.params = params.clone();
         self.graph

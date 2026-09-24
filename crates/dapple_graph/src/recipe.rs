@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use dapple_encode::Filter;
+use dapple_field::SamplePolicy;
 use dapple_field::hash::hash;
 use dapple_field::program::{Fingerprint, Op, sample_fingerprint};
 use execution_graph::NodeId;
@@ -31,7 +32,7 @@ use dapple_raster::typed::ReductionPolicy;
 ///
 /// A reader refuses other versions. The version changes when a recipe's
 /// meaning or its fingerprints change.
-pub const RECIPE_VERSION: u32 = 1;
+pub const RECIPE_VERSION: u32 = 2;
 
 /// What a node computes, and from which labeled inputs.
 #[derive(Clone, Debug, PartialEq)]
@@ -83,6 +84,8 @@ pub enum Step {
     Sample {
         /// Labels of the base raster node and its mip nodes, finest first.
         inputs: Vec<String>,
+        /// How texels are interpolated.
+        policy: SamplePolicy,
     },
     /// A normals node over one period of its field
     /// ([`MaterialGraph::normals`]).
@@ -281,7 +284,7 @@ impl Recipe {
                         return Err(wrong(input));
                     }
                 }
-                Step::Sample { inputs } => {
+                Step::Sample { inputs, .. } => {
                     if inputs.is_empty() {
                         return Err(RecipeError::WrongInput {
                             at: node.label.clone(),
@@ -401,7 +404,7 @@ impl Recipe {
                     }
                     NodeFingerprint::Field(_) => unreachable!("checked: reductions read rasters"),
                 },
-                Step::Sample { inputs } => {
+                Step::Sample { inputs, policy } => {
                     let rasters: Vec<u64> = inputs
                         .iter()
                         .map(|label| match out[label] {
@@ -411,7 +414,7 @@ impl Recipe {
                             }
                         })
                         .collect();
-                    NodeFingerprint::Field(sample_fingerprint(sample_derivation(&rasters)))
+                    NodeFingerprint::Field(sample_fingerprint(sample_derivation(&rasters), *policy))
                 }
             };
             out.insert(node.label.clone(), fingerprint);
@@ -468,7 +471,9 @@ impl Recipe {
     /// [`RecipeError::Version`], [`RecipeError::DuplicateLabel`],
     /// [`RecipeError::UnknownLabel`] or [`RecipeError::WrongInput`] for a
     /// malformed recipe; [`RecipeError::Material`] when the graph rejects a
-    /// node. Invalid ops fail when the graph runs.
+    /// node, including a node that refuses its inputs' types
+    /// ([`MaterialError::Refused`]). Invalid op parameters fail when the
+    /// graph runs.
     pub fn build(
         &self,
         tile_size: u32,
@@ -494,9 +499,9 @@ impl Recipe {
                     policy,
                     level,
                 } => graph.reduce(&node.label, ids[input], *policy, *level)?,
-                Step::Sample { inputs } => {
+                Step::Sample { inputs, policy } => {
                     let levels: Vec<NodeId> = inputs.iter().map(|l| ids[l]).collect();
-                    graph.sample(&node.label, &levels)?
+                    graph.sample(&node.label, &levels, *policy)?
                 }
                 Step::Normals {
                     input,
@@ -545,8 +550,9 @@ impl MaterialGraph {
                         policy: *policy,
                         level: *level,
                     },
-                    Params::Sample => Step::Sample {
+                    Params::Sample(policy) => Step::Sample {
                         inputs: entry.upstream.iter().map(label).collect(),
+                        policy: *policy,
                     },
                     Params::Normals {
                         width,

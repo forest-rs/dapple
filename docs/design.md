@@ -845,6 +845,16 @@ meaning.
   refused when the graph is built; policies change fingerprints; a normal
   chain keeps its mean length through the graph and the packer's roughness
   adjustment matches a direct computation.
+- *As built:* `TypedRaster` storage and `ReductionPolicy` in
+  `dapple_raster::typed`; `SampleImage` keeps a `PortType` and samples
+  under a `SamplePolicy` (`Linear` per component and never renormalized,
+  or `Nearest`, the only policy identifiers permit), which `Op::Sample`
+  fingerprints. Material graphs derive every node's type when it is added
+  (`Op::port_type_with` for field ops), so a refused type or policy is a
+  `MaterialError::Refused` from the builder, and an edit that would
+  mistype any node is refused and leaves the graph unchanged. The gates are
+  `dapple_graph` tests (`every_type_survives_realize_reduce_sample` among
+  them).
 
 #### Slice 1a: keyed elements and one coherent material
 

@@ -8,7 +8,10 @@ use alloc::vec::Vec;
 use glam::Vec2;
 
 use crate::program::{Fingerprint, Op, ProgramBuilder, sample_fingerprint};
-use crate::{Basis, Domain, Footprint, ImageLevel, Noise, SampleImage, ScalarField};
+use crate::{
+    Basis, Domain, Footprint, ImageLevel, Noise, NormalFrame, PortType, Primaries, SampleImage,
+    SamplePolicy, ScalarField, Value,
+};
 
 fn torus() -> Domain {
     Domain::periodic(1, 1).unwrap()
@@ -202,7 +205,10 @@ fn sample_ops_fingerprint_their_derivation() {
         let id = b.add(Op::Sample { image }).unwrap();
         b.finish(id).unwrap().fingerprint()
     };
-    assert_eq!(fp(a.clone()), sample_fingerprint(Fingerprint(7)));
+    assert_eq!(
+        fp(a.clone()),
+        sample_fingerprint(Fingerprint(7), SamplePolicy::Linear)
+    );
     assert_eq!(fp(a.clone()), fp(same), "texels are not fingerprinted");
     assert_ne!(fp(a), fp(other));
 }
@@ -247,4 +253,194 @@ fn programs_sample_bit_identically_through_flat_and_recursive_plans() {
             );
         }
     }
+}
+
+/// A `size` × `size` level over one period with `channels` components per
+/// texel from `f(x, y)`.
+fn channels_level(size: u32, channels: u8, f: impl Fn(u32, u32) -> [f32; 3]) -> ImageLevel {
+    let mut values = Vec::new();
+    for y in 0..size {
+        for x in 0..size {
+            values.extend_from_slice(&f(x, y)[..usize::from(channels)]);
+        }
+    }
+    #[expect(clippy::cast_precision_loss, reason = "tiny test sizes")]
+    let texel = Vec2::splat(1.0 / size as f32);
+    ImageLevel::with_channels(size, size, texel, channels, values).unwrap()
+}
+
+fn typed(port: PortType, policy: SamplePolicy, levels: Vec<ImageLevel>) -> SampleImage {
+    SampleImage::typed(port, policy, torus(), Vec2::ZERO, levels, Fingerprint(1)).unwrap()
+}
+
+#[test]
+fn typed_images_check_their_levels_and_policy() {
+    let color = PortType::Color(Primaries::Rec709);
+    let three = || channels_level(4, 3, |x, y| [x as f32, y as f32, 1.0]);
+    let make = |port, policy, level| {
+        SampleImage::typed(
+            port,
+            policy,
+            torus(),
+            Vec2::ZERO,
+            alloc::vec![level],
+            Fingerprint(0),
+        )
+    };
+    assert!(make(color, SamplePolicy::Linear, three()).is_ok());
+    // Three channels are not a direction.
+    assert!(make(PortType::Direction, SamplePolicy::Linear, three()).is_err());
+    let ids = || ImageLevel::ids(4, 4, Vec2::splat(0.25), alloc::vec![7_u32; 16]).unwrap();
+    assert!(make(PortType::Id, SamplePolicy::Nearest, ids()).is_ok());
+    // Identifiers never interpolate, and numbers are not identifiers.
+    assert_eq!(
+        make(PortType::Id, SamplePolicy::Linear, ids()).err(),
+        Some(crate::DomainError::InvalidParameter {
+            name: "sample policy"
+        })
+    );
+    assert!(make(PortType::Scalar, SamplePolicy::Nearest, ids()).is_err());
+    assert!(ImageLevel::with_channels(4, 4, Vec2::splat(0.25), 4, alloc::vec![0.0; 64]).is_err());
+    assert!(ImageLevel::with_channels(4, 4, Vec2::splat(0.25), 2, alloc::vec![0.0; 31]).is_err());
+    assert!(SamplePolicy::default_for(PortType::Id).permits(PortType::Id));
+    assert!(!SamplePolicy::Linear.permits(PortType::Id));
+}
+
+#[test]
+fn linear_sampling_interpolates_each_component_like_a_scalar() {
+    let f = |x: u32, y: u32| {
+        let (x, y) = (x as f32, y as f32);
+        [x * 0.25 + y, y * y - x, (x * 3.0 + y) * 0.1]
+    };
+    let vectors = typed(
+        PortType::Vector3,
+        SamplePolicy::Linear,
+        alloc::vec![channels_level(8, 3, f)],
+    );
+    let channel = |k: usize| {
+        let mut values = Vec::new();
+        for y in 0..8 {
+            for x in 0..8 {
+                values.push(f(x, y)[k]);
+            }
+        }
+        image(alloc::vec![level(8, values)], 1)
+    };
+    for p in [Vec2::new(0.13, 0.71), Vec2::new(0.99, 0.02)] {
+        let Value::Vector3(v) = vectors.sample_value(p, Footprint::POINT) else {
+            panic!("vector3 images sample vectors")
+        };
+        for k in 0..3 {
+            assert_eq!(
+                v[k].to_bits(),
+                channel(k).sample(p, Footprint::POINT).to_bits()
+            );
+        }
+    }
+}
+
+#[test]
+fn normals_keep_their_mean_length_and_directions_stay_axial() {
+    // Alternating tilts: halfway between two texels the mean normal is
+    // shorter than 1, and sampling keeps that length.
+    let tilt = |s: f32| glam::Vec3::new(s, 0.0, 1.0).normalize().to_array();
+    let normals = typed(
+        PortType::Normal(NormalFrame::Domain),
+        SamplePolicy::Linear,
+        alloc::vec![channels_level(4, 3, |x, _| tilt(if x % 2 == 0 {
+            0.8
+        } else {
+            -0.8
+        }))],
+    );
+    let Value::Vector3(mid) = normals.sample_value(Vec2::new(0.25, 0.125), Footprint::POINT) else {
+        panic!("normals sample vectors")
+    };
+    assert!(
+        (mid.length() - 1.0 / libm::sqrtf(1.64)).abs() < 1e-5,
+        "{mid}"
+    );
+    // A direction and its opposite (θ and θ + π) share a doubled-angle
+    // vector, so their blend is that direction at full agreement.
+    let axis = |theta: f32| [libm::cosf(2.0 * theta), libm::sinf(2.0 * theta), 0.0];
+    let pi = core::f32::consts::PI;
+    let directions = typed(
+        PortType::Direction,
+        SamplePolicy::Linear,
+        alloc::vec![channels_level(4, 2, |x, _| axis(if x % 2 == 0 {
+            0.4
+        } else {
+            0.4 + pi
+        }))],
+    );
+    let Value::Vector2(d) = directions.sample_value(Vec2::new(0.25, 0.125), Footprint::POINT)
+    else {
+        panic!("directions sample doubled-angle vectors")
+    };
+    assert!((d.length() - 1.0).abs() < 1e-5);
+    assert!((0.5 * libm::atan2f(d.y, d.x) - 0.4).abs() < 1e-5);
+}
+
+#[test]
+fn identifiers_sample_the_nearest_texel_of_the_nearest_level() {
+    let ids: Vec<u32> = (0..16).collect();
+    let fine = ImageLevel::ids(4, 4, Vec2::splat(0.25), ids).unwrap();
+    let coarse = ImageLevel::ids(2, 2, Vec2::splat(0.5), alloc::vec![100, 101, 102, 103]).unwrap();
+    let image = typed(
+        PortType::Id,
+        SamplePolicy::Nearest,
+        alloc::vec![fine, coarse],
+    );
+    // Texel (2, 1) of level 0 holds 6; just past a texel border the
+    // neighbor wins, never a blend.
+    assert_eq!(
+        image.sample_value(Vec2::new(0.6, 0.3), Footprint::POINT),
+        Value::Id(6)
+    );
+    assert_eq!(
+        image.sample_value(Vec2::new(0.49, 0.3), Footprint::POINT),
+        Value::Id(5)
+    );
+    // Periodic: wraps.
+    assert_eq!(
+        image.sample_value(Vec2::new(1.6, -0.7), Footprint::POINT),
+        Value::Id(6)
+    );
+    // A footprint of 1.6 texels rounds to level 1; of 1.3 to level 0.
+    let at = |w: f32| image.sample_value(Vec2::new(0.6, 0.3), Footprint::new(w).unwrap());
+    assert_eq!(at(0.4), Value::Id(101));
+    assert_eq!(at(0.325), Value::Id(6));
+    // A program sampling identifiers has identifier type and value.
+    let mut b = ProgramBuilder::new();
+    let id = b.add(Op::Sample { image }).unwrap();
+    assert_eq!(b.port_type(id), Ok(PortType::Id));
+    let program = b.finish_value(id).unwrap();
+    assert_eq!(
+        program.eval(Vec2::new(0.6, 0.3), Footprint::POINT),
+        Value::Id(6)
+    );
+}
+
+#[test]
+fn sampling_policies_are_fingerprinted() {
+    let values = texels(&noise(), 8);
+    let fp = |policy| {
+        let image = SampleImage::typed(
+            PortType::Scalar,
+            policy,
+            torus(),
+            Vec2::ZERO,
+            alloc::vec![level(8, values.clone())],
+            Fingerprint(3),
+        )
+        .unwrap();
+        let mut b = ProgramBuilder::new();
+        let id = b.add(Op::Sample { image }).unwrap();
+        b.finish(id).unwrap().fingerprint()
+    };
+    assert_ne!(fp(SamplePolicy::Linear), fp(SamplePolicy::Nearest));
+    assert_eq!(
+        fp(SamplePolicy::Nearest),
+        sample_fingerprint(Fingerprint(3), SamplePolicy::Nearest)
+    );
 }

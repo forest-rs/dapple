@@ -94,7 +94,7 @@ pub use cellular::{CellOutput, CellSample, Cellular, CellularField};
 pub use domain::{Domain, Domain3, DomainError, Footprint, MAX_LATTICE_CELLS};
 pub use field::{Affine2, Affine3, PlaneField, ScalarField, Transformed, central_difference};
 pub use fractal::{Fractal, FractalKind, FractalParams, MAX_OCTAVES};
-pub use image::{Edge, ImageLevel, SampleImage};
+pub use image::{Edge, ImageLevel, SampleImage, SamplePolicy};
 pub use noise::{Basis, Noise};
 pub use scatter::{Placement, Scatter, ScatterField, ScatterOutput, Stamp};
 pub use shape::Disk;

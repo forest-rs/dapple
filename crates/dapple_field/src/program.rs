@@ -59,7 +59,7 @@ use crate::domain::{Domain, Domain3, DomainError, Footprint};
 use crate::field::{Affine2, Affine3, ScalarField, check_transform, check_transform3};
 use crate::fractal::{Fractal, FractalKind, FractalParams};
 use crate::hash::hash;
-use crate::image::SampleImage;
+use crate::image::{SampleImage, SamplePolicy};
 use crate::noise::{Basis, Noise};
 use crate::raster::Region;
 use crate::scatter::{Placement, Scatter, ScatterField, ScatterOutput, Stamp};
@@ -79,7 +79,9 @@ pub use flat::{EvaluationStats, Evaluator};
 
 /// Version of the fingerprint encoding. Changing any word the encoding emits
 /// requires a new version, so persisted fingerprints never collide.
-pub const FINGERPRINT_VERSION: u64 = 1;
+///
+/// Version 2 added an [`Op::Sample`] image's [`SamplePolicy`] word.
+pub const FINGERPRINT_VERSION: u64 = 2;
 
 /// Where a program node is defined: over a planar or a solid domain.
 ///
@@ -671,6 +673,23 @@ impl Op {
         }
     }
 
+    /// The [`PortType`] a node computing this op has when its operands have
+    /// the types `port` gives, by the rules [`ProgramBuilder::add`] applies.
+    ///
+    /// Only types are checked: domains, spaces and parameters are checked
+    /// when a program is built. A material graph uses this to refuse
+    /// mistyped nodes when they are added rather than when they run.
+    ///
+    /// # Errors
+    ///
+    /// [`ProgramError::TypeMismatch`] when an operand's type does not fit.
+    pub fn port_type_with(
+        &self,
+        port: impl Fn(NodeId) -> PortType,
+    ) -> Result<PortType, ProgramError> {
+        derive_port(self, &port)
+    }
+
     /// This op's [`Fingerprint`] with `inputs`, the fingerprints of its
     /// operands in operand order: the fingerprint a program node computing
     /// this op over those inputs has.
@@ -812,7 +831,7 @@ impl Op {
             }
             Self::Sample { ref image } => {
                 let [lo, hi] = fingerprint_halves(image.derivation());
-                words.extend([lo, hi]);
+                words.extend([lo, hi, image.policy().word()]);
             }
             Self::Clamp { min, max, .. } => words.extend([float(min), float(max)]),
             Self::Remap { from, to, .. } => words.extend(from.iter().chain(&to).map(|v| float(*v))),
@@ -1150,7 +1169,8 @@ impl Inputs {
 /// - a component index or identifier level count as itself, and a
 ///   [`NormalBlend`] as its declaration index;
 /// - an [`Op::Sample`] image as the two halves of its derivation
-///   ([`SampleImage::derivation`]); its texels and shape are not encoded;
+///   ([`SampleImage::derivation`]), then its [`SamplePolicy::word`]; its
+///   texels, type and shape are not encoded (the derivation names them);
 /// - each input as the two halves of its own fingerprint, in operand order.
 ///
 /// Node identities and creation order are not part of it: equal subgraphs
@@ -1177,11 +1197,12 @@ fn fingerprint_halves(fp: Fingerprint) -> [u64; 2] {
 }
 
 /// The fingerprint an [`Op::Sample`] node has for an image derived as
-/// `derivation`, for predicting it without the texels.
+/// `derivation` and sampled under `policy`, for predicting it without the
+/// texels.
 #[must_use]
-pub fn sample_fingerprint(derivation: Fingerprint) -> Fingerprint {
+pub fn sample_fingerprint(derivation: Fingerprint, policy: SamplePolicy) -> Fingerprint {
     let [lo, hi] = fingerprint_halves(derivation);
-    fingerprint_words(&[FINGERPRINT_VERSION, 28, lo, hi])
+    fingerprint_words(&[FINGERPRINT_VERSION, 28, lo, hi, policy.word()])
 }
 
 fn fingerprint_words(words: &[u64]) -> Fingerprint {
@@ -1560,237 +1581,7 @@ impl ProgramBuilder {
     }
 
     fn derive_type(&self, op: &Op) -> Result<PortType, ProgramError> {
-        let name = op.name();
-        let port = |id: NodeId| self.nodes[id.0 as usize].port;
-        let mismatch = |found: PortType, reason: &'static str| ProgramError::TypeMismatch {
-            op: name,
-            found,
-            reason,
-        };
-        let scalar = |id: NodeId| {
-            let found = port(id);
-            if found.is_scalar() {
-                Ok(found)
-            } else {
-                Err(mismatch(found, "needs a scalar or mask"))
-            }
-        };
-        // Values that componentwise arithmetic treats as plain numbers.
-        let arithmetic = |found: PortType| match found {
-            PortType::Normal(_) => Err(mismatch(
-                found,
-                "normals combine only through blend-normals",
-            )),
-            PortType::Direction if !matches!(op, Op::Mix { .. }) => {
-                Err(mismatch(found, "directions only blend, with mix"))
-            }
-            PortType::Id => Err(mismatch(found, "identifiers are never combined")),
-            _ => Ok(found),
-        };
-        let both_masks = |a: PortType, b: PortType| {
-            if a == PortType::Mask && b == PortType::Mask {
-                PortType::Mask
-            } else {
-                PortType::Scalar
-            }
-        };
-        Ok(match *op {
-            Op::Constant { .. }
-            | Op::Noise { .. }
-            | Op::Fractal { .. }
-            | Op::Cellular { .. }
-            | Op::Tiling { .. }
-            | Op::Scatter { .. }
-            | Op::Constant3 { .. }
-            | Op::Noise3 { .. }
-            | Op::Fractal3 { .. }
-            | Op::Cellular3 { .. } => PortType::Scalar,
-            Op::Position3 => PortType::Vector3,
-            Op::Transform3 { input, transform } => {
-                let found = port(input);
-                let directional = matches!(
-                    found,
-                    PortType::Vector2
-                        | PortType::Vector3
-                        | PortType::Normal(_)
-                        | PortType::Direction
-                );
-                if directional && transform.matrix != Mat3::IDENTITY {
-                    return Err(mismatch(
-                        found,
-                        "a rotating or scaling transform would leave directions unrotated",
-                    ));
-                }
-                found
-            }
-            Op::Slice { input, .. } => {
-                let found = port(input);
-                if matches!(
-                    found,
-                    PortType::Vector2
-                        | PortType::Vector3
-                        | PortType::Normal(_)
-                        | PortType::Direction
-                ) {
-                    return Err(mismatch(
-                        found,
-                        "directional values keep their solid frame and cannot be sliced",
-                    ));
-                }
-                found
-            }
-            Op::Length { input } => {
-                let found = port(input);
-                if !matches!(found, PortType::Vector2 | PortType::Vector3) {
-                    return Err(mismatch(found, "needs a vector2 or vector3"));
-                }
-                PortType::Scalar
-            }
-            Op::Fract { input } => {
-                scalar(input)?;
-                PortType::Scalar
-            }
-            Op::Atan2 { y, x } => {
-                scalar(y)?;
-                scalar(x)?;
-                PortType::Scalar
-            }
-            Op::Disk { .. } => PortType::Mask,
-            Op::Sample { .. } => PortType::Scalar,
-            Op::Transform { input, transform } => {
-                let found = port(input);
-                let directional = matches!(
-                    found,
-                    PortType::Vector2
-                        | PortType::Vector3
-                        | PortType::Normal(_)
-                        | PortType::Direction
-                );
-                if directional && transform.matrix != Mat2::IDENTITY {
-                    return Err(mismatch(
-                        found,
-                        "a rotating or scaling transform would leave directions unrotated",
-                    ));
-                }
-                found
-            }
-            Op::Demote { input } => port(input),
-            Op::Add { a, b } | Op::Sub { a, b } => {
-                let (ta, tb) = (arithmetic(port(a))?, arithmetic(port(b))?);
-                if ta.is_scalar() && tb.is_scalar() {
-                    PortType::Scalar
-                } else if ta == tb {
-                    ta
-                } else {
-                    return Err(mismatch(tb, "operands must have the same type"));
-                }
-            }
-            Op::Mul { a, b } | Op::Min { a, b } | Op::Max { a, b } => {
-                let (ta, tb) = (arithmetic(port(a))?, arithmetic(port(b))?);
-                if ta.is_scalar() && tb.is_scalar() {
-                    both_masks(ta, tb)
-                } else if ta == tb {
-                    ta
-                } else if matches!(op, Op::Mul { .. }) && ta.is_scalar() {
-                    tb
-                } else if matches!(op, Op::Mul { .. }) && tb.is_scalar() {
-                    ta
-                } else {
-                    return Err(mismatch(tb, "operands must have the same type"));
-                }
-            }
-            Op::Abs { input } | Op::Clamp { input, .. } | Op::Remap { input, .. } => {
-                scalar(input)?;
-                PortType::Scalar
-            }
-            Op::Mix { a, b, t } => {
-                let tt = scalar(t)?;
-                let (ta, tb) = (arithmetic(port(a))?, arithmetic(port(b))?);
-                if ta.is_scalar() && tb.is_scalar() {
-                    if tt == PortType::Mask {
-                        both_masks(ta, tb)
-                    } else {
-                        PortType::Scalar
-                    }
-                } else if ta == tb {
-                    ta
-                } else {
-                    return Err(mismatch(tb, "operands must have the same type"));
-                }
-            }
-            Op::Warp { input, dx, dy, .. } => {
-                scalar(dx)?;
-                scalar(dy)?;
-                port(input)
-            }
-            Op::Vector2 { x, y } => {
-                scalar(x)?;
-                scalar(y)?;
-                PortType::Vector2
-            }
-            Op::Vector3 { x, y, z } => {
-                scalar(x)?;
-                scalar(y)?;
-                scalar(z)?;
-                PortType::Vector3
-            }
-            Op::Color { r, g, b } => {
-                scalar(r)?;
-                scalar(g)?;
-                scalar(b)?;
-                PortType::Color(Primaries::Rec709)
-            }
-            Op::Component { input, index } => {
-                let found = port(input);
-                if found.components() < 2 {
-                    return Err(mismatch(found, "needs a vector, color or normal"));
-                }
-                if usize::from(index) >= found.components() {
-                    return Err(mismatch(found, "component index out of range"));
-                }
-                PortType::Scalar
-            }
-            Op::AsMask { input } => {
-                scalar(input)?;
-                PortType::Mask
-            }
-            Op::ToId { input, .. } => {
-                scalar(input)?;
-                PortType::Id
-            }
-            Op::Normalize { input } => {
-                let found = port(input);
-                if found != PortType::Vector3 {
-                    return Err(mismatch(found, "needs a vector3"));
-                }
-                PortType::Normal(NormalFrame::Domain)
-            }
-            Op::Direction { angle } => {
-                scalar(angle)?;
-                PortType::Direction
-            }
-            Op::Angle { input } | Op::Coherence { input } => {
-                let found = port(input);
-                if found != PortType::Direction {
-                    return Err(mismatch(found, "needs a direction"));
-                }
-                if matches!(op, Op::Angle { .. }) {
-                    PortType::Scalar
-                } else {
-                    PortType::Mask
-                }
-            }
-            Op::BlendNormals { base, detail, .. } => {
-                let (tb, td) = (port(base), port(detail));
-                if !matches!(tb, PortType::Normal(_)) {
-                    return Err(mismatch(tb, "needs normals"));
-                }
-                if td != tb {
-                    return Err(mismatch(td, "needs a normal in the base's frame"));
-                }
-                tb
-            }
-        })
+        derive_port(op, &|id: NodeId| self.nodes[id.0 as usize].port)
     }
 
     fn kernel(&self, op: &Op) -> Result<Kernel, ProgramError> {
@@ -2540,7 +2331,12 @@ impl Kernel {
             Self::Cellular(ref cellular) => cellular.eval_gradient(q, footprint).1.extend(0.0),
             Self::Tiling(ref tiling) => tiling.eval_gradient(q, footprint).1.extend(0.0),
             Self::Scatter(ref scatter) => scatter.eval_gradient(q, footprint).1.extend(0.0),
-            Self::Sample(ref image) => image.sample_gradient(q, footprint).1.extend(0.0),
+            Self::Sample(ref image) => {
+                if !image.port().is_scalar() {
+                    return None;
+                }
+                image.sample_gradient(q, footprint).1.extend(0.0)
+            }
             Self::Noise3(ref noise) => noise.eval_gradient(p, footprint).1,
             Self::Fractal3(ref fractal) => fractal.eval_gradient(p, footprint).1,
             Self::Cellular3(ref cellular) => cellular.eval_gradient(p, footprint).1,
@@ -2625,7 +2421,7 @@ impl Kernel {
             Self::Tiling(ref tiling) => Value::Scalar(tiling.eval(q, footprint)),
             Self::Scatter(ref scatter) => Value::Scalar(scatter.eval(q, footprint)),
             Self::Disk(ref disk) => Value::Scalar(disk.eval(q, footprint)),
-            Self::Sample(ref image) => Value::Scalar(image.sample(q, footprint)),
+            Self::Sample(ref image) => image.sample_value(q, footprint),
             Self::Noise3(ref noise) => Value::Scalar(noise.eval(p, footprint)),
             Self::Fractal3(ref fractal) => Value::Scalar(fractal.eval(p, footprint)),
             Self::Cellular3(ref cellular) => Value::Scalar(cellular.eval(p, footprint)),
@@ -2951,6 +2747,231 @@ impl SolidField for SolidProgram {
     }
 }
 
+/// The type of a node computing `op`, given its operands' types.
+fn derive_port(op: &Op, port: &dyn Fn(NodeId) -> PortType) -> Result<PortType, ProgramError> {
+    let name = op.name();
+    let mismatch = |found: PortType, reason: &'static str| ProgramError::TypeMismatch {
+        op: name,
+        found,
+        reason,
+    };
+    let scalar = |id: NodeId| {
+        let found = port(id);
+        if found.is_scalar() {
+            Ok(found)
+        } else {
+            Err(mismatch(found, "needs a scalar or mask"))
+        }
+    };
+    // Values that componentwise arithmetic treats as plain numbers.
+    let arithmetic = |found: PortType| match found {
+        PortType::Normal(_) => Err(mismatch(
+            found,
+            "normals combine only through blend-normals",
+        )),
+        PortType::Direction if !matches!(op, Op::Mix { .. }) => {
+            Err(mismatch(found, "directions only blend, with mix"))
+        }
+        PortType::Id => Err(mismatch(found, "identifiers are never combined")),
+        _ => Ok(found),
+    };
+    let both_masks = |a: PortType, b: PortType| {
+        if a == PortType::Mask && b == PortType::Mask {
+            PortType::Mask
+        } else {
+            PortType::Scalar
+        }
+    };
+    Ok(match *op {
+        Op::Constant { .. }
+        | Op::Noise { .. }
+        | Op::Fractal { .. }
+        | Op::Cellular { .. }
+        | Op::Tiling { .. }
+        | Op::Scatter { .. }
+        | Op::Constant3 { .. }
+        | Op::Noise3 { .. }
+        | Op::Fractal3 { .. }
+        | Op::Cellular3 { .. } => PortType::Scalar,
+        Op::Position3 => PortType::Vector3,
+        Op::Transform3 { input, transform } => {
+            let found = port(input);
+            let directional = matches!(
+                found,
+                PortType::Vector2 | PortType::Vector3 | PortType::Normal(_) | PortType::Direction
+            );
+            if directional && transform.matrix != Mat3::IDENTITY {
+                return Err(mismatch(
+                    found,
+                    "a rotating or scaling transform would leave directions unrotated",
+                ));
+            }
+            found
+        }
+        Op::Slice { input, .. } => {
+            let found = port(input);
+            if matches!(
+                found,
+                PortType::Vector2 | PortType::Vector3 | PortType::Normal(_) | PortType::Direction
+            ) {
+                return Err(mismatch(
+                    found,
+                    "directional values keep their solid frame and cannot be sliced",
+                ));
+            }
+            found
+        }
+        Op::Length { input } => {
+            let found = port(input);
+            if !matches!(found, PortType::Vector2 | PortType::Vector3) {
+                return Err(mismatch(found, "needs a vector2 or vector3"));
+            }
+            PortType::Scalar
+        }
+        Op::Fract { input } => {
+            scalar(input)?;
+            PortType::Scalar
+        }
+        Op::Atan2 { y, x } => {
+            scalar(y)?;
+            scalar(x)?;
+            PortType::Scalar
+        }
+        Op::Disk { .. } => PortType::Mask,
+        Op::Sample { ref image } => image.port(),
+        Op::Transform { input, transform } => {
+            let found = port(input);
+            let directional = matches!(
+                found,
+                PortType::Vector2 | PortType::Vector3 | PortType::Normal(_) | PortType::Direction
+            );
+            if directional && transform.matrix != Mat2::IDENTITY {
+                return Err(mismatch(
+                    found,
+                    "a rotating or scaling transform would leave directions unrotated",
+                ));
+            }
+            found
+        }
+        Op::Demote { input } => port(input),
+        Op::Add { a, b } | Op::Sub { a, b } => {
+            let (ta, tb) = (arithmetic(port(a))?, arithmetic(port(b))?);
+            if ta.is_scalar() && tb.is_scalar() {
+                PortType::Scalar
+            } else if ta == tb {
+                ta
+            } else {
+                return Err(mismatch(tb, "operands must have the same type"));
+            }
+        }
+        Op::Mul { a, b } | Op::Min { a, b } | Op::Max { a, b } => {
+            let (ta, tb) = (arithmetic(port(a))?, arithmetic(port(b))?);
+            if ta.is_scalar() && tb.is_scalar() {
+                both_masks(ta, tb)
+            } else if ta == tb {
+                ta
+            } else if matches!(op, Op::Mul { .. }) && ta.is_scalar() {
+                tb
+            } else if matches!(op, Op::Mul { .. }) && tb.is_scalar() {
+                ta
+            } else {
+                return Err(mismatch(tb, "operands must have the same type"));
+            }
+        }
+        Op::Abs { input } | Op::Clamp { input, .. } | Op::Remap { input, .. } => {
+            scalar(input)?;
+            PortType::Scalar
+        }
+        Op::Mix { a, b, t } => {
+            let tt = scalar(t)?;
+            let (ta, tb) = (arithmetic(port(a))?, arithmetic(port(b))?);
+            if ta.is_scalar() && tb.is_scalar() {
+                if tt == PortType::Mask {
+                    both_masks(ta, tb)
+                } else {
+                    PortType::Scalar
+                }
+            } else if ta == tb {
+                ta
+            } else {
+                return Err(mismatch(tb, "operands must have the same type"));
+            }
+        }
+        Op::Warp { input, dx, dy, .. } => {
+            scalar(dx)?;
+            scalar(dy)?;
+            port(input)
+        }
+        Op::Vector2 { x, y } => {
+            scalar(x)?;
+            scalar(y)?;
+            PortType::Vector2
+        }
+        Op::Vector3 { x, y, z } => {
+            scalar(x)?;
+            scalar(y)?;
+            scalar(z)?;
+            PortType::Vector3
+        }
+        Op::Color { r, g, b } => {
+            scalar(r)?;
+            scalar(g)?;
+            scalar(b)?;
+            PortType::Color(Primaries::Rec709)
+        }
+        Op::Component { input, index } => {
+            let found = port(input);
+            if found.components() < 2 {
+                return Err(mismatch(found, "needs a vector, color or normal"));
+            }
+            if usize::from(index) >= found.components() {
+                return Err(mismatch(found, "component index out of range"));
+            }
+            PortType::Scalar
+        }
+        Op::AsMask { input } => {
+            scalar(input)?;
+            PortType::Mask
+        }
+        Op::ToId { input, .. } => {
+            scalar(input)?;
+            PortType::Id
+        }
+        Op::Normalize { input } => {
+            let found = port(input);
+            if found != PortType::Vector3 {
+                return Err(mismatch(found, "needs a vector3"));
+            }
+            PortType::Normal(NormalFrame::Domain)
+        }
+        Op::Direction { angle } => {
+            scalar(angle)?;
+            PortType::Direction
+        }
+        Op::Angle { input } | Op::Coherence { input } => {
+            let found = port(input);
+            if found != PortType::Direction {
+                return Err(mismatch(found, "needs a direction"));
+            }
+            if matches!(op, Op::Angle { .. }) {
+                PortType::Scalar
+            } else {
+                PortType::Mask
+            }
+        }
+        Op::BlendNormals { base, detail, .. } => {
+            let (tb, td) = (port(base), port(detail));
+            if !matches!(tb, PortType::Normal(_)) {
+                return Err(mismatch(tb, "needs normals"));
+            }
+            if td != tb {
+                return Err(mismatch(td, "needs a normal in the base's frame"));
+            }
+            tb
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3251,7 +3272,7 @@ mod tests {
         );
     }
 
-    const GOLDEN_FINGERPRINT: u128 = 0x9f47_5e28_e73d_17cf_d6eb_c799_c751_d5a4;
+    const GOLDEN_FINGERPRINT: u128 = 0xbdeb_9cd9_4501_cd3c_437b_7bc6_5078_0875;
     const GOLDEN_DIGEST: u64 = 0x90ff_6a69_e1da_9f83;
 
     #[test]

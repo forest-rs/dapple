@@ -36,7 +36,7 @@ use core::fmt;
 use dapple_field::hash::hash;
 use dapple_field::image::texel_coordinates;
 use dapple_field::program::ValueProgram;
-use dapple_field::{Domain, Edge, Footprint, PortType, Value};
+use dapple_field::{Domain, Edge, Footprint, PortType, SamplePolicy, Value};
 use glam::{Vec2, Vec3};
 
 use crate::{Raster, RasterError, Realization, check_size};
@@ -668,33 +668,50 @@ fn coverage_scale(values: &[f32], cutoff: f32, target: f64) -> f32 {
 }
 
 /// Reads a typed chain back at domain point `p` with footprint `footprint`
-/// (domain units): the level whose texel matches the footprint, nearest
-/// texel for identifiers, bilinear otherwise, with no renormalization.
+/// (domain units) under `policy`, as a reference for
+/// `dapple_field::SampleImage`: with [`SamplePolicy::Nearest`], the nearest
+/// texel of the level nearest the footprint; with
+/// [`SamplePolicy::Linear`], bilinear per component in the two levels the
+/// footprint falls between, blended linearly, with no renormalization.
 ///
 /// `levels[0]` is level 0. A periodic `domain` wraps `p` exactly into one
-/// period first.
+/// period first. Returns `None` for no levels or a policy the type does not
+/// permit.
 #[must_use]
-pub fn sample(levels: &[TypedRaster], domain: Domain, p: Vec2, footprint: f32) -> Option<Value> {
+pub fn sample(
+    levels: &[TypedRaster],
+    domain: Domain,
+    policy: SamplePolicy,
+    p: Vec2,
+    footprint: f32,
+) -> Option<Value> {
     let base = levels.first()?;
+    if !policy.permits(base.port) {
+        return None;
+    }
     let texel0 = base.texel().max_element();
-    let level = if footprint > texel0 && texel0 > 0.0 {
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "a non-negative log2 of a finite ratio, clamped to the chain"
-        )]
-        let k = libm::floorf(libm::log2f(footprint / texel0) + 0.5).max(0.0) as usize;
-        k.min(levels.len() - 1)
+    let last = levels.len() - 1;
+    let detail = if levels.len() > 1 && footprint > 0.0 && texel0 > 0.0 {
+        let d = libm::log2f(footprint / texel0);
+        if d > 0.0 { d } else { 0.0 }
     } else {
-        0
+        0.0
     };
-    let raster = &levels[level];
     let period = match domain {
         Domain::Periodic { period } => Some(period),
         _ => None,
     };
-    let t = texel_coordinates(p, raster.origin(), raster.texel(), period);
-    if raster.port == PortType::Id {
+    let coordinates =
+        |raster: &TypedRaster| texel_coordinates(p, raster.origin(), raster.texel(), period);
+    if policy == SamplePolicy::Nearest {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a non-negative level of detail, clamped to the chain"
+        )]
+        let level = (libm::floorf(detail + 0.5) as usize).min(last);
+        let raster = &levels[level];
+        let t = coordinates(raster);
         #[expect(
             clippy::cast_possible_truncation,
             reason = "texel coordinates are bounded by the raster size"
@@ -704,26 +721,45 @@ pub fn sample(levels: &[TypedRaster], domain: Domain, p: Vec2, footprint: f32) -
             libm::floorf(t.y + 0.5) as i64,
         ));
     }
-    let (fx, fy) = (libm::floorf(t.x), libm::floorf(t.y));
-    let f = Vec2::new(t.x - fx, t.y - fy);
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "texel coordinates are bounded by the raster size"
-    )]
-    let (x, y) = (fx as i64, fy as i64);
     let mix = |a: Value, b: Value, s: f32| match (a, b) {
         (Value::Scalar(a), Value::Scalar(b)) => Value::Scalar(a + (b - a) * s),
         (Value::Vector2(a), Value::Vector2(b)) => Value::Vector2(a + (b - a) * s),
         (Value::Vector3(a), Value::Vector3(b)) => Value::Vector3(a + (b - a) * s),
         (a, _) => a,
     };
-    let top = mix(raster.value_at(x, y), raster.value_at(x + 1, y), f.x);
-    let bottom = mix(
-        raster.value_at(x, y + 1),
-        raster.value_at(x + 1, y + 1),
-        f.x,
-    );
-    Some(mix(top, bottom, f.y))
+    let bilinear = |raster: &TypedRaster| {
+        let t = coordinates(raster);
+        let (fx, fy) = (libm::floorf(t.x), libm::floorf(t.y));
+        let f = Vec2::new(t.x - fx, t.y - fy);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "texel coordinates are bounded by the raster size"
+        )]
+        let (x, y) = (fx as i64, fy as i64);
+        let top = mix(raster.value_at(x, y), raster.value_at(x + 1, y), f.x);
+        let bottom = mix(
+            raster.value_at(x, y + 1),
+            raster.value_at(x + 1, y + 1),
+            f.x,
+        );
+        mix(top, bottom, f.y)
+    };
+    #[expect(clippy::cast_precision_loss, reason = "level counts are tiny")]
+    if detail >= last as f32 {
+        return Some(bilinear(&levels[last]));
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "0 <= floor < last"
+    )]
+    let fine = libm::floorf(detail) as usize;
+    let a = bilinear(&levels[fine]);
+    let weight = detail - libm::floorf(detail);
+    if weight == 0.0 {
+        return Some(a);
+    }
+    Some(mix(a, bilinear(&levels[fine + 1]), weight))
 }
 
 #[cfg(test)]
@@ -967,7 +1003,13 @@ mod tests {
             reduce(&raster, ReductionPolicy::IdMode, 1).unwrap(),
         ];
         assert_eq!(
-            sample(&levels, domain, Vec2::new(0.4, 0.9), 0.5),
+            sample(
+                &levels,
+                domain,
+                SamplePolicy::Nearest,
+                Vec2::new(0.4, 0.9),
+                0.5
+            ),
             Some(Value::Id(6))
         );
         assert_ne!(raster.digest(), 0);

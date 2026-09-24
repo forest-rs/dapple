@@ -35,7 +35,7 @@ fn manifests_are_checked() {
 fn small() -> Recipe {
     parse_recipe(
         r#"
-version = 1
+version = 2
 
 [[nodes]]
 label = "disk"

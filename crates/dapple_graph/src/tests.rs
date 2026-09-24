@@ -171,21 +171,28 @@ fn misuse_is_reported() {
         f.graph.set_resolution(f.soft, 8, 8),
         Err(MaterialError::UnknownNode)
     ));
-    // An operand without an input fails when the node runs.
+    // An operand without an input is refused when the node is added.
+    assert!(matches!(
+        f.graph
+            .field("bad", Op::Abs { input: operand(3) }, &[f.noise]),
+        Err(MaterialError::Refused {
+            error: NodeError::MissingOperand { index: 3 },
+            ..
+        })
+    ));
+    // So is a node reading the wrong kind of value: realizing a raster.
+    assert!(matches!(
+        f.graph.realize("bad", f.map, 8, 8),
+        Err(MaterialError::Refused {
+            error: NodeError::WrongValue { expected: "field" },
+            ..
+        })
+    ));
+    // Refused nodes are not added: the label stays free.
     f.graph
-        .field("bad", Op::Abs { input: operand(3) }, &[f.noise])
+        .field("bad", Op::Abs { input: operand(0) }, &[f.noise])
         .unwrap();
-    let error = f.graph.run().unwrap_err();
-    assert!(
-        matches!(
-            &error,
-            MaterialError::Graph(GraphError::Node {
-                source: NodeError::MissingOperand { index: 3 },
-                ..
-            })
-        ),
-        "{error:?}"
-    );
+    f.graph.run().unwrap();
 }
 
 /// noise max disk → realize (128² in 16-texel tiles) → blur, normals, and a
@@ -456,7 +463,7 @@ fn graphs_export_recipes_that_rebuild_them() {
     for node in &mut relabeled.nodes {
         node.label.insert_str(0, "x.");
         match &mut node.step {
-            Step::Field { inputs, .. } | Step::Sample { inputs } => {
+            Step::Field { inputs, .. } | Step::Sample { inputs, .. } => {
                 for i in inputs {
                     i.insert_str(0, "x.");
                 }
@@ -486,8 +493,8 @@ fn malformed_recipes_are_refused() {
         r.fingerprint().unwrap_err()
     };
     assert!(matches!(
-        with(&|r| r.version = 2),
-        RecipeError::Version { found: 2 }
+        with(&|r| r.version = 1),
+        RecipeError::Version { found: 1 }
     ));
     assert!(matches!(
         with(&|r| r.nodes[1].label = "noise".into()),
@@ -844,7 +851,9 @@ fn resampled(x: f32) -> Resampled {
         .unwrap();
     let mip1 = g.mip("soft1", soft, Filter::Box).unwrap();
     let mip2 = g.mip("soft2", mip1, Filter::Box).unwrap();
-    let sample = g.sample("sampled", &[soft, mip1, mip2]).unwrap();
+    let sample = g
+        .sample("sampled", &[soft, mip1, mip2], SamplePolicy::Linear)
+        .unwrap();
     let doubled = g
         .field(
             "doubled",
@@ -937,7 +946,7 @@ fn recipes_carry_sample_nodes() {
     // Sample nodes read rasters, and are fields themselves.
     let mut wrong = recipe.clone();
     for node in &mut wrong.nodes {
-        if let Step::Sample { inputs } = &mut node.step {
+        if let Step::Sample { inputs, .. } = &mut node.step {
             inputs[0] = "height".into();
         }
     }
@@ -987,7 +996,7 @@ fn warped(x: f32, displacement: impl Fn(u64) -> Op) -> (MaterialGraph, NodeId, N
         )
         .unwrap();
     let map = g.realize("map", height, 64, 64).unwrap();
-    let sample = g.sample("sampled", &[map]).unwrap();
+    let sample = g.sample("sampled", &[map], SamplePolicy::Linear).unwrap();
     let dx = g.field("dx", displacement(7), &[]).unwrap();
     let dy = g.field("dy", displacement(8), &[]).unwrap();
     let warp = g
@@ -1102,13 +1111,6 @@ fn typed() -> Typed {
     }
 }
 
-fn node_error(error: &MaterialError) -> &NodeError {
-    match error {
-        MaterialError::Graph(GraphError::Node { source, .. }) => source,
-        other => panic!("expected a node error, found {other:?}"),
-    }
-}
-
 #[test]
 fn rasters_keep_their_semantic_type() {
     let mut t = typed();
@@ -1129,59 +1131,108 @@ fn rasters_keep_their_semantic_type() {
     assert_eq!(t.graph.raster_value(t.ids).unwrap().fingerprint, before);
 }
 
+fn refusal(result: Result<NodeId, MaterialError>) -> NodeError {
+    match result {
+        Err(MaterialError::Refused { error, .. }) => error,
+        other => panic!("expected a refusal, found {other:?}"),
+    }
+}
+
 #[test]
 fn operations_refuse_types_they_do_not_accept() {
-    // Blurring identifiers is refused, not guessed; blurring a mask is fine.
+    // Blurring identifiers is refused when the node is added, not guessed;
+    // blurring a mask is fine.
     let mut t = typed();
-    t.graph
-        .raster(
-            "bad",
-            RasterParams::Blur(GaussianBlur { sigma: 0.01 }),
-            t.ids,
-        )
-        .unwrap();
-    let error = t.graph.run().unwrap_err();
-    assert!(
-        matches!(
-            node_error(&error),
-            NodeError::TypeRefused {
-                port: PortType::Id,
-                ..
-            }
-        ),
-        "{error:?}"
+    let blur = RasterParams::Blur(GaussianBlur { sigma: 0.01 });
+    assert!(matches!(
+        refusal(t.graph.raster("bad", blur, t.ids)),
+        NodeError::TypeRefused {
+            port: PortType::Id,
+            ..
+        }
+    ));
+    let soft = t.graph.raster("soft", blur, t.mask).unwrap();
+    assert_eq!(t.graph.port(soft), Some(PortType::Mask));
+    t.graph.run().unwrap();
+    assert_eq!(t.graph.raster_value(soft).unwrap().port, PortType::Mask);
+    // Averaging identifiers, or normals (which would drop the length that
+    // measures their spread), is a refused reduction policy.
+    for (raster, port) in [
+        (t.ids, PortType::Id),
+        (t.normals, PortType::Normal(NormalFrame::Domain)),
+    ] {
+        assert!(matches!(
+            refusal(t.graph.reduce("bad", raster, ReductionPolicy::Average, 1)),
+            NodeError::Typed(TypedError::PolicyRefused { port: p, .. }) if p == port
+        ));
+    }
+    // Mip filtering refuses directions.
+    assert!(matches!(
+        refusal(t.graph.mip("bad", t.directions, Filter::Box)),
+        NodeError::TypeRefused {
+            port: PortType::Direction,
+            ..
+        }
+    ));
+    // Identifiers are never interpolated; nearest sampling is fine.
+    assert_eq!(
+        refusal(t.graph.sample("bad", &[t.ids], SamplePolicy::Linear)),
+        NodeError::SamplingRefused {
+            port: PortType::Id,
+            policy: SamplePolicy::Linear
+        }
     );
-    let mut t = typed();
-    let soft = t
+    let cells = t
         .graph
-        .raster(
-            "soft",
-            RasterParams::Blur(GaussianBlur { sigma: 0.01 }),
-            t.mask,
+        .sample("cells", &[t.ids], SamplePolicy::Nearest)
+        .unwrap();
+    assert_eq!(t.graph.port(cells), Some(PortType::Id));
+    // A mip chain holds its base's type.
+    assert!(matches!(
+        refusal(
+            t.graph
+                .sample("bad", &[t.mask, t.ids], SamplePolicy::Nearest)
+        ),
+        NodeError::MixedLevels { .. }
+    ));
+    // Nothing refused was added, so the graph still runs.
+    t.graph.run().unwrap();
+}
+
+#[test]
+fn edits_that_would_mistype_a_node_are_refused() {
+    let mut t = typed();
+    let reduced = t
+        .graph
+        .reduce("mask.1", t.mask, ReductionPolicy::Average, 1)
+        .unwrap();
+    t.graph.run().unwrap();
+    // Switching the reduction to an identifier policy is refused.
+    assert!(matches!(
+        t.graph.set_reduction(reduced, ReductionPolicy::IdMode, 1),
+        Err(MaterialError::Refused { .. })
+    ));
+    // So is an upstream edit that would turn the noise into a vector, which
+    // the mask node downstream cannot clamp.
+    let before = t.graph.recipe();
+    let refused = t.graph.set_field_op(t.noise, Op::Position3);
+    assert!(
+        matches!(&refused, Err(MaterialError::Refused { label, .. }) if label == "mask"),
+        "{refused:?}"
+    );
+    // Refused edits leave the graph as it was.
+    assert_eq!(t.graph.recipe(), before);
+    assert_eq!(t.graph.port(t.noise), Some(PortType::Scalar));
+    t.graph.run().unwrap();
+    // A type-changing edit every dependent accepts goes through.
+    t.graph
+        .set_reduction(
+            reduced,
+            ReductionPolicy::ThresholdCoverage { cutoff: 0.5 },
+            1,
         )
         .unwrap();
     t.graph.run().unwrap();
-    assert_eq!(t.graph.raster_value(soft).unwrap().port, PortType::Mask);
-    // Averaging identifiers is refused.
-    let mut t = typed();
-    t.graph
-        .reduce("bad", t.ids, ReductionPolicy::Average, 1)
-        .unwrap();
-    let error = t.graph.run().unwrap_err();
-    assert!(
-        matches!(
-            node_error(&error),
-            NodeError::Typed(TypedError::PolicyRefused { .. })
-        ),
-        "{error:?}"
-    );
-    // So is averaging normals, which would drop the length that measures
-    // their spread.
-    let mut t = typed();
-    t.graph
-        .reduce("bad", t.normals, ReductionPolicy::Average, 1)
-        .unwrap();
-    assert!(t.graph.run().is_err());
 }
 
 #[test]
@@ -1280,4 +1331,280 @@ fn normal_reductions_keep_the_variance_encode_moves_into_roughness() {
             );
         }
     }
+}
+
+/// The value of texel `(x, y)` of a realized or reduced raster.
+fn texel_value(data: &RasterData, x: i64, y: i64) -> Value {
+    match data {
+        RasterData::Scalar(r) => Value::Scalar(r.at(x, y)),
+        RasterData::Vector3(r) => Value::Vector3(glam::Vec3::from_array(r.at(x, y))),
+        RasterData::Typed(r) => r.value_at(x, y),
+    }
+}
+
+/// A field of each semantic type over the unit torus, from noise.
+fn typed_field(g: &mut MaterialGraph, port: PortType) -> NodeId {
+    let n: Vec<NodeId> = (0..3)
+        .map(|i| g.field(&format!("n{i}"), noise_op(20 + i), &[]).unwrap())
+        .collect();
+    let one = g
+        .field(
+            "one",
+            Op::Constant {
+                domain: domain(),
+                value: 1.0,
+            },
+            &[],
+        )
+        .unwrap();
+    let (a, b, c) = (operand(0), operand(1), operand(2));
+    let mask = g.field("mask", Op::AsMask { input: a }, &[n[0]]).unwrap();
+    match port {
+        PortType::Scalar => n[0],
+        PortType::Mask => mask,
+        PortType::Id => g
+            .field(
+                "id",
+                Op::ToId {
+                    input: a,
+                    levels: 5,
+                },
+                &[mask],
+            )
+            .unwrap(),
+        PortType::Vector2 => g.field("v2", Op::Vector2 { x: a, y: b }, &n[..2]).unwrap(),
+        PortType::Vector3 => g.field("v3", Op::Vector3 { x: a, y: b, z: c }, &n).unwrap(),
+        PortType::Color(_) => g
+            .field("color", Op::Color { r: a, g: b, b: c }, &n)
+            .unwrap(),
+        PortType::Normal(_) => {
+            let v = g
+                .field("tilt", Op::Vector3 { x: a, y: b, z: c }, &[n[0], n[1], one])
+                .unwrap();
+            g.field("normal", Op::Normalize { input: a }, &[v]).unwrap()
+        }
+        PortType::Direction => g
+            .field("direction", Op::Direction { angle: a }, &[n[0]])
+            .unwrap(),
+    }
+}
+
+/// What reducing the level-0 `base` to texel `(x, y)` of level `level`
+/// under `policy` retains, computed directly from the footprint's texels.
+fn expected_texel(
+    base: &RasterData,
+    policy: ReductionPolicy,
+    level: u32,
+    (x, y): (i64, i64),
+) -> Value {
+    let step = 1_i64 << level;
+    let texels: Vec<Value> = (0..step)
+        .flat_map(|dy| (0..step).map(move |dx| (dx, dy)))
+        .map(|(dx, dy)| texel_value(base, x * step + dx, y * step + dy))
+        .collect();
+    #[expect(clippy::cast_precision_loss, reason = "tiny footprints")]
+    let n = texels.len() as f32;
+    match policy {
+        ReductionPolicy::IdPoint => {
+            let c = (step - 1) / 2;
+            texel_value(base, x * step + c, y * step + c)
+        }
+        ReductionPolicy::IdMode => {
+            let mut ids: Vec<u32> = texels
+                .iter()
+                .map(|v| match v {
+                    Value::Id(id) => *id,
+                    other => panic!("expected identifiers, found {other:?}"),
+                })
+                .collect();
+            ids.sort_unstable();
+            let mut best = (0, 0);
+            for &id in &ids {
+                let count = ids.iter().filter(|&&i| i == id).count();
+                if count > best.1 {
+                    best = (id, count);
+                }
+            }
+            Value::Id(best.0)
+        }
+        // The (unnormalized, per-component) mean of the footprint.
+        _ => {
+            let mut sum = [0.0_f32; 3];
+            for v in &texels {
+                for (k, s) in sum.iter_mut().enumerate() {
+                    *s += v.component(k).unwrap_or(0.0);
+                }
+            }
+            let mean = sum.map(|s| s / n);
+            match texels[0] {
+                Value::Scalar(_) => Value::Scalar(mean[0]),
+                Value::Vector2(_) => Value::Vector2(Vec2::new(mean[0], mean[1])),
+                _ => Value::Vector3(glam::Vec3::from_array(mean)),
+            }
+        }
+    }
+}
+
+fn close(a: Value, b: Value) -> bool {
+    match (a, b) {
+        (Value::Id(a), Value::Id(b)) => a == b,
+        _ => (0..3).all(|k| match (a.component(k), b.component(k)) {
+            (Some(x), Some(y)) => (x - y).abs() <= 1e-5,
+            (None, None) => true,
+            _ => false,
+        }),
+    }
+}
+
+/// Slice 0's gate: every semantic type survives realize → reduce → sample
+/// under each permitted policy, with the retention the policy states, and
+/// the sampled field agrees with the reference reader.
+#[test]
+fn every_type_survives_realize_reduce_sample() {
+    use dapple_raster::typed::sample as reference;
+    let color = PortType::Color(dapple_field::Primaries::Rec709);
+    let normal = PortType::Normal(NormalFrame::Domain);
+    let cases = [
+        (PortType::Scalar, ReductionPolicy::Average),
+        (PortType::Mask, ReductionPolicy::Average),
+        (
+            PortType::Mask,
+            ReductionPolicy::ThresholdCoverage { cutoff: 0.5 },
+        ),
+        (PortType::Id, ReductionPolicy::IdPoint),
+        (PortType::Id, ReductionPolicy::IdMode),
+        (PortType::Vector2, ReductionPolicy::Average),
+        (PortType::Vector3, ReductionPolicy::Average),
+        (color, ReductionPolicy::Average),
+        (normal, ReductionPolicy::NormalMean),
+        (PortType::Direction, ReductionPolicy::Axial),
+    ];
+    const SIZE: u32 = 32;
+    for (port, policy) in cases {
+        for sampling in [SamplePolicy::default_for(port), SamplePolicy::Nearest] {
+            let mut g = MaterialGraph::with_tile_size(8);
+            let field = typed_field(&mut g, port);
+            let base = g.realize("base", field, SIZE, SIZE).unwrap();
+            let l1 = g.reduce("l1", base, policy, 1).unwrap();
+            let l2 = g.reduce("l2", base, policy, 2).unwrap();
+            let sampled = g.sample("sampled", &[base, l1, l2], sampling).unwrap();
+            assert_eq!(g.port(sampled), Some(port), "{port:?}: typed when built");
+            g.run().unwrap();
+            let program = g.field_value(sampled).unwrap();
+            assert_eq!(program.output_type(), port, "{port:?}: typed when run");
+            let rasters: Vec<TypedRaster> = [base, l1, l2]
+                .iter()
+                .map(|&n| {
+                    let v = g.raster_value(n).unwrap();
+                    assert_eq!(v.port, port, "{port:?}: every level keeps the type");
+                    v.data.to_typed(v.port).unwrap()
+                })
+                .collect();
+            let base_data = &g.raster_value(base).unwrap().data;
+            // At each level's texel centers, with that level's footprint, the
+            // field reads the reduced texel exactly, and that texel is what
+            // the policy retains of its level-0 footprint.
+            for level in 1..=2_u32 {
+                let n = SIZE >> level;
+                #[expect(clippy::cast_precision_loss, reason = "tiny sizes")]
+                let texel = 1.0 / n as f32;
+                let footprint = dapple_field::Footprint::new(texel).unwrap();
+                for (x, y) in [(0_u32, 0_u32), (n / 2, 1), (n - 1, n - 1), (3, n / 3)] {
+                    #[expect(clippy::cast_precision_loss, reason = "tiny sizes")]
+                    let p = Vec2::new((x as f32 + 0.5) * texel, (y as f32 + 0.5) * texel);
+                    let value = program.eval(p, footprint);
+                    let reduced = rasters[level as usize].value_at(i64::from(x), i64::from(y));
+                    assert_eq!(
+                        value, reduced,
+                        "{port:?} {policy:?} {sampling:?} level {level}"
+                    );
+                    if !matches!(policy, ReductionPolicy::ThresholdCoverage { .. }) {
+                        let expected =
+                            expected_texel(base_data, policy, level, (i64::from(x), i64::from(y)));
+                        assert!(
+                            close(value, expected),
+                            "{port:?} {policy:?}: {value:?} retains {expected:?}"
+                        );
+                    }
+                }
+            }
+            // Anywhere, at any footprint, the field is the reference reader.
+            for (i, w) in [0.0, 0.02, 0.05, 0.11, 0.4].into_iter().enumerate() {
+                #[expect(clippy::cast_precision_loss, reason = "a handful of points")]
+                let p = Vec2::new(0.137 + 0.19 * i as f32, 0.71 - 0.13 * i as f32);
+                let value = program.eval(p, dapple_field::Footprint::new(w).unwrap());
+                let expected = reference(&rasters, domain(), sampling, p, w).unwrap();
+                assert!(
+                    close(value, expected),
+                    "{port:?} {sampling:?} at {p} ({w}): {value:?} vs {expected:?}"
+                );
+            }
+            // What the policies promise, beyond single texels.
+            let level1 = &rasters[1];
+            match policy {
+                ReductionPolicy::ThresholdCoverage { cutoff } => {
+                    let above = |r: &TypedRaster| {
+                        let n = r.width() * r.height();
+                        let count = (0..n)
+                            .filter(|&i| {
+                                let v =
+                                    r.value_at(i64::from(i % r.width()), i64::from(i / r.width()));
+                                v.scalar().unwrap() >= cutoff
+                            })
+                            .count();
+                        #[expect(clippy::cast_precision_loss, reason = "tiny sizes")]
+                        let fraction = count as f32 / n as f32;
+                        fraction
+                    };
+                    let (a, b) = (above(&rasters[0]), above(level1));
+                    assert!((a - b).abs() <= 1.0 / 64.0, "coverage {a} vs {b}");
+                }
+                ReductionPolicy::NormalMean => {
+                    // Not renormalized: spread shows as a mean shorter than 1.
+                    let shortest = (0..16)
+                        .flat_map(|y| (0..16).map(move |x| (x, y)))
+                        .map(|(x, y)| match level1.value_at(x, y) {
+                            Value::Vector3(v) => v.length(),
+                            other => panic!("normals are vectors, found {other:?}"),
+                        })
+                        .fold(f32::INFINITY, f32::min);
+                    assert!(shortest < 0.999, "{shortest}");
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[test]
+fn sampling_policies_are_part_of_the_fingerprint() {
+    let mut t = typed();
+    let linear = t
+        .graph
+        .sample("linear", &[t.mask], SamplePolicy::Linear)
+        .unwrap();
+    let nearest = t
+        .graph
+        .sample("nearest", &[t.mask], SamplePolicy::Nearest)
+        .unwrap();
+    t.graph.run().unwrap();
+    let fp = |g: &MaterialGraph, node| g.field_value(node).unwrap().fingerprint();
+    assert_ne!(fp(&t.graph, linear), fp(&t.graph, nearest));
+    // The recipe carries the policy and predicts both.
+    let recipe = t.graph.recipe();
+    let predicted = recipe.fingerprints().unwrap();
+    assert_eq!(
+        predicted["linear"],
+        NodeFingerprint::Field(fp(&t.graph, linear))
+    );
+    assert_eq!(
+        predicted["nearest"],
+        NodeFingerprint::Field(fp(&t.graph, nearest))
+    );
+    // Editing the policy re-runs the node with the other fingerprint.
+    t.graph
+        .set_sample_policy(linear, SamplePolicy::Nearest)
+        .unwrap();
+    t.graph.run().unwrap();
+    assert_eq!(fp(&t.graph, linear), fp(&t.graph, nearest));
 }

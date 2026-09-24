@@ -107,7 +107,8 @@ impl Scatter {
     /// positive or does not fit the period, and
     /// [`DomainError::InvalidParameter`] for a density outside `[0, 1]`,
     /// radii outside `(0, 1]` or out of order, a negative disk softness, or
-    /// an image stamp on a periodic domain.
+    /// an image stamp on a periodic domain or of values other than scalars
+    /// and masks.
     pub fn new(
         domain: Domain,
         placement: Placement,
@@ -125,7 +126,7 @@ impl Scatter {
             Stamp::Disk { softness } if !(softness.is_finite() && *softness >= 0.0) => {
                 return Err(DomainError::InvalidParameter { name: "softness" });
             }
-            Stamp::Image(image) if image.domain() != Domain::Plane => {
+            Stamp::Image(image) if image.domain() != Domain::Plane || !image.port().is_scalar() => {
                 return Err(DomainError::InvalidParameter { name: "stamp" });
             }
             _ => {}

@@ -1,7 +1,7 @@
 # Oak-like bark on a 1 m repeating tile: plates separated by wavy vertical
 # fissures, with fine grain on top. Heights are in [0, 1]; 1 means 15 mm of
 # relief.
-version = 1
+version = 2
 
 # Plates stretched along y, their sizes varied by a broad warp that compresses
 # some columns and widens others. Border distance is in cell units.

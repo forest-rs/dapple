@@ -264,11 +264,18 @@ impl SurfaceBake {
                 (d1 * e2.y - d2 * e1.y) / area,
                 (d2 * e1.x - d1 * e2.x) / area,
             ];
+            // Without vertex normals the face normal stands in, taken in mesh
+            // space like the vertex normals are: `normal_map` carries both to
+            // solid space, and `geometric` is already there.
+            let face_normal = {
+                let [pa, pb, pc] = [a, b, c].map(|v| Vec3A::from(mesh.positions[v]));
+                (pb - pa).cross(pc - pa)
+            };
             let vertex_normals = [a, b, c].map(|v| {
                 let n = if has_normals {
                     Vec3A::from(mesh.normals[v])
                 } else {
-                    Vec3A::from(geometric)
+                    face_normal
                 };
                 Vec3::from(normal_map * n)
             });

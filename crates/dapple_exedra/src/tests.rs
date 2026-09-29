@@ -120,6 +120,35 @@ fn placement_maps_positions_normals_and_footprints() {
 }
 
 #[test]
+fn face_normals_stand_in_for_missing_vertex_normals() {
+    let mut bare = rectangle();
+    bare.normals.clear();
+    let with = rectangle();
+    // A rotation with non-uniform scale, so a normal mapped twice would come
+    // out turned twice; and a single-axis mirror, which flips the winding but
+    // must keep the normal on the outward side.
+    let placements = [
+        Affine3A::from_scale_rotation_translation(
+            Vec3::new(2.0, 1.0, 4.0),
+            glam::Quat::from_rotation_x(core::f32::consts::FRAC_PI_2),
+            Vec3::ZERO,
+        ),
+        Affine3A::from_scale(Vec3::new(1.0, 1.0, -1.0)),
+    ];
+    for place in placements {
+        let fallback =
+            SurfaceBake::new(&bare, &bare.indices, &params(8.0, 0).with_placement(place)).unwrap();
+        let expected =
+            SurfaceBake::new(&with, &with.indices, &params(8.0, 0).with_placement(place)).unwrap();
+        assert!(!fallback.normals().is_empty());
+        assert_eq!(fallback.normals().len(), expected.normals().len());
+        for (n, e) in fallback.normals().iter().zip(expected.normals()) {
+            assert!((*n - *e).length() < 1e-5, "{n} against {e}");
+        }
+    }
+}
+
+#[test]
 fn overlapping_charts_are_counted_and_first_triangle_wins() {
     let mut mesh = rectangle();
     // A second copy of the rectangle 1 m above, on the same chart.

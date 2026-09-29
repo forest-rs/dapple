@@ -26,7 +26,10 @@
 //! size in domain units on any grid. On a wrapping grid the lattice fits a
 //! whole number of cells per period and its vertices wrap, so the result
 //! tiles. Offsets are keyed hashes of the vertex, so results do not depend
-//! on evaluation order.
+//! on evaluation order. The lattice is anchored at domain coordinates, not at
+//! the grid's origin, so grids that cover neighboring parts of the plane
+//! continue each other; a grid moved by anything but a whole number of
+//! cells shows different content.
 //!
 //! Reference: Heitz and Neyret, *High-Performance By-Example Noise using a
 //! Histogram-Preserving Blending Operator*, HPG 2018.
@@ -156,8 +159,9 @@ impl ByExample {
 
     /// Synthesizes `exemplar`'s texture over `grid`'s texels.
     ///
-    /// The exemplar's texel size is its physical scale; its origin and edge
-    /// policy are ignored. It must be at least three cells across, so every
+    /// The lattice sits at domain coordinates, so the result depends on the
+    /// grid's origin (see the [module docs](self)). The exemplar's texel size
+    /// is its physical scale; its origin and edge policy are ignored. It must be at least three cells across, so every
     /// patch stays inside it.
     ///
     /// # Errors
@@ -215,7 +219,7 @@ impl ByExample {
         for y in 0..grid.height() {
             for x in 0..grid.width() {
                 #[expect(clippy::cast_precision_loss, reason = "texel indices are small")]
-                let p = grid.texel() * Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+                let p = grid.origin() + grid.texel() * Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
                 let q = p / cell;
                 let (fx, fy) = (libm::floorf(q.x), libm::floorf(q.y));
                 let f = q - Vec2::new(fx, fy);
@@ -312,5 +316,67 @@ mod tests {
                 .is_err(),
             "a cell too large for the exemplar"
         );
+    }
+
+    #[test]
+    fn regions_continue_the_synthesis_of_their_neighbors() {
+        let n = 32;
+        let values: Vec<[f32; 1]> = (0..n * n)
+            .map(|i| [unit_f32(hash(3, &[i as u64]))])
+            .collect();
+        let exemplar =
+            Raster::from_values(n, n, Vec2::ZERO, Vec2::splat(0.01), Edge::Clamp, values).unwrap();
+        // Dyadic texel and origins, so the sample positions of the tile and
+        // of the whole are the same floats and the comparison can be exact.
+        let texel = Vec2::splat(1.0 / 64.0);
+        let tile = |x0: u32, width: u32| {
+            Raster::from_values(
+                width,
+                64,
+                Vec2::new(x0 as f32, 0.0) * texel,
+                texel,
+                Edge::Clamp,
+                alloc::vec![(); (width * 64) as usize],
+            )
+            .unwrap()
+        };
+        let op = ByExample { cell: 0.1, seed: 9 };
+        let whole = op.apply(&exemplar, &tile(0, 64)).unwrap();
+        let right = op.apply(&exemplar, &tile(32, 32)).unwrap();
+        for y in 0..64 {
+            for x in 0..32 {
+                assert_eq!(right.at(x, y), whole.at(x + 32, y), "({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn wrapping_grids_with_an_origin_still_tile() {
+        let n = 32;
+        let values: Vec<[f32; 1]> = (0..n * n)
+            .map(|i| [unit_f32(hash(3, &[i as u64]))])
+            .collect();
+        let exemplar =
+            Raster::from_values(n, n, Vec2::ZERO, Vec2::splat(0.01), Edge::Clamp, values).unwrap();
+        let texel = Vec2::splat(1.0 / 64.0);
+        let wrapped = |origin: Vec2| {
+            Raster::from_values(64, 64, origin, texel, Edge::Wrap, alloc::vec![(); 64 * 64])
+                .unwrap()
+        };
+        let op = ByExample { cell: 0.1, seed: 9 };
+        // One period further along is the same place on the torus.
+        let here = op
+            .apply(&exemplar, &wrapped(Vec2::new(0.125, 0.0)))
+            .unwrap();
+        let next = op
+            .apply(&exemplar, &wrapped(Vec2::new(1.125, 0.0)))
+            .unwrap();
+        let worst = here
+            .values()
+            .iter()
+            .zip(next.values())
+            .map(|(a, b)| (a[0] - b[0]).abs())
+            .fold(0.0, f32::max);
+        assert!(worst < 1e-3, "{worst}");
     }
 }

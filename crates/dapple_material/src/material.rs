@@ -677,7 +677,8 @@ impl Material {
         )?)
     }
 
-    /// A hash of the grid and every bound channel's values.
+    /// A hash of the grid, the tiling promise and every bound channel's
+    /// values.
     #[must_use]
     pub fn digest(&self) -> u64 {
         let g = &self.grid;
@@ -688,6 +689,11 @@ impl Material {
             u64::from(g.origin.y.to_bits()),
             u64::from(g.texel.x.to_bits()),
             u64::from(g.texel.y.to_bits()),
+            // Wrapping and clamping materials differ at their borders even
+            // when every texel matches, and the tiling promise is part of
+            // what a consumer may rely on.
+            crate::module::edge_word(g.edge),
+            u64::from(self.tiling.x) | (u64::from(self.tiling.y) << 1),
         ];
         for (c, ch) in self.bound() {
             w.push(match c {

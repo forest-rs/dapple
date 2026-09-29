@@ -295,6 +295,76 @@ fn collapsed_coats_stay_in_the_roughness_range() {
     assert!(twice.range_violations().is_empty());
 }
 
+/// A host whose `tint.png` differs from [`Host`]'s only in physical scale: a
+/// period of `period` meters over the same two texels.
+struct OtherHost {
+    period: u32,
+}
+
+impl ResourceHost for OtherHost {
+    fn resolve(&self, reference: &ResourceRef) -> Result<Resolved, ResourceError> {
+        let mut resolved = Host.resolve(reference)?;
+        let texel = Vec2::splat(self.period as f32 / 2.0);
+        let level = ImageLevel::new(2, 2, texel, vec![0.5_f32; 4]).unwrap();
+        resolved.image = SampleImage::typed(
+            PortType::Scalar,
+            SamplePolicy::Linear,
+            Domain::periodic(self.period, self.period).unwrap(),
+            Vec2::ZERO,
+            vec![level],
+            Fingerprint(7),
+        )
+        .unwrap();
+        Ok(resolved)
+    }
+}
+
+#[test]
+fn instance_fingerprints_cover_the_seed_grid_and_resource_identity() {
+    let tinted = || Bind::new().input("exemplar", Input::Resource(ResourceRef("tint.png".into())));
+    let fingerprint = |cx: &Context<'_>, path: &str| cx.diagnostics().fingerprint_at(path).unwrap();
+
+    // The same arguments at two paths draw different randomness.
+    let mut cx = Context::new(grid(), &Host);
+    cx.instantiate(&Paint, "a", Bind::new()).unwrap();
+    cx.instantiate(&Paint, "b", Bind::new()).unwrap();
+    assert_ne!(fingerprint(&cx, "a"), fingerprint(&cx, "b"));
+
+    // The same module and path on another grid, or another edge.
+    let path_and_grid = |grid: Grid| {
+        let mut cx = Context::new(grid, &Host);
+        cx.instantiate(&Paint, "a", Bind::new()).unwrap();
+        fingerprint(&cx, "a")
+    };
+    let base = path_and_grid(grid());
+    let mut clamped = grid();
+    clamped.edge = Edge::Clamp;
+    assert_ne!(base, path_and_grid(clamped));
+    let mut finer = grid();
+    finer.texel *= 0.5;
+    assert_ne!(base, path_and_grid(finer));
+    assert_eq!(base, path_and_grid(grid()), "stable");
+
+    // The same texels at another physical scale.
+    let resource = |host: &dyn ResourceHost| {
+        let mut cx = Context::new(grid(), host);
+        cx.instantiate(&Paint, "a", tinted()).unwrap();
+        fingerprint(&cx, "a")
+    };
+    let same = resource(&OtherHost { period: 1 });
+    assert_eq!(same, resource(&Host), "an identical resource");
+    assert_ne!(same, resource(&OtherHost { period: 2 }), "physical scale");
+}
+
+#[test]
+fn digests_cover_the_tiling_promise() {
+    let both = rich(0.1);
+    let mut wall = both.clone();
+    wall.set_tiling(Tiling::X);
+    assert_ne!(both.digest(), wall.digest(), "tiling");
+    assert_eq!(both.digest(), rich(0.1).digest(), "stable");
+}
+
 #[test]
 fn quarter_turns_swap_the_tiling_axes() {
     let mut m = rich(0.1);

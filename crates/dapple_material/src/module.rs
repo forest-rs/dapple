@@ -39,9 +39,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-use dapple_field::PortType;
 use dapple_field::hash::hash;
 use dapple_field::scoped::name_word;
+use dapple_field::{Edge, PortType, SampleImage, SamplePolicy};
 use dapple_raster::typed::TypedRaster;
 use glam::Vec3;
 
@@ -542,10 +542,46 @@ impl Args {
         }
     }
 
-    /// A content fingerprint of the module identity and every argument.
+    /// A fingerprint of everything that decides the instance's result: the
+    /// module identity, the context grid, every argument, and the instance
+    /// seed. The seed comes from the instance path, so equal arguments at
+    /// two paths have different fingerprints, as they draw different
+    /// randomness, even for a module that never reads it.
     #[must_use]
     pub const fn fingerprint(&self) -> u64 {
         self.fingerprint
+    }
+}
+
+/// The words of an edge policy; matched exhaustively so that a new policy
+/// cannot share a word with an old one.
+pub(crate) fn edge_word(edge: Edge) -> u64 {
+    match edge {
+        Edge::Wrap => 1,
+        Edge::Clamp => 2,
+    }
+}
+
+/// What makes an image sample differently besides its texels: the sampling
+/// policy, edge, origin, and every level's size and texel size.
+fn image_words(image: &SampleImage, words: &mut Vec<u64>) {
+    words.push(match image.policy() {
+        SamplePolicy::Linear => 1,
+        SamplePolicy::Nearest => 2,
+    });
+    words.push(edge_word(image.edge()));
+    words.extend([
+        u64::from(image.origin().x.to_bits()),
+        u64::from(image.origin().y.to_bits()),
+        image.levels().len() as u64,
+    ]);
+    for level in image.levels() {
+        words.extend([
+            u64::from(level.width()),
+            u64::from(level.height()),
+            u64::from(level.texel().x.to_bits()),
+            u64::from(level.texel().y.to_bits()),
+        ]);
     }
 }
 
@@ -702,6 +738,15 @@ pub struct Diagnostics {
 }
 
 impl Diagnostics {
+    /// The [`Args::fingerprint`] of the instance built at `path`, if any.
+    #[must_use]
+    pub fn fingerprint_at(&self, path: &str) -> Option<u64> {
+        self.entries.iter().find_map(|e| match e.event {
+            Event::Instantiated { fingerprint } if e.path == path => Some(fingerprint),
+            _ => None,
+        })
+    }
+
     /// The instances built, as `(path, module)`, in order.
     pub fn instances(&self) -> impl Iterator<Item = (&str, &ModuleId)> + '_ {
         self.entries.iter().filter_map(|e| match e.event {
@@ -842,6 +887,18 @@ impl<'a> Context<'a> {
             name_word(1, &interface.id.name),
             u64::from(interface.id.version)
         ];
+        // The context grid: the same arguments on another grid, or with
+        // another edge, build another result even with no material input.
+        let g = self.grid;
+        words.extend([
+            u64::from(g.width),
+            u64::from(g.height),
+            u64::from(g.origin.x.to_bits()),
+            u64::from(g.origin.y.to_bits()),
+            u64::from(g.texel.x.to_bits()),
+            u64::from(g.texel.y.to_bits()),
+            edge_word(g.edge),
+        ]);
         let mut params = Vec::with_capacity(interface.params.len());
         let mut user_seed = 0;
         for decl in &interface.params {
@@ -903,6 +960,10 @@ impl<'a> Context<'a> {
                         resolved.content.0 as u64,
                         (resolved.content.0 >> 64) as u64,
                     ]);
+                    // The same texels at another physical scale, sampled another
+                    // way, or reduced another way, give different results.
+                    image_words(&resolved.image, &mut words);
+                    words.extend(resolved.mips.fingerprint());
                     Some(Bound::Resource(reference.clone(), resolved))
                 }
                 _ => return Err(invalid()),
@@ -911,10 +972,14 @@ impl<'a> Context<'a> {
         }
         let mut seed_words: Vec<u64> = path.split('/').map(|s| name_word(4, s)).collect();
         seed_words.push(user_seed);
+        let seed = hash(0x696e_7374, &seed_words); // "inst"
+        // The seed comes from the instance path, so the same arguments at two
+        // paths draw different randomness and must not share a fingerprint.
+        words.push(seed);
         let args = Args {
             params,
             inputs,
-            seed: hash(0x696e_7374, &seed_words),   // "inst"
+            seed,
             fingerprint: hash(0x6172_6773, &words), // "args"
         };
         self.diagnostics.entries.push(Entry {

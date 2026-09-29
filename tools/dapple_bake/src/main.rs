@@ -36,10 +36,10 @@ fn run(args: Vec<String>) -> Result<(), String> {
         quality: Quality::Balanced,
     };
     let mut force = false;
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
         let mut value = || {
-            args.next()
+            args.next_if(|v| !v.starts_with("--"))
                 .ok_or_else(|| format!("{arg} needs a value\n{USAGE}"))
         };
         match arg.as_str() {

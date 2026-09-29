@@ -280,6 +280,22 @@ fn coats_keep_the_base_and_collapse_when_doubled() {
 }
 
 #[test]
+fn collapsed_coats_stay_in_the_roughness_range() {
+    let rough = Coating {
+        roughness: Channel::Constant(Value::Scalar(1.0)),
+        ..Coating::clear()
+    };
+    let (once, _) = ops::coat(&rich(0.1), &rough).unwrap();
+    let (twice, _) = ops::coat(&once, &rough).unwrap();
+    let r = twice
+        .value(ChannelId::Param(Param::CoatRoughness), 0)
+        .scalar()
+        .unwrap();
+    assert!(r <= 1.0, "roughness {r}");
+    assert!(twice.range_violations().is_empty());
+}
+
+#[test]
 fn quarter_turns_swap_the_tiling_axes() {
     let mut m = rich(0.1);
     m.set_tiling(Tiling::X);

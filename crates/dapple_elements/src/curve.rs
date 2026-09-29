@@ -238,7 +238,9 @@ pub enum CurveOutput {
     /// Coverage of the stroke of the width profile: the share of a
     /// footprint-wide box across the curve that the band within half the
     /// width covers. Exact for a straight stroke, so a stroke thinner than
-    /// a texel keeps its area.
+    /// a texel keeps its area. Where strokes overlap, the one that covers
+    /// most wins (they do not add), so a wide curve is not cut short by a
+    /// hairline crossing it.
     Stroke,
 }
 
@@ -286,6 +288,34 @@ impl CurveNetwork {
                 period.map_or(Vec2::ZERO, |p| k * p)
             })
         })
+    }
+
+    /// The most any one segment's stroke covers a `footprint`-wide box
+    /// centered at `p`: see [`CurveOutput::Stroke`].
+    fn stroke(&self, p: Vec2, footprint: f32) -> f32 {
+        let mut best = 0.0_f32;
+        for shift in self.shifts() {
+            let q = p + shift;
+            for curve in &self.curves {
+                for i in 0..curve.segments() {
+                    let (a, b, wa, wb) = curve.segment(i);
+                    let ab = b - a;
+                    let len2 = ab.length_squared();
+                    let t = if len2 > 0.0 {
+                        ((q - a).dot(ab) / len2).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let distance = (q - (a + ab * t)).length();
+                    let half = 0.5 * (wa + (wb - wa) * t);
+                    best = best.max(stroke_coverage(distance, half, footprint));
+                }
+            }
+            if best >= 1.0 {
+                break;
+            }
+        }
+        best
     }
 
     /// The nearest curve to `p` and `p`'s coordinates in its frame, or
@@ -473,6 +503,20 @@ fn cross(p0: Vec2, p1: Vec2, q0: Vec2, q1: Vec2) -> Option<(f32, f32)> {
     ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then_some((t, u))
 }
 
+/// The share of a `footprint`-wide box across a curve, centered `distance`
+/// from it, that the band `half` either side of the curve covers.
+fn stroke_coverage(distance: f32, half: f32, footprint: f32) -> f32 {
+    if footprint > 0.0 {
+        let lo = (distance - half).max(-0.5 * footprint);
+        let hi = (distance + half).min(0.5 * footprint);
+        ((hi - lo) / footprint).clamp(0.0, 1.0)
+    } else if distance <= half {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 /// One quantity of a [`CurveNetwork`] as a scalar field.
 ///
 /// Distance, along and across are point values: they do not band-limit.
@@ -490,6 +534,9 @@ impl ScalarField for CurveField<'_> {
     }
 
     fn eval(&self, p: Vec2, footprint: Footprint) -> f32 {
+        if self.output == CurveOutput::Stroke {
+            return self.network.stroke(p, footprint.width());
+        }
         let Some(s) = self.network.nearest(p) else {
             return match self.output {
                 CurveOutput::Distance => f32::INFINITY,
@@ -500,22 +547,7 @@ impl ScalarField for CurveField<'_> {
             CurveOutput::Distance => s.distance,
             CurveOutput::Along => s.along,
             CurveOutput::Across => s.across,
-            CurveOutput::Stroke => {
-                // The share of a footprint-wide box across the curve, centered
-                // `distance` from it, that the band of the curve's width
-                // covers.
-                let (d, half) = (s.distance, 0.5 * s.width);
-                let f = footprint.width();
-                if f > 0.0 {
-                    let lo = (d - half).max(-0.5 * f);
-                    let hi = (d + half).min(0.5 * f);
-                    ((hi - lo) / f).clamp(0.0, 1.0)
-                } else if d <= half {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
+            CurveOutput::Stroke => unreachable!("strokes are evaluated above"),
         }
     }
 }
@@ -587,6 +619,39 @@ mod tests {
         let d = net.field(CurveOutput::Distance);
         let fp = Footprint::POINT;
         assert!((d.eval(Vec2::new(0.4, 0.3), fp) - d.eval(Vec2::new(1.4, -0.7), fp)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn strokes_take_the_widest_covering_stroke() {
+        // A wide horizontal curve and a hairline crossing it: a point inside
+        // the wide band but nearer the hairline is still covered.
+        let wide =
+            Curve::open(vec![Vec2::new(0.0, 0.5), Vec2::new(1.0, 0.5)], vec![0.2; 2]).unwrap();
+        let thin =
+            Curve::open(vec![Vec2::new(0.5, 0.0), Vec2::new(0.5, 1.0)], vec![0.0; 2]).unwrap();
+        let net = CurveNetwork::new(Domain::Plane, vec![wide, thin]);
+        let stroke = net.field(CurveOutput::Stroke);
+        let fp = Footprint::new(0.001).unwrap();
+        // 0.05 above the wide curve's axis, 0.02 from the hairline.
+        assert_eq!(stroke.eval(Vec2::new(0.52, 0.55), fp), 1.0);
+
+        // The same holds within one curve that doubles back across itself,
+        // wide on the way out and a hairline on the way back.
+        let loop_back = Curve::open(
+            vec![
+                Vec2::new(0.0, 0.5),
+                Vec2::new(1.0, 0.5),
+                Vec2::new(1.0, 0.9),
+                Vec2::new(0.5, 0.9),
+                Vec2::new(0.5, 0.0),
+            ],
+            vec![0.2, 0.2, 0.0, 0.0, 0.0],
+        )
+        .unwrap();
+        let net = CurveNetwork::new(Domain::Plane, vec![loop_back]);
+        let stroke = net.field(CurveOutput::Stroke);
+        assert_eq!(stroke.eval(Vec2::new(0.52, 0.55), fp), 1.0);
+        assert_eq!(stroke.eval(Vec2::new(0.52, 0.8), fp), 0.0, "uncovered");
     }
 
     #[test]

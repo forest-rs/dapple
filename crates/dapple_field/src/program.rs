@@ -1168,6 +1168,21 @@ impl fmt::Display for Fingerprint {
 
 const LANE_SEEDS: [u64; 2] = [0x6461_7070_6c65_2d30, 0x6461_7070_6c65_2d31]; // "dapple-0", "dapple-1"
 
+/// The fractional part of `x`, in `[0, 1)`.
+///
+/// `x - floor(x)` rounds up to exactly 1 for a tiny negative `x` (`-1e-9`),
+/// against the documented range. The true value is just below 1, so clamp to
+/// the largest `f32` below 1: that keeps `floor(x) + fract(x)` within an
+/// ulp of `x`, and a cell index taken from `floor` agrees with the offset.
+pub(crate) fn fract(x: f32) -> f32 {
+    let f = x - libm::floorf(x);
+    if f >= 1.0 {
+        1.0 - f32::EPSILON / 2.0
+    } else {
+        f
+    }
+}
+
 /// A fingerprint's low and high 64-bit halves.
 fn fingerprint_halves(fp: Fingerprint) -> [u64; 2] {
     #[expect(
@@ -2405,10 +2420,7 @@ impl Kernel {
                 Value::Vector3(v) => v.length(),
                 _ => unreachable!("length input was type-checked"),
             }),
-            Self::Fract(_) => {
-                let x = scalar(0);
-                Value::Scalar(x - libm::floorf(x))
-            }
+            Self::Fract(_) => Value::Scalar(fract(scalar(0))),
             Self::Atan2(..) => Value::Scalar(libm::atan2f(scalar(0), scalar(1))),
             Self::Binary(op, ..) => componentwise(args[0], args[1], |a, b| match op {
                 BinaryOp::Add => a + b,
@@ -2463,7 +2475,11 @@ impl Kernel {
                 if angle < 0.0 {
                     angle += core::f32::consts::PI;
                 }
-                Value::Scalar(if v == Vec2::ZERO { 0.0 } else { angle })
+                // A tiny negative angle rounds up to pi, which is angle 0.
+                if angle >= core::f32::consts::PI || v == Vec2::ZERO {
+                    angle = 0.0;
+                }
+                Value::Scalar(angle)
             }
             Self::Coherence(_) => {
                 let Value::Vector2(v) = args[0] else {
@@ -3030,6 +3046,48 @@ mod tests {
 
     fn torus() -> Domain {
         Domain::periodic(2, 1).unwrap()
+    }
+
+    #[test]
+    fn fract_stays_below_one_and_agrees_with_floor() {
+        // `-1e-9 - floor(-1e-9)` rounds up to exactly 1.
+        let just_below = 1.0 - f32::EPSILON / 2.0;
+        assert_eq!(fract(-1e-9), just_below);
+        assert!((libm::floorf(-1e-9) + fract(-1e-9) - -1e-9).abs() < 1e-7);
+        assert_eq!(fract(-0.25), 0.75);
+        assert_eq!(fract(3.5), 0.5);
+        assert_eq!(fract(2.0), 0.0);
+        assert_eq!(fract(-0.0), 0.0);
+        assert!(fract(f32::NAN).is_nan());
+    }
+
+    #[test]
+    fn fract_and_angle_ops_keep_their_ranges() {
+        let d = torus();
+        let mut b = ProgramBuilder::new();
+        let tiny = b
+            .add(Op::Constant {
+                domain: d,
+                value: -1e-9,
+            })
+            .unwrap();
+        let out = b.add(Op::Fract { input: tiny }).unwrap();
+        let fract_of_tiny = b.finish(out).unwrap().eval(Vec2::ZERO, Footprint::POINT);
+        assert!(fract_of_tiny < 1.0, "{fract_of_tiny}");
+
+        // A direction a hair below 0 has an angle a hair below 0, which
+        // `+ pi` rounds to pi; orientation is modulo pi, so it is 0.
+        let mut b = ProgramBuilder::new();
+        let a = b
+            .add(Op::Constant {
+                domain: d,
+                value: -1e-9,
+            })
+            .unwrap();
+        let dir = b.add(Op::Direction { angle: a }).unwrap();
+        let out = b.add(Op::Angle { input: dir }).unwrap();
+        let angle = b.finish(out).unwrap().eval(Vec2::ZERO, Footprint::POINT);
+        assert!((0.0..core::f32::consts::PI).contains(&angle), "{angle}");
     }
 
     /// A bark-like program exercising every op kind once.

@@ -234,7 +234,7 @@ impl SurfaceBake {
         let mut stats = BakeStats::default();
         let has_normals = mesh.normals.len() >= vertex_count;
 
-        for triangle in indices.chunks_exact(3) {
+        for triangle in indices.as_chunks::<3>().0 {
             let [a, b, c] = [triangle[0], triangle[1], triangle[2]].map(|i| i as usize);
             let uv = [a, b, c].map(|v| (Vec2::from(mesh.uvs[v]) - uv_origin) * density);
             let area = cross2(uv[1] - uv[0], uv[2] - uv[0]);

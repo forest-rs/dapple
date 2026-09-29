@@ -51,7 +51,9 @@ pub fn write(texture: &EncodedTexture) -> Result<Vec<u8>, PngError> {
         PixelFormat::Rg8Unorm => (
             png::ColorType::Rgb,
             level
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .flat_map(|rg| [rg[0], rg[1], 0])
                 .collect(),
         ),
@@ -59,7 +61,12 @@ pub fn write(texture: &EncodedTexture) -> Result<Vec<u8>, PngError> {
         PixelFormat::R16Unorm => {
             depth = png::BitDepth::Sixteen;
             // KTX2 levels are little-endian; PNG samples are big-endian.
-            let swapped = level.chunks_exact(2).flat_map(|b| [b[1], b[0]]).collect();
+            let swapped = level
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .flat_map(|b| [b[1], b[0]])
+                .collect();
             (png::ColorType::Grayscale, swapped)
         }
         PixelFormat::R32Float => return Err(PngError::UnsupportedFormat(texture.format)),

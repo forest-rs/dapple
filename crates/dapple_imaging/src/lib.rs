@@ -169,7 +169,9 @@ pub fn rasterize(scene: &Scene, realization: Realization) -> Result<Raster, Imag
     let image = VelloCpuRenderer::new(w, h).render_scene(&framed, w, h)?;
     let values = image
         .data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|rgba| f32::from(rgba[3]) / 255.0)
         .collect();
     Ok(Raster::from_values(

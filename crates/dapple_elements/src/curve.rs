@@ -156,6 +156,26 @@ impl Curve {
         )
     }
 
+    /// A crossing's topological location and arc length. Interior crossings
+    /// keep their segment identity even when their arc lengths round alike.
+    fn crossing_location(&self, segment: usize, t: f64) -> (CurveLocation, f32) {
+        if t == 0.0 {
+            (CurveLocation::Vertex(segment), self.lengths[segment])
+        } else if t == 1.0 {
+            let vertex = (segment + 1) % self.points.len();
+            (CurveLocation::Vertex(vertex), self.lengths[vertex])
+        } else {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "arc lengths are stored as f32"
+            )]
+            let along = (f64::from(self.lengths[segment])
+                + f64::from(self.lengths[segment + 1] - self.lengths[segment]) * t)
+                as f32;
+            (CurveLocation::Segment(segment), along)
+        }
+    }
+
     /// The point, unit tangent and width at arc length `s`, clamped to the
     /// curve (wrapped on a closed one).
     #[must_use]
@@ -362,10 +382,11 @@ impl CurveNetwork {
     }
 
     /// Every crossing of two segments, of different curves or of one
-    /// curve's non-adjacent segments, in curve and arc-length order.
+    /// curve's non-adjacent segments, in curve and arc-length order. A
+    /// crossing at a shared vertex is reported once, not once per segment.
     #[must_use]
     pub fn intersections(&self) -> Vec<Intersection> {
-        let mut out = Vec::new();
+        let mut found = Vec::new();
         let shifts: Vec<Vec2> = self.shifts().collect();
         for (ci, a) in self.curves.iter().enumerate() {
             for (cj, b) in self.curves.iter().enumerate().skip(ci) {
@@ -381,28 +402,53 @@ impl CurveNetwork {
                         }
                         let (p0, p1, _, _) = a.segment(i);
                         let (q0, q1, _, _) = b.segment(j);
-                        for &shift in &shifts {
+                        for (image, &shift) in shifts.iter().enumerate() {
                             if ci == cj && shift != Vec2::ZERO {
                                 continue;
                             }
                             if let Some((t, u)) = cross(p0, p1, q0 + shift, q1 + shift) {
-                                out.push(Intersection {
-                                    point: p0 + (p1 - p0) * t,
-                                    a: (
-                                        u32::try_from(ci).expect("fewer than 2^32 curves"),
-                                        a.lengths[i] + (a.lengths[i + 1] - a.lengths[i]) * t,
-                                    ),
-                                    b: (
-                                        u32::try_from(cj).expect("fewer than 2^32 curves"),
-                                        b.lengths[j] + (b.lengths[j + 1] - b.lengths[j]) * u,
-                                    ),
+                                let (mut left, mut sa) = a.crossing_location(i, t);
+                                let (mut right, mut sb) = b.crossing_location(j, u);
+                                if ci == cj && left > right {
+                                    core::mem::swap(&mut left, &mut right);
+                                }
+                                if ci == cj && sa > sb {
+                                    core::mem::swap(&mut sa, &mut sb);
+                                }
+                                let point = [0, 1].map(|axis| {
+                                    let (lo, hi) = (f64::from(p0[axis]), f64::from(p1[axis]));
+                                    #[expect(
+                                        clippy::cast_possible_truncation,
+                                        reason = "curve positions are stored as f32"
+                                    )]
+                                    let coordinate = (lo + (hi - lo) * t) as f32;
+                                    coordinate
                                 });
+                                let crossing = Intersection {
+                                    point: Vec2::from_array(point),
+                                    a: (u32::try_from(ci).expect("fewer than 2^32 curves"), sa),
+                                    b: (u32::try_from(cj).expect("fewer than 2^32 curves"), sb),
+                                };
+                                found.push((left, right, image, crossing));
                             }
                         }
                     }
                 }
             }
         }
+        // Only reports of the same vertex/segment pair in the same periodic
+        // image repeat. Arc-length proximity cannot identify a crossing:
+        // distinct ones can be arbitrarily close, or round to the same f32.
+        found.sort_by_key(|(left, right, image, crossing)| {
+            (crossing.a.0, crossing.b.0, *left, *right, *image)
+        });
+        found.dedup_by_key(|(left, right, image, crossing)| {
+            (crossing.a.0, crossing.b.0, *left, *right, *image)
+        });
+        let mut out: Vec<Intersection> = found
+            .into_iter()
+            .map(|(_, _, _, crossing)| crossing)
+            .collect();
         out.sort_by(|x, y| {
             x.a.0
                 .cmp(&y.a.0)
@@ -490,17 +536,35 @@ impl CurveNetwork {
 
 /// Where segments `p0 p1` and `q0 q1` cross, as their parameters, or
 /// `None` when they are parallel or miss.
-fn cross(p0: Vec2, p1: Vec2, q0: Vec2, q1: Vec2) -> Option<(f32, f32)> {
-    let r = p1 - p0;
-    let s = q1 - q0;
-    let denom = r.perp_dot(s);
+///
+/// Compute parameters in f64 so an interior crossing near an endpoint is
+/// not rounded to the endpoint before its topological identity is recorded.
+fn cross(p0: Vec2, p1: Vec2, q0: Vec2, q1: Vec2) -> Option<(f64, f64)> {
+    let difference = |a: Vec2, b: Vec2| {
+        [
+            f64::from(a.x) - f64::from(b.x),
+            f64::from(a.y) - f64::from(b.y),
+        ]
+    };
+    let perp_dot = |a: [f64; 2], b: [f64; 2]| a[0] * b[1] - a[1] * b[0];
+    let r = difference(p1, p0);
+    let s = difference(q1, q0);
+    let denom = perp_dot(r, s);
     if denom == 0.0 {
         return None;
     }
-    let d = q0 - p0;
-    let t = d.perp_dot(s) / denom;
-    let u = d.perp_dot(r) / denom;
+    let d = difference(q0, p0);
+    let t = perp_dot(d, s) / denom;
+    let u = perp_dot(d, r) / denom;
     ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then_some((t, u))
+}
+
+/// Shared endpoints have a vertex identity; each segment's interior is
+/// distinct from its endpoints and from every other segment's interior.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum CurveLocation {
+    Vertex(usize),
+    Segment(usize),
 }
 
 /// The share of a `footprint`-wide box across a curve, centered `distance`
@@ -652,6 +716,102 @@ mod tests {
         let stroke = net.field(CurveOutput::Stroke);
         assert_eq!(stroke.eval(Vec2::new(0.52, 0.55), fp), 1.0);
         assert_eq!(stroke.eval(Vec2::new(0.52, 0.8), fp), 0.0, "uncovered");
+    }
+
+    #[test]
+    fn a_crossing_at_a_vertex_is_reported_once() {
+        // Give every curve the same explicit vertex. Merely centering two
+        // rounded endpoints around `bend` can put their segment slightly off
+        // it, making two real crossings that must stay distinct.
+        for scale in [1.0_f32, 100.0, 1000.0] {
+            let at = |x: f32, y: f32| Vec2::new(x, y) * scale;
+            let bend = at(0.517, 0.483);
+            let bent = Curve::open(vec![at(0.0, 0.4), bend, at(1.0, 0.31)], vec![0.0; 3]).unwrap();
+            let mut curves = vec![bent];
+            for k in 0..24_u8 {
+                let angle = 0.13 + 0.131 * f32::from(k);
+                let d = Vec2::new(libm::cosf(angle), libm::sinf(angle)) * scale * 0.4;
+                curves.push(Curve::open(vec![bend - d, bend, bend + d], vec![0.0; 3]).unwrap());
+            }
+            let net = CurveNetwork::new(Domain::Plane, curves);
+            let x = net.intersections();
+            for a in 0..25 {
+                for b in a + 1..25 {
+                    let count = x.iter().filter(|c| c.a.0 == a && c.b.0 == b).count();
+                    assert_eq!(count, 1, "scale {scale}: curves {a} and {b}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_vertex_crossing_another_segments_interior_is_reported_once() {
+        for scale in [1.0_f32, 100.0, 1000.0] {
+            let bend = Vec2::new(0.517, 0.483) * scale;
+            let bent = Curve::open(
+                vec![
+                    Vec2::new(0.0, 0.4) * scale,
+                    bend,
+                    Vec2::new(1.0, 0.31) * scale,
+                ],
+                vec![0.0; 3],
+            )
+            .unwrap();
+            let line = Curve::open(
+                vec![Vec2::new(bend.x, -scale), Vec2::new(bend.x, 2.0 * scale)],
+                vec![0.0; 2],
+            )
+            .unwrap();
+            let crossings = CurveNetwork::new(Domain::Plane, vec![bent, line]).intersections();
+            assert_eq!(crossings.len(), 1, "scale {scale}: {crossings:?}");
+            assert_eq!(crossings[0].point, bend);
+        }
+    }
+
+    #[test]
+    fn nearby_crossings_with_long_arc_lengths_stay_distinct() {
+        let a = Curve::open(vec![Vec2::ZERO, Vec2::new(2000.0, 0.0)], vec![0.0; 2]).unwrap();
+        let b = Curve::open(
+            vec![
+                Vec2::new(0.0, -1.0),
+                Vec2::new(1000.0, -1.0),
+                Vec2::new(1000.0, 0.001),
+                Vec2::new(1000.005, -0.001),
+            ],
+            vec![0.0; 4],
+        )
+        .unwrap();
+        let crossings = CurveNetwork::new(Domain::Plane, vec![a, b]).intersections();
+        assert_eq!(crossings.len(), 2, "{crossings:?}");
+        assert!(crossings[0].point.x < crossings[1].point.x);
+    }
+
+    #[test]
+    fn distinct_crossings_near_a_vertex_are_not_vertex_reports() {
+        let a = Curve::open(vec![Vec2::ZERO, Vec2::new(2000.0, 0.0)], vec![0.0; 2]).unwrap();
+        let b = Curve::open(
+            vec![
+                Vec2::new(0.0, -1.0),
+                Vec2::new(1000.0, 1e-7),
+                Vec2::new(2000.0, -1.0),
+            ],
+            vec![0.0; 3],
+        )
+        .unwrap();
+        let crossings = CurveNetwork::new(Domain::Plane, vec![a, b]).intersections();
+        assert_eq!(crossings.len(), 2, "{crossings:?}");
+        assert!(crossings[0].point.x < 1000.0 && crossings[1].point.x > 1000.0);
+    }
+
+    #[test]
+    fn a_crossing_at_the_closing_vertex_is_reported_once() {
+        let closed = Curve::closed(vec![Vec2::ZERO, Vec2::X, Vec2::Y], vec![0.0; 3]).unwrap();
+        let line =
+            Curve::open(vec![Vec2::new(-1.0, -1.0), Vec2::splat(0.25)], vec![0.0; 2]).unwrap();
+        let crossings = CurveNetwork::new(Domain::Plane, vec![closed, line]).intersections();
+        assert_eq!(crossings.len(), 1, "{crossings:?}");
+        assert_eq!(crossings[0].point, Vec2::ZERO);
+        assert_eq!(crossings[0].a.1, 0.0);
     }
 
     #[test]

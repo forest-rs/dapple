@@ -1468,13 +1468,18 @@ fn image_domain(data: &RasterData) -> Result<Domain, NodeError> {
             )]
             let covered = Vec2::new(width as f32, height as f32) * texel;
             let whole = |v: f32| {
+                // `texel = period / width` is rounded, so `width * texel`
+                // can miss the period by an ulp for widths that are not
+                // powers of two. Allow that, and no more.
+                let near = libm::roundf(v);
                 #[expect(
                     clippy::cast_possible_truncation,
                     clippy::cast_sign_loss,
-                    reason = "checked to be a small positive whole number first"
+                    reason = "the range check keeps it a small positive number"
                 )]
-                let n = v as u32;
-                ((1.0..=16_777_216.0).contains(&v) && libm::floorf(v) == v).then_some(n)
+                let n = near as u32;
+                ((1.0..=16_777_216.0).contains(&near) && (v - near).abs() <= 2.0 * f32::EPSILON * v)
+                    .then_some(n)
             };
             let (x, y) = (whole(covered.x), whole(covered.y));
             x.zip(y)

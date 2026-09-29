@@ -120,7 +120,7 @@ impl Tiling {
                 let lattice = Lattice::new(domain, Vec2::from(frequency))?;
                 if let Some([_, rows]) = lattice.wrap {
                     let turns = row_count(rows) * f64::from(shift);
-                    if libm::trunc(turns) != turns {
+                    if !crate::domain::is_whole(turns) {
                         return Err(DomainError::InvalidParameter { name: "shift" });
                     }
                 }
@@ -553,6 +553,24 @@ mod tests {
         assert!(bond([4.0, 3.0], 0.5).is_err(), "3 rows at a half shift");
         assert!(bond([4.5, 4.0], 0.5).is_err());
         assert!(bond([4.0, 4.0], 1.0).is_err());
+        // Thirds are not dyadic, but three rows at a third shift line up.
+        let thirds = Domain::periodic(3, 3).unwrap();
+        let third = Pattern::Bond {
+            frequency: [1.0, 1.0],
+            shift: 1.0 / 3.0,
+        };
+        assert!(Tiling::new(thirds, third, 0).is_ok());
+        let tenth = Pattern::Bond {
+            frequency: [1.0, 1.0],
+            shift: 0.1,
+        };
+        assert!(Tiling::new(Domain::periodic(10, 10).unwrap(), tenth, 0).is_ok());
+        // A shift that is near a whole number of turns is still a seam.
+        let off = Pattern::Bond {
+            frequency: [1.0, 1.0],
+            shift: 0.3334,
+        };
+        assert!(Tiling::new(thirds, off, 0).is_err());
         let herringbone =
             |frequency, ratio| Tiling::new(domain, Pattern::Herringbone { frequency, ratio }, 0);
         assert!(herringbone(8.0, 2).is_ok());

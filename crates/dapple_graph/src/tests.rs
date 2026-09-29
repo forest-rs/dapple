@@ -900,6 +900,17 @@ fn sample_nodes_read_rasters_back_as_fields() {
 }
 
 #[test]
+fn sample_nodes_accept_widths_that_are_not_powers_of_two() {
+    // `41 * (1 / 41)` misses 1 by an ulp in `f32`.
+    let mut g = MaterialGraph::with_tile_size(16);
+    let noise = g.field("noise", noise_op(1), &[]).unwrap();
+    let map = g.realize("map", noise, 41, 41).unwrap();
+    let sample = g.sample("sampled", &[map], SamplePolicy::Linear).unwrap();
+    g.run().unwrap();
+    assert!(g.field_value(sample).is_some());
+}
+
+#[test]
 fn sample_nodes_change_only_near_changed_tiles() {
     let mut r = resampled(0.2);
     r.graph.run().unwrap();

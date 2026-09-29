@@ -157,7 +157,8 @@ pub enum DomainError {
         frequency: [f32; 3],
     },
     /// On a periodic domain, `frequency * period` must be a whole number of
-    /// lattice cells, or the field would not tile.
+    /// lattice cells, or the field would not tile. The `f32` rounding of the
+    /// product is tolerated, so `cells` here is not near a whole number.
     NonIntegerLattice {
         /// Axis index: 0 for x, 1 for y, 2 for z.
         axis: usize,
@@ -387,9 +388,26 @@ impl Lattice3 {
     }
 }
 
+/// Whether `x`, a product of `f32` parameters, is a whole number.
+///
+/// An `f32` such as `1/3` is not exactly a third, so
+/// `3.0 * f64::from(1.0_f32 / 3.0)` misses 1 by about `3e-8`. Requiring exact
+/// integrality would reject every non-dyadic parameter that is meant to
+/// divide a period, so accept the rounding error of an `f32` (one part in
+/// 2^23 of `x`).
+///
+/// The tolerance is capped at 1e-3 so that it bounds how far a cell edge can
+/// sit from the seam it is taken to be on. Counts past roughly 8000 cells
+/// whose frequency is not exactly representable can miss by more than that
+/// and are refused; give such a lattice an exactly representable frequency.
+pub(crate) fn is_whole(x: f64) -> bool {
+    let tolerance = (x.abs() * f64::from(f32::EPSILON)).min(1e-3);
+    (x - libm::round(x)).abs() <= tolerance
+}
+
 fn cells_per_period(axis: usize, frequency: f32, period: u32) -> Result<i64, DomainError> {
     let cells = f64::from(frequency) * f64::from(period);
-    if libm::trunc(cells) != cells || cells < 1.0 {
+    if !is_whole(cells) || cells < 0.5 {
         #[expect(
             clippy::cast_possible_truncation,
             reason = "reported for diagnostics only"
@@ -401,9 +419,9 @@ fn cells_per_period(axis: usize, frequency: f32, period: u32) -> Result<i64, Dom
     }
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "cells is a positive whole number; larger values are rejected below"
+        reason = "cells is a positive near-whole number; larger values are rejected below"
     )]
-    let whole = cells.min(u64::MAX as f64) as u64;
+    let whole = libm::round(cells).min(u64::MAX as f64) as u64;
     if whole > MAX_LATTICE_CELLS {
         return Err(DomainError::LatticeTooFine { axis, cells: whole });
     }
@@ -421,6 +439,18 @@ fn to_cell(floor: f32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn f32_rounding_is_tolerated_but_real_misses_are_not() {
+        // A third of a period of 3 is one cell, though 1/3 is inexact.
+        assert!(Lattice::new(Domain::periodic(3, 3).unwrap(), Vec2::splat(1.0 / 3.0)).is_ok());
+        assert!(is_whole(3.0 * f64::from(1.0_f32 / 3.0)));
+        assert!(!is_whole(1.0001));
+        assert!(!is_whole(2.5));
+        // Large counts keep a bounded tolerance: a quarter cell is a miss.
+        assert!(!is_whole(1_000_000.25));
+        assert!(is_whole(1_000_000.0));
+    }
 
     #[test]
     fn periodic_lattices_must_be_whole() {

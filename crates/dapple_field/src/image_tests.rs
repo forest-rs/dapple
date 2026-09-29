@@ -444,3 +444,25 @@ fn sampling_policies_are_fingerprinted() {
         sample_fingerprint(Fingerprint(3), SamplePolicy::Nearest)
     );
 }
+
+#[test]
+fn widths_that_are_not_powers_of_two_cover_the_period() {
+    // `width * (1 / width)` misses 1 by an ulp for these widths in `f32`.
+    for size in [41_u32, 47, 55, 61, 82] {
+        let values = alloc::vec![0.5_f32; (size * size) as usize];
+        assert!(
+            SampleImage::new(
+                torus(),
+                Vec2::ZERO,
+                alloc::vec![level(size, values)],
+                Fingerprint(0)
+            )
+            .is_ok(),
+            "width {size}"
+        );
+    }
+    // A real shortfall is still refused: 41 texels of a 1/40 period.
+    let values = alloc::vec![0.5_f32; 41 * 41];
+    let short = ImageLevel::new(41, 41, Vec2::splat(1.0 / 40.0), values).unwrap();
+    assert!(SampleImage::new(torus(), Vec2::ZERO, alloc::vec![short], Fingerprint(0)).is_err());
+}

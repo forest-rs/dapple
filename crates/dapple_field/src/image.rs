@@ -506,7 +506,14 @@ impl SampleImage {
                     reason = "periods are below 2^24, exact in f32"
                 )]
                 let period = Vec2::new(px as f32, py as f32);
-                if covered != period || origin != Vec2::ZERO {
+                // `texel = period / width` is rounded, so `width * texel`
+                // can miss the period by an ulp for widths that are not
+                // powers of two. Judge each axis by its own period.
+                let close = (covered - period)
+                    .abs()
+                    .cmple(period * (2.0 * f32::EPSILON))
+                    .all();
+                if !close || origin != Vec2::ZERO {
                     return Err(invalid);
                 }
                 Edge::Wrap

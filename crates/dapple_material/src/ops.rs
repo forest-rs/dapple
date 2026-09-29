@@ -25,7 +25,7 @@ use dapple_raster::{HeightToNormal, Raster, RasterOp};
 use glam::{Vec2, Vec3};
 use openpbr::Param;
 
-use crate::material::{Aux, Channel, ChannelId, Grid, Material, MaterialError};
+use crate::material::{Aux, Channel, ChannelId, Grid, Material, MaterialError, Tiling};
 use crate::report::{ApproximationKind, Report};
 
 /// How a selection weight becomes the per-texel decision.
@@ -814,7 +814,16 @@ pub fn transform(m: &Material, t: MaterialTransform) -> Result<(Material, Report
         v
     };
     let mut out = Material::new(grid);
-    out.set_tiling(m.tiling());
+    // A quarter turn carries the axis a material tiles along with it.
+    let tiling = m.tiling();
+    out.set_tiling(if turns % 2 == 1 {
+        Tiling {
+            x: tiling.y,
+            y: tiling.x,
+        }
+    } else {
+        tiling
+    });
     for (c, ch) in m.bound() {
         let port = c.port();
         let turns_vectors = matches!(

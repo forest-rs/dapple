@@ -437,6 +437,9 @@ enum Source {
     Mip {
         filter: Filter,
         input: u32,
+        /// The source's size, which sets the taps of each tile even when the
+        /// level below it keeps its size.
+        source_size: (u32, u32),
     },
     /// A raster computed whole, from a derivation fingerprint.
     Whole {
@@ -631,6 +634,79 @@ impl DappleExecutor {
     /// [`MaterialGraph::set_tile_budget`].
     pub fn set_tile_budget(&mut self, budget: Option<u64>) {
         self.tiles.budget = budget;
+    }
+
+    /// Runs `node` on `inputs` (the params value first, then its upstream).
+    fn run_node(
+        &mut self,
+        node: &mut DappleNode,
+        inputs: &[GraphValue],
+    ) -> Result<GraphValue, NodeError> {
+        let GraphValue::Params(params) = &inputs[0] else {
+            return Err(NodeError::WrongValue { expected: "params" });
+        };
+        let upstream = &inputs[1..];
+        let value = match (node.kind, params.as_ref()) {
+            (NodeKind::Field, Params::Field(op)) => {
+                run_field(&mut node.field, &mut self.tiles.report, op, upstream)?
+            }
+            (NodeKind::Realize, Params::Realize { width, height }) => run_realize(
+                &mut self.tiles,
+                node.key,
+                &mut node.tiles,
+                *width,
+                *height,
+                &upstream[0],
+            )?,
+            (NodeKind::Raster, Params::Raster(params)) => run_raster(
+                &mut self.tiles,
+                node.key,
+                &mut node.tiles,
+                *params,
+                &upstream[0],
+            )?,
+            (
+                NodeKind::Normals,
+                Params::Normals {
+                    width,
+                    height,
+                    scale,
+                },
+            ) => run_normals(
+                &mut self.tiles,
+                node.key,
+                &mut node.tiles,
+                (*width, *height, *scale),
+                &upstream[0],
+            )?,
+            (NodeKind::Mip, Params::Mip(filter)) => run_mip(
+                &mut self.tiles,
+                node.key,
+                &mut node.tiles,
+                *filter,
+                &upstream[0],
+            )?,
+            (NodeKind::Reduce, Params::Reduce { policy, level }) => run_reduce(
+                &mut self.tiles,
+                node.key,
+                &mut node.tiles,
+                (*policy, *level),
+                &upstream[0],
+            )?,
+            (NodeKind::Sample, Params::Sample(policy)) => run_sample(
+                &mut self.tiles,
+                node.key,
+                &mut node.sample,
+                *policy,
+                upstream,
+            )?,
+            _ => {
+                return Err(NodeError::WrongValue {
+                    expected: "params of the node's kind",
+                });
+            }
+        };
+        Ok(value)
     }
 }
 
@@ -1335,6 +1411,7 @@ fn run_mip(
     let source = Source::Mip {
         filter,
         input: value.tile_space,
+        source_size: (sw, sh),
     };
     let same = state.source.as_ref() == Some(&source)
         && state
@@ -1752,72 +1829,26 @@ impl Executor for DappleExecutor {
         outputs: &mut Vec<GraphValue>,
         _access: &mut NodeAccess<'_>,
     ) -> Result<(), NodeError> {
-        let GraphValue::Params(params) = &inputs[0] else {
-            return Err(NodeError::WrongValue { expected: "params" });
-        };
-        let upstream = &inputs[1..];
-        let value = match (node.kind, params.as_ref()) {
-            (NodeKind::Field, Params::Field(op)) => {
-                run_field(&mut node.field, &mut self.tiles.report, op, upstream)?
+        match self.run_node(node, inputs) {
+            Ok(value) => {
+                outputs.push(value);
+                Ok(())
             }
-            (NodeKind::Realize, Params::Realize { width, height }) => run_realize(
-                &mut self.tiles,
-                node.key,
-                &mut node.tiles,
-                *width,
-                *height,
-                &upstream[0],
-            )?,
-            (NodeKind::Raster, Params::Raster(params)) => run_raster(
-                &mut self.tiles,
-                node.key,
-                &mut node.tiles,
-                *params,
-                &upstream[0],
-            )?,
-            (
-                NodeKind::Normals,
-                Params::Normals {
-                    width,
-                    height,
-                    scale,
-                },
-            ) => run_normals(
-                &mut self.tiles,
-                node.key,
-                &mut node.tiles,
-                (*width, *height, *scale),
-                &upstream[0],
-            )?,
-            (NodeKind::Mip, Params::Mip(filter)) => run_mip(
-                &mut self.tiles,
-                node.key,
-                &mut node.tiles,
-                *filter,
-                &upstream[0],
-            )?,
-            (NodeKind::Reduce, Params::Reduce { policy, level }) => run_reduce(
-                &mut self.tiles,
-                node.key,
-                &mut node.tiles,
-                (*policy, *level),
-                &upstream[0],
-            )?,
-            (NodeKind::Sample, Params::Sample(policy)) => run_sample(
-                &mut self.tiles,
-                node.key,
-                &mut node.sample,
-                *policy,
-                upstream,
-            )?,
-            _ => {
-                return Err(NodeError::WrongValue {
-                    expected: "params of the node's kind",
-                });
+            Err(error) => {
+                // Raster and mip nodes take the tile marks that say what
+                // changed before they compute, and realize and normals nodes
+                // hand their pending tiles to a local list, so a failed run
+                // has already spent that state while the kept output still
+                // stands. Forget what the output was computed from, so the
+                // next run recomputes whole against it instead of trusting
+                // empty marks. A sample node fails before it spends
+                // anything, and forgetting its output would hide changes
+                // from its consumers (they read "no previous" as "nothing
+                // new" when its fingerprint stands).
+                node.tiles.source = None;
+                Err(error)
             }
-        };
-        outputs.push(value);
-        Ok(())
+        }
     }
 
     /// Early cutoff: an output equal to the node's previous one stops its
@@ -2250,15 +2281,16 @@ impl MaterialGraph {
     /// ([`RunSummary::cut_off_nodes`]); see the [crate docs](crate).
     pub fn run(&mut self) -> Result<RunSummary, MaterialError> {
         self.graph.executor_mut().tiles.begin_run();
-        let summary = self.graph.run_all()?;
-        // Nodes a tile budget left unfinished run again next time.
+        let result = self.graph.run_all();
+        // Nodes a tile budget left unfinished run again next time, including
+        // when a later node failed: the next run clears this list.
         let pending = core::mem::take(&mut self.graph.executor_mut().tiles.pending_nodes);
         for key in pending {
             let node = self.order[key as usize];
             self.graph
                 .invalidate_input(Self::params_name(&self.entries[&node].label));
         }
-        Ok(summary)
+        Ok(result?)
     }
 
     /// Limits each [`MaterialGraph::run`] to recomputing about `budget`

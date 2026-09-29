@@ -1751,3 +1751,90 @@ fn budgeted_runs_converge_through_sample_nodes() {
     };
     assert_eq!(bits(&r.graph, r.again), bits(&fresh.graph, fresh.again));
 }
+
+#[test]
+fn failed_runs_do_not_lose_the_changes_they_saw() {
+    let mut r = resampled(0.2);
+    r.graph.run().unwrap();
+    // Moving the disk marks tiles, and breaking the blur in the same batch of
+    // edits makes the blur take those marks and then fail.
+    r.graph.set_field_op(r.disk, disk_op(0.6)).unwrap();
+    r.graph
+        .set_raster_params(r.soft, RasterParams::Blur(GaussianBlur { sigma: -1.0 }))
+        .unwrap();
+    assert!(r.graph.run().is_err());
+    r.graph
+        .set_raster_params(r.soft, RasterParams::Blur(GaussianBlur { sigma: 0.01 }))
+        .unwrap();
+    r.graph.run().unwrap();
+
+    let mut fresh = resampled(0.6);
+    fresh.graph.run().unwrap();
+    let bits = |g: &MaterialGraph, n| -> Vec<u32> {
+        scalar(g, n).values().iter().map(|v| v.to_bits()).collect()
+    };
+    assert_eq!(bits(&r.graph, r.soft), bits(&fresh.graph, fresh.soft));
+    assert_eq!(bits(&r.graph, r.again), bits(&fresh.graph, fresh.again));
+}
+
+#[test]
+fn failed_runs_do_not_strand_pending_tiles() {
+    let mut r = resampled(0.2);
+    r.graph.run().unwrap();
+    // A budget leaves the realize node unfinished, and a later node fails
+    // in the same run.
+    r.graph.set_tile_budget(Some(2));
+    r.graph.set_field_op(r.disk, disk_op(0.6)).unwrap();
+    r.graph
+        .set_raster_params(r.soft, RasterParams::Blur(GaussianBlur { sigma: -1.0 }))
+        .unwrap();
+    assert!(r.graph.run().is_err());
+    r.graph.set_tile_budget(None);
+    r.graph
+        .set_raster_params(r.soft, RasterParams::Blur(GaussianBlur { sigma: 0.01 }))
+        .unwrap();
+    while r.graph.run().unwrap().executed_nodes > 0 {}
+
+    let mut fresh = resampled(0.6);
+    fresh.graph.run().unwrap();
+    let bits = |g: &MaterialGraph, n| -> Vec<u32> {
+        scalar(g, n).values().iter().map(|v| v.to_bits()).collect()
+    };
+    assert_eq!(bits(&r.graph, r.soft), bits(&fresh.graph, fresh.soft));
+    assert_eq!(bits(&r.graph, r.again), bits(&fresh.graph, fresh.again));
+}
+
+#[test]
+fn mip_nodes_rewire_when_the_source_gains_a_column() {
+    // A hairline disk, so a mip texel only changes if its taps are wired to
+    // the source column the disk lands in.
+    let dot = |x: f32| Op::Disk {
+        domain: domain(),
+        center: [x, 0.3],
+        radius: 0.003,
+        softness: 0.001,
+    };
+    let build = |width: u32, x: f32| {
+        let mut g = MaterialGraph::with_tile_size(16);
+        let disk = g.field("disk", dot(x), &[]).unwrap();
+        let map = g.realize("map", disk, width, 64).unwrap();
+        let mip = g.mip("mip", map, Filter::Box).unwrap();
+        (g, disk, map, mip)
+    };
+    let (mut g, disk, map, mip) = build(64, 0.2);
+    g.run().unwrap();
+    // 64 to 65 columns: the mip stays 32 wide, but its last column now
+    // reads a third source column.
+    g.set_resolution(map, 65, 64).unwrap();
+    g.run().unwrap();
+    let last_column = 64.5 / 65.0;
+    g.set_field_op(disk, dot(last_column)).unwrap();
+    g.run().unwrap();
+
+    let (mut fresh, _, _, fresh_mip) = build(65, last_column);
+    fresh.run().unwrap();
+    let bits = |g: &MaterialGraph, n| -> Vec<u32> {
+        scalar(g, n).values().iter().map(|v| v.to_bits()).collect()
+    };
+    assert_eq!(bits(&g, mip), bits(&fresh, fresh_mip));
+}

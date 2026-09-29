@@ -521,7 +521,7 @@ impl Coating {
 /// two, so they collapse ([`ApproximationKind::CoatsCollapsed`]): weights
 /// combine as coverage `1 − (1 − w₁)(1 − w₂)`, the new tint multiplies the
 /// old one where it lies, roughness adds lobe widths in `α²`
-/// (`r⁴ = r₂⁴ + w₁ r₁⁴`), and the new coat's index and darkening win.
+/// (`r⁴ = r₂⁴ + w₁ r₁⁴`, capped at 1), and the new coat's index and darkening win.
 ///
 /// # Errors
 ///
@@ -611,7 +611,8 @@ pub fn coat(base: &Material, coating: &Coating) -> Result<(Material, Report), Ma
                 scalar(get(base, Param::CoatRoughness)),
             );
             let r4 = rc * rc * rc * rc + wb * rb * rb * rb * rb;
-            rough.push(Value::Scalar(libm::sqrtf(libm::sqrtf(r4))));
+            // Two rough coats can sum past 1; roughness is a unit quantity.
+            rough.push(Value::Scalar(libm::sqrtf(libm::sqrtf(r4)).clamp(0.0, 1.0)));
             ior.push(get(&scratch, Param::CoatIor));
             dark.push(get(&scratch, Param::CoatDarkening));
         }

@@ -280,6 +280,33 @@ fn coats_keep_the_base_and_collapse_when_doubled() {
 }
 
 #[test]
+fn quarter_turns_swap_the_tiling_axes() {
+    let mut m = rich(0.1);
+    m.set_tiling(Tiling::X);
+    let turn = |quarter_turns| MaterialTransform {
+        flip_x: false,
+        quarter_turns,
+        offset: Vec2::ZERO,
+    };
+    let (turned, _) = ops::transform(&m, turn(1)).unwrap();
+    assert_eq!(turned.tiling(), Tiling { x: false, y: true });
+    let (back, _) = ops::transform(&m, turn(2)).unwrap();
+    assert_eq!(back.tiling(), Tiling::X, "half a turn keeps the axes");
+    let (three, _) = ops::transform(&m, turn(3)).unwrap();
+    assert_eq!(three.tiling(), Tiling { x: false, y: true });
+    let (flipped, _) = ops::transform(
+        &m,
+        MaterialTransform {
+            flip_x: true,
+            quarter_turns: 0,
+            offset: Vec2::ZERO,
+        },
+    )
+    .unwrap();
+    assert_eq!(flipped.tiling(), Tiling::X, "a mirror keeps the axes");
+}
+
+#[test]
 fn deposits_cover_raise_and_hide_the_coat() {
     let (coated, _) = ops::coat(&rich(0.1), &Coating::clear()).unwrap();
     let mut dirt = Material::new(grid());

@@ -34,6 +34,11 @@ pub enum Flow {
 /// `length` is in domain units, so trails keep their physical length at
 /// every resolution. The result is at least the input everywhere.
 ///
+/// Trails fade toward zero, so this is an operator on non-negative masks.
+/// Where a negative value's trail is closer to zero than a more negative
+/// texel downstream, the trail wins (a flat `-1` field comes out raised
+/// toward zero), so shift signed heights to non-negative first.
+///
 /// It is a scan along one axis ([`OpCategory::SeparablePass`]): on a
 /// wrapping raster each line is scanned twice around, so a trail crossing
 /// the period's edge continues on the other side exactly as a longer

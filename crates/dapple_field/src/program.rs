@@ -1843,7 +1843,7 @@ fn check_slice(
     let tiles = |step: [f32; 3], repeat: u32| {
         step.iter().zip(solid).all(|(&m, p)| {
             let steps = f64::from(m) * f64::from(repeat) / f64::from(p);
-            libm::trunc(steps) == steps
+            crate::domain::is_whole(steps)
         })
     };
     if tiles(u, period[0]) && tiles(v, period[1]) {

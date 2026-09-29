@@ -233,7 +233,7 @@ fn preserves_lattice(matrix: Mat2, period: [u32; 2]) -> bool {
         column.to_array().iter().enumerate().all(|(i, &m)| {
             let image = f64::from(m) * f64::from(period[j]);
             let steps = image / f64::from(period[i]);
-            libm::trunc(steps) == steps
+            crate::domain::is_whole(steps)
         })
     })
 }
@@ -302,7 +302,7 @@ pub(crate) fn check_transform3(domain: Domain3, transform: Affine3) -> Result<f3
         let preserves = columns.iter().enumerate().all(|(j, column)| {
             column.to_array().iter().enumerate().all(|(i, &m)| {
                 let steps = f64::from(m) * f64::from(period[j]) / f64::from(period[i]);
-                libm::trunc(steps) == steps
+                crate::domain::is_whole(steps)
             })
         });
         if !preserves {

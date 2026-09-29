@@ -41,7 +41,7 @@ use core::fmt;
 use glam::{Vec2, Vec3};
 
 use crate::hash::hash;
-use crate::program::ValueProgram;
+use crate::program::{ValueProgram, fract};
 use crate::shaping::{ColorRamp, ToneCurve};
 use crate::{Footprint, PortType, Value};
 
@@ -127,7 +127,8 @@ pub enum UnaryOp {
     Abs,
     /// The largest integer at most `x`.
     Floor,
-    /// `x − floor(x)`.
+    /// `x − floor(x)`, in `[0, 1)`: a tiny negative `x` gives the largest
+    /// value below 1, not 1.
     Fract,
     /// `√x`, 0 for negative `x`.
     Sqrt,
@@ -149,7 +150,7 @@ impl UnaryOp {
             Self::Negate => -x,
             Self::Abs => x.abs(),
             Self::Floor => libm::floorf(x),
-            Self::Fract => x - libm::floorf(x),
+            Self::Fract => fract(x),
             Self::Sqrt => libm::sqrtf(x.max(0.0)),
             Self::Exp => libm::expf(x),
             Self::Ln => libm::logf(x),
@@ -1342,6 +1343,12 @@ pub fn zip(a: Value, b: Value, f: impl Fn(f32, f32) -> f32) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scoped_fract_stays_below_one() {
+        assert!(UnaryOp::Fract.apply(-1e-9) < 1.0);
+        assert_eq!(UnaryOp::Fract.apply(2.75), 0.75);
+    }
 
     #[test]
     fn scopes_form_a_lattice() {

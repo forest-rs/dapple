@@ -74,14 +74,20 @@ impl Dimension {
     #[must_use]
     pub fn at(&self, t: f64) -> f64 {
         let t = t.clamp(0.0, 1.0);
-        if self.log {
+        let v = if self.log {
             libm::exp(libm::log(self.lo) + (libm::log(self.hi) - libm::log(self.lo)) * t)
         } else {
             self.lo + (self.hi - self.lo) * t
-        }
+        };
+        // The ends can round a few ulps outside the range, and a converged
+        // fit pinned at an end would then fail its own bounds check.
+        v.max(self.lo.min(self.hi)).min(self.lo.max(self.hi))
     }
 
-    /// Where `v` lies in the range, in `[0, 1]`.
+    /// Where `v` lies in the range, in `[0, 1]`; the middle when `v` has no
+    /// position there (not a number, such as a negative value on a
+    /// logarithmic range). Values beyond an end, including infinite ones,
+    /// sit at that end.
     #[must_use]
     pub fn position(&self, v: f64) -> f64 {
         let t = if self.log {
@@ -89,7 +95,7 @@ impl Dimension {
         } else {
             (v - self.lo) / (self.hi - self.lo)
         };
-        t.clamp(0.0, 1.0)
+        if t.is_nan() { 0.5 } else { t.clamp(0.0, 1.0) }
     }
 }
 
@@ -169,7 +175,12 @@ impl Target {
             Goal::AtLeast => (self.value - measured).max(0.0),
             Goal::AtMost => (measured - self.value).max(0.0),
         };
-        off / self.tolerance
+        // A met goal misses by nothing, even with a zero tolerance (0 / 0).
+        if off == 0.0 {
+            0.0
+        } else {
+            off / self.tolerance
+        }
     }
 
     /// Whether `measured` is within one tolerance of the goal.
@@ -225,13 +236,13 @@ impl Default for Cmaes {
 pub struct Fit {
     /// The best parameters found, in the space's units and order.
     pub params: Vec<f64>,
-    /// Their loss.
+    /// Their loss: [`loss`] of `measurements`.
     pub loss: f64,
     /// Their measurements, in target order.
     pub measurements: Vec<f64>,
     /// Objective evaluations made.
     pub evaluations: usize,
-    /// The best loss after each generation.
+    /// The best loss after each generation; never increasing.
     pub history: Vec<f64>,
 }
 
@@ -375,15 +386,15 @@ pub fn fit<E>(
     let damps = 1.0 + 2.0 * (libm::sqrt((mu_eff - 1.0) / (nf + 1.0)) - 1.0).max(0.0) + cs;
     let chi_n = libm::sqrt(nf) * (1.0 - 1.0 / (4.0 * nf) + 1.0 / (21.0 * nf * nf));
 
-    let mut mean: Vec<f64> = match start {
-        Some(s) => space
-            .dimensions
-            .iter()
-            .zip(s)
-            .map(|(d, v)| d.position(*v))
-            .collect(),
-        None => vec![0.5; n],
-    };
+    // Dimensions `start` does not reach begin at the middle of their range.
+    let mut mean: Vec<f64> = (0..n)
+        .map(
+            |i| match (space.dimensions.get(i), start.and_then(|s| s.get(i))) {
+                (Some(d), Some(v)) => d.position(*v),
+                _ => 0.5,
+            },
+        )
+        .collect();
     let mut sigma = options.sigma;
     let mut c = vec![vec![0.0; n]; n];
     for (i, row) in c.iter_mut().enumerate() {
@@ -398,18 +409,23 @@ pub fn fit<E>(
             .map(|(d, t)| d.at(*t))
             .collect()
     };
-    let mut evaluate = |x: &[f64]| -> Result<(f64, Vec<f64>), E> {
+    let mut evaluate = |x: &[f64]| -> Result<(f64, f64, Vec<f64>), E> {
         let inside: Vec<f64> = x.iter().map(|t| t.clamp(0.0, 1.0)).collect();
         let penalty: f64 = x.iter().zip(&inside).map(|(a, b)| (a - b) * (a - b)).sum();
         let measured = objective(&to_params(&inside))?;
         let base = loss(targets, &measured);
         Ok((
             base * (1.0 + 10.0 * libm::sqrt(penalty)) + 1e3 * penalty,
+            base,
             measured,
         ))
     };
 
-    let (first_loss, first_measured) = evaluate(&mean)?;
+    let (_, first_loss, first_measured) = evaluate(&mean)?;
+    // The search ranks samples by their penalized score, but the best point
+    // is the one with the lowest true loss: an outside sample is measured at
+    // its clamped point, which is what the fit reports, so its penalty says
+    // nothing about that point.
     let mut best = Fit {
         params: to_params(&mean.iter().map(|t| t.clamp(0.0, 1.0)).collect::<Vec<_>>()),
         loss: first_loss,
@@ -431,10 +447,10 @@ pub fn fit<E>(
                 .map(|i| (0..n).map(|j| b[i][j] * d[j] * z[j]).sum())
                 .collect();
             let x: Vec<f64> = (0..n).map(|i| mean[i] + sigma * y[i]).collect();
-            let (l, measured) = evaluate(&x)?;
+            let (l, base, measured) = evaluate(&x)?;
             best.evaluations += 1;
-            if l < best.loss {
-                best.loss = l;
+            if base < best.loss {
+                best.loss = base;
                 best.params = to_params(&x.iter().map(|t| t.clamp(0.0, 1.0)).collect::<Vec<_>>());
                 best.measurements = measured;
             }
@@ -533,6 +549,96 @@ mod tests {
         assert_eq!(a, b, "deterministic under a seed");
         let report = a.report("toy", &space, &targets);
         assert!(report.passed(), "{}", report.to_json());
+    }
+
+    fn three_dimensions() -> Space {
+        Space {
+            dimensions: vec![
+                Dimension::linear("a", 0.0, 1.0),
+                Dimension::log("b", 0.01, 10.0),
+                Dimension::linear("c", -5.0, 5.0),
+            ],
+        }
+    }
+
+    #[test]
+    fn short_and_unplaceable_starts_begin_at_the_middle() {
+        let space = three_dimensions();
+        let targets = [Target::equal("sum", 1.0, 0.1)];
+        let sum = |p: &[f64]| -> Result<Vec<f64>, ()> { Ok(vec![p.iter().sum()]) };
+        let options = Cmaes {
+            max_evaluations: 200,
+            ..Cmaes::default()
+        };
+        // A short start leaves the rest at the middle of their ranges; a
+        // negative or NaN start on a log range has no position and does too.
+        for start in [
+            &[0.3, 0.5][..],
+            &[0.3, -1.0, 0.0],
+            &[0.3, f64::NAN, 0.0],
+            &[],
+        ] {
+            let fit = fit(&space, &targets, &options, Some(start), sum).unwrap();
+            assert!(fit.loss.is_finite(), "{start:?}: {fit:?}");
+        }
+        let log = &space.dimensions[1];
+        assert_eq!(log.position(-1.0), 0.5);
+        assert_eq!(log.position(f64::NAN), 0.5);
+        assert_eq!(log.position(0.0), 0.0, "zero is below the range");
+    }
+
+    #[test]
+    fn range_ends_are_exactly_their_bounds() {
+        let space = three_dimensions();
+        let b = &space.dimensions[1];
+        assert_eq!((b.at(0.0), b.at(1.0)), (0.01, 10.0));
+    }
+
+    #[test]
+    fn met_goals_miss_by_nothing_even_without_a_tolerance() {
+        assert_eq!(Target::equal("t", 2.0, 0.0).miss(2.0), 0.0);
+        assert_eq!(Target::at_least("t", 2.0, 0.0).miss(3.0), 0.0);
+        assert_eq!(Target::at_most("t", 2.0, 0.0).miss(1.0), 0.0);
+        assert!(Target::at_least("t", 2.0, 0.0).miss(1.0).is_infinite());
+    }
+
+    #[test]
+    fn the_best_point_is_the_lowest_true_loss_measured() {
+        // The optimum sits on the range's edge, so samples beyond it are
+        // measured at the edge but penalized. The fit must report the point
+        // with the lowest true loss it ever measured, so its loss is the
+        // loss of its measurements and its history never rises.
+        let space = Space {
+            dimensions: vec![
+                Dimension::linear("x", 0.0, 1.0),
+                Dimension::linear("y", 0.0, 1.0),
+            ],
+        };
+        let targets = [
+            Target::equal("x", 1.0, 0.001),
+            Target::equal("y", 0.0, 0.001),
+        ];
+        let options = Cmaes {
+            target_loss: 0.0,
+            ..Cmaes::default()
+        };
+        for seed in 0..40 {
+            let mut lowest = f64::INFINITY;
+            let model = |p: &[f64]| -> Result<Vec<f64>, ()> {
+                let measured = vec![p[0], p[1]];
+                lowest = lowest.min(loss(&targets, &measured));
+                Ok(measured)
+            };
+            let options = Cmaes { seed, ..options };
+            let fit = fit(&space, &targets, &options, None, model).unwrap();
+            assert_eq!(fit.loss, loss(&targets, &fit.measurements), "{fit:?}");
+            assert_eq!(fit.loss, lowest, "seed {seed}: {fit:?}");
+            assert!(
+                fit.history.windows(2).all(|w| w[1] <= w[0]),
+                "seed {seed}: {:?}",
+                fit.history
+            );
+        }
     }
 
     #[test]

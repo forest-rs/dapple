@@ -28,6 +28,10 @@ const MAX_DIRECTIONS: u32 = 64;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AmbientOcclusion {
     /// Search radius in domain units; finite and positive.
+    ///
+    /// Samples along a ray sit a texel apart (the smaller texel), so a radius
+    /// under that finds no occluders and the result is fully open (1),
+    /// as a blur narrower than a texel is the identity.
     pub radius: f32,
     /// Number of azimuths, 1 to 64.
     pub directions: u32,
@@ -91,9 +95,9 @@ impl RasterOp for AmbientOcclusion {
         let [rx, ry] = self.reach(texel);
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "saturating conversion of a finite reach"
+            reason = "the cast saturates for a reach past `u32`, and the sum saturates too"
         )]
-        let r = |t: f32| libm::ceilf(t) as u32 + 1;
+        let r = |t: f32| (libm::ceilf(t) as u32).saturating_add(1);
         (rx.is_finite() && ry.is_finite()).then(|| [r(rx), r(ry)])
     }
 
@@ -191,6 +195,32 @@ mod tests {
     }
 
     #[test]
+    fn radii_under_a_texel_find_nothing_and_leave_it_open() {
+        let pit = |texel: Vec2| {
+            let mut v = alloc::vec![1.0; 64];
+            v[4 * 8 + 4] = 0.0;
+            Raster::from_values(8, 8, Vec2::ZERO, texel, Edge::Wrap, v).unwrap()
+        };
+        let open = |radius, texel| {
+            let ao = AmbientOcclusion {
+                radius,
+                directions: 8,
+                scale: 1.0,
+            };
+            ao.apply(&pit(texel))
+                .unwrap()
+                .values()
+                .iter()
+                .all(|v| *v == 1.0)
+        };
+        assert!(open(0.05, Vec2::splat(0.1)), "half a square texel");
+        // Non-square: taps are spaced by the smaller texel, so a radius
+        // between the two texels still samples and sees the pit.
+        assert!(open(0.05, Vec2::new(0.1, 0.2)), "under both");
+        assert!(!open(0.15, Vec2::new(0.1, 0.2)), "between the texels");
+    }
+
+    #[test]
     fn rejects_bad_parameters() {
         let r = Raster::from_values(
             2,
@@ -217,5 +247,8 @@ mod tests {
         );
         assert!(AmbientOcclusion { radius: 0.0, ..ok }.apply(&r).is_err());
         assert!(AmbientOcclusion { radius: 1e6, ..ok }.apply(&r).is_err());
+        // Footprints of absurd radii saturate rather than overflow.
+        let huge = AmbientOcclusion { radius: 1e30, ..ok };
+        assert_eq!(huge.footprint(Vec2::ONE), Some([u32::MAX, u32::MAX]));
     }
 }

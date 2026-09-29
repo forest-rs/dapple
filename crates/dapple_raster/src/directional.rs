@@ -106,9 +106,9 @@ impl SlopeSample {
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "reach over texel is small and positive"
+            reason = "the cast saturates for a huge reach, and the sum saturates too"
         )]
-        let r = |t: f32| libm::ceilf(self.reach / t) as u32 + 1;
+        let r = |t: f32| (libm::ceilf(self.reach / t) as u32).saturating_add(1);
         [r(texel.x), r(texel.y)]
     }
 
@@ -274,6 +274,16 @@ impl Advect {
 mod tests {
     use super::*;
     use crate::Edge;
+
+    #[test]
+    fn absurd_reaches_saturate_their_footprint() {
+        let op = SlopeSample {
+            reach: 1e30,
+            steps: 4,
+            mode: SlopeMode::Average,
+        };
+        assert_eq!(op.footprint(Vec2::ONE), [u32::MAX, u32::MAX]);
+    }
 
     fn grid(n: u32, f: impl Fn(u32, u32) -> f32) -> Raster {
         let mut v = Vec::new();

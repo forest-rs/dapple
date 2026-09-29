@@ -22,4 +22,7 @@ default `bc`), `--quality fast|balanced|best`, and `--force`.
 - **Output** goes to `<out>/<profile>/<material>/`: KTX2 for Lightweald, PNG
   for glTF and raw. Maps a profile cannot carry are listed.
 - **Caching:** each material's stamp records its recipe fingerprint and the
-  bake settings. An unchanged material is skipped, and `--force` re-bakes.
+  bake settings, its written files, and a completion count. An unchanged
+  material is skipped only when its complete stamp matches and every listed
+  file exists. `--force` re-bakes. Bakes preserve earlier outputs when a
+  profile, texture or material is dropped; remove unwanted outputs explicitly.

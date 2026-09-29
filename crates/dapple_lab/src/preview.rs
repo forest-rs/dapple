@@ -21,7 +21,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use dapple_encode::{Edge, Filter, Image, color_mips};
+use dapple_encode::{Filter, Image, color_mips};
 use dapple_field::Value;
 use dapple_material::{ChannelId, Material, MaterialError, Param};
 use dapple_raster::{HeightToNormal, RasterOp};
@@ -195,7 +195,7 @@ pub fn mips(m: &Material, levels: usize) -> Result<Picture, MaterialError> {
         values.extend_from_slice(c);
         values.push(1.0);
     }
-    let image = Image::new(g.width, g.height, 4, Edge::Wrap, values)
+    let image = Image::new(g.width, g.height, 4, g.edge, values)
         .map_err(|_| MaterialError::GridMismatch)?;
     let chain = color_mips(&image, Filter::Box);
     let levels: Vec<&Image> = chain.levels().iter().take(levels.max(1)).collect();

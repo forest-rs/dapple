@@ -77,7 +77,11 @@
 //! - A sample node's field changes only near the tiles of its rasters whose
 //!   bits changed: each changed tile's region, grown by one texel for the
 //!   bilinear taps, becomes [`FieldValue::change`], so realizing the sampled
-//!   field downstream recomputes only the tiles those regions reach.
+//!   field downstream recomputes only the tiles those regions reach. Its
+//!   program fingerprint names its rasters' derivations, not their texels,
+//!   so consumers rely on that change, not the fingerprint. An edit to the
+//!   sampling policy or to a level's size, origin or texel size changes the
+//!   program everywhere.
 //!
 //! Tile-wise results equal whole recomputation bit for bit.
 //! [`MaterialGraph::tile_report`] counts the work of the last run.
@@ -85,7 +89,8 @@
 //! ## Early cutoff
 //!
 //! A node that re-runs and produces the same value as before (the same
-//! program, or a raster with the same derivation and texels) stops
+//! program reporting no change, or a raster with the same derivation and
+//! texels) stops
 //! propagation: its dependents are cut off instead of re-run, and
 //! [`RunSummary::cut_off_nodes`] counts them. Re-setting a node's parameters
 //! to their current value, for example, re-runs only that node. An edit
@@ -331,6 +336,17 @@ pub struct FieldValue {
     pub previous: Option<Fingerprint>,
     /// Where this program's values can differ from `previous`'s.
     pub change: Change,
+    /// How many distinct outputs the producing node has made, this one
+    /// included: it advances whenever the program or its reported `change`
+    /// differs from the previous output, and stays put for an output that is
+    /// equal to it (which is cut off).
+    ///
+    /// A program's fingerprint can stay put while its texels change (a
+    /// sampled image names its rasters' derivations), so a consumer applies
+    /// `change` only to the output right after the one it last consumed
+    /// (`previous` and `serial` both follow on), recomputes everything if it
+    /// missed one, and has nothing to do for a serial it already consumed.
+    pub serial: u64,
 }
 
 /// A value on a graph edge or input.
@@ -380,8 +396,10 @@ impl NodeKind {
 #[derive(Clone, Debug, Default)]
 struct FieldState {
     op: Option<Op>,
-    inputs: Vec<Fingerprint>,
+    /// Each input's fingerprint and serial when last consumed.
+    inputs: Vec<(Fingerprint, u64)>,
     output: Option<Fingerprint>,
+    serial: u64,
 }
 
 /// State a realize or raster node keeps between runs.
@@ -401,11 +419,13 @@ struct TileState {
 enum Source {
     Realize {
         program: Fingerprint,
+        serial: u64,
         width: u32,
         height: u32,
     },
     Normals {
         program: Fingerprint,
+        serial: u64,
         width: u32,
         height: u32,
         scale: u32,
@@ -432,6 +452,19 @@ struct SampleState {
     levels: Vec<(u32, Grid, Vec<InternId>)>,
     /// The previous program's fingerprint.
     output: Option<Fingerprint>,
+    serial: u64,
+    /// What the previous run sampled other than texel values: anything that
+    /// differs here changes the program without marking a tile.
+    layout: Option<SampleLayout>,
+}
+
+/// The parts of a sample node's program that tile marks do not cover.
+#[derive(Clone, Debug, PartialEq)]
+struct SampleLayout {
+    policy: SamplePolicy,
+    port: PortType,
+    /// Per sampled raster: its size, origin, texel size, and edge policy.
+    levels: Vec<(u32, u32, Vec2, Vec2, Edge)>,
 }
 
 /// A graph node: its kind, its tile key space, and its state between runs.
@@ -662,15 +695,25 @@ fn run_field(
         Some(previous) => op.change_from(previous),
         None => Change::Everywhere,
     };
-    let consumed: Vec<Fingerprint> = fields.iter().map(|f| f.program.fingerprint()).collect();
+    let consumed: Vec<(Fingerprint, u64)> = fields
+        .iter()
+        .map(|f| (f.program.fingerprint(), f.serial))
+        .collect();
     for (i, field) in fields.iter().enumerate() {
         let last = state.inputs.get(i).copied();
-        let input_change = if last == Some(consumed[i]) && state.inputs.len() == fields.len() {
-            Change::Nowhere
-        } else if last.is_some() && field.previous == last {
-            field.change.clone()
-        } else {
-            Change::Everywhere
+        let same_inputs = state.inputs.len() == fields.len();
+        // An input's reported change applies once, to the output right after
+        // the one consumed last; a missed output leaves nothing to trust,
+        // not even an equal fingerprint (a sampled image keeps its
+        // fingerprint while its texels change).
+        let input_change = match last {
+            Some(seen) if seen == consumed[i] && same_inputs => Change::Nowhere,
+            Some((fingerprint, serial))
+                if field.previous == Some(fingerprint) && field.serial == serial + 1 =>
+            {
+                field.change.clone()
+            }
+            _ => Change::Everywhere,
         };
         let input_change = match (input_change, op) {
             (Change::Nowhere, _) => Change::Nowhere,
@@ -688,19 +731,25 @@ fn run_field(
     }
     let previous = state.output;
     let fingerprint = program.fingerprint();
+    let change = if previous.is_some() {
+        change
+    } else {
+        Change::Everywhere
+    };
+    // An output equal to the last is cut off, so consumers never see it.
+    let equal = previous == Some(fingerprint) && change == Change::Nowhere;
+    let serial = state.serial + u64::from(!equal);
     *state = FieldState {
         op: Some(op.clone()),
         inputs: consumed,
         output: Some(fingerprint),
+        serial,
     };
     Ok(GraphValue::Field(Arc::new(FieldValue {
         program,
         previous,
-        change: if previous.is_some() {
-            change
-        } else {
-            Change::Everywhere
-        },
+        change,
+        serial,
     })))
 }
 
@@ -868,13 +917,18 @@ fn field_dirty(
     grid: Grid,
     realization: &Realization,
     field: &FieldValue,
-    previous: Option<Fingerprint>,
+    previous: Option<(Fingerprint, u64)>,
     fingerprint: Fingerprint,
 ) -> Dirty {
-    let last = previous?;
-    let dirty = if last == fingerprint {
+    let (last, serial) = previous?;
+    // A program's reported change applies once, to the output right after
+    // the one realized last, whatever the fingerprint does: a sampled image
+    // keeps its fingerprint while a budgeted upstream fills in more of its
+    // texels. Seeing the same output again (to work off pending tiles) has
+    // nothing new to apply, and a missed output leaves nothing to trust.
+    let dirty = if serial == field.serial && last == fingerprint {
         Some(Vec::new())
-    } else if field.previous == Some(last) {
+    } else if field.previous == Some(last) && field.serial == serial + 1 {
         match &field.change {
             Change::Nowhere => Some(Vec::new()),
             Change::Within {
@@ -1003,11 +1057,12 @@ fn run_realize(
         (
             Some(Source::Realize {
                 program: last,
+                serial,
                 width: w,
                 height: h,
             }),
             Some(RasterData::Scalar(raster)),
-        ) if (*w, *h) == (width, height) => Some((*last, raster)),
+        ) if (*w, *h) == (width, height) => Some(((*last, *serial), raster)),
         _ => None,
     };
     let dirty = field_dirty(
@@ -1015,7 +1070,7 @@ fn run_realize(
         grid,
         &realization,
         field_value,
-        previous.map(|(last, _)| last),
+        previous.map(|(seen, _)| seen),
         fingerprint,
     );
     let dirty = tiles.schedule(&mut state.pending, dirty, grid.count());
@@ -1037,6 +1092,7 @@ fn run_realize(
     };
     state.source = Some(Source::Realize {
         program: fingerprint,
+        serial: field_value.serial,
         width,
         height,
     });
@@ -1064,12 +1120,13 @@ fn run_normals(
         (
             Some(Source::Normals {
                 program: last,
+                serial,
                 width: w,
                 height: h,
                 scale: k,
             }),
             Some(RasterData::Vector3(raster)),
-        ) if (*w, *h, *k) == (width, height, scale.to_bits()) => Some((*last, raster)),
+        ) if (*w, *h, *k) == (width, height, scale.to_bits()) => Some(((*last, *serial), raster)),
         _ => None,
     };
     let dirty = field_dirty(
@@ -1077,7 +1134,7 @@ fn run_normals(
         grid,
         &realization,
         field_value,
-        previous.map(|(last, _)| last),
+        previous.map(|(seen, _)| seen),
         fingerprint,
     );
     let dirty = tiles.schedule(&mut state.pending, dirty, grid.count());
@@ -1102,6 +1159,7 @@ fn run_normals(
     };
     state.source = Some(Source::Normals {
         program: fingerprint,
+        serial: field_value.serial,
         width,
         height,
         scale: scale.to_bits(),
@@ -1547,7 +1605,13 @@ fn run_sample(
         .iter()
         .map(|value| (value.tile_space, value.data.grid(tiles.size())))
         .collect();
+    let layout = SampleLayout {
+        policy,
+        port,
+        levels: rasters.iter().map(|value| value.data.shape()).collect(),
+    };
     let same = state.output.is_some()
+        && state.layout.as_ref() == Some(&layout)
         && state.levels.len() == grids.len()
         && state
             .levels
@@ -1600,11 +1664,18 @@ fn run_sample(
         }
     }
     let previous = state.output;
-    state.output = Some(program.fingerprint());
+    let fingerprint = program.fingerprint();
+    let change = if same { change } else { Change::Everywhere };
+    // An output equal to the last is cut off, so consumers never see it.
+    let equal = previous == Some(fingerprint) && change == Change::Nowhere;
+    state.output = Some(fingerprint);
+    state.layout = Some(layout);
+    state.serial += u64::from(!equal);
     Ok(GraphValue::Field(Arc::new(FieldValue {
         program,
         previous,
-        change: if same { change } else { Change::Everywhere },
+        change,
+        serial: state.serial,
     })))
 }
 
@@ -1752,8 +1823,10 @@ impl Executor for DappleExecutor {
     /// Early cutoff: an output equal to the node's previous one stops its
     /// dependents from re-running.
     ///
-    /// A field program is equal when its fingerprint is: fingerprints are
-    /// structural, so equal programs evaluate identically everywhere. A
+    /// A field program is equal when its fingerprint is and it reports no
+    /// change: fingerprints are structural, so equal programs evaluate
+    /// identically everywhere, except that a sampled image's fingerprint
+    /// names its rasters' derivations, not their texels. A
     /// raster is equal when its fingerprint is, it lies on the same grid in
     /// the same tile space, and no recomputed tile's bits changed
     /// ([`RasterValue::changed`]); tiles not recomputed are copied from the
@@ -1767,7 +1840,10 @@ impl Executor for DappleExecutor {
     fn values_equal(&self, previous: &GraphValue, next: &GraphValue) -> bool {
         match (previous, next) {
             (GraphValue::Field(a), GraphValue::Field(b)) => {
-                a.program.fingerprint() == b.program.fingerprint()
+                // A sampled image keeps its fingerprint while its texels
+                // change (a budgeted upstream fills in more tiles), so the
+                // reported change must be empty as well.
+                a.program.fingerprint() == b.program.fingerprint() && b.change == Change::Nowhere
             }
             (GraphValue::Raster(a), GraphValue::Raster(b)) => {
                 a.fingerprint == b.fingerprint

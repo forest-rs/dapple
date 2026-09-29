@@ -826,7 +826,8 @@ dependencies = [
 [[package]]
 name = "openpbr"
 version = "0.1.0"
-source = "git+https://github.com/forest-rs/openpbr?rev=374ddf3512e7bb4d369708777be6b3ff60754964#374ddf3512e7bb4d369708777be6b3ff60754964"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54a9c4bb30ba1a95da4539174f63c1f255b6b60e692c69a92398fac40a833989"
 dependencies = [
  "color",
 ]

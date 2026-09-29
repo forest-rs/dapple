@@ -117,9 +117,7 @@ imaging = { default-features = false, features = ["libm"], git = "https://github
 imaging_vello_cpu = { default-features = false, features = ["libm"], git = "https://github.com/forest-rs/imaging", rev = "89b364b253bd4a07732e0fb1de95ae1b313cf588" }
 invalidation = { default-features = false, version = "0.2.0" }
 libm = "0.2.16"
-# Pinned to forest-rs/openpbr main (the 1.1.1 parameter set); no crates.io
-# release yet.
-openpbr = { default-features = false, features = ["libm"], git = "https://github.com/forest-rs/openpbr", rev = "374ddf3512e7bb4d369708777be6b3ff60754964" }
+openpbr = { default-features = false, features = ["libm"], version = "0.1.0" }
 png = "0.18.1"
 serde = { default-features = false, features = ["alloc", "derive"], version = "1.0.228" }
 serde_json = { default-features = false, features = ["alloc"], version = "1.0.145" }

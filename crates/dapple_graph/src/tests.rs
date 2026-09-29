@@ -911,6 +911,22 @@ fn sample_nodes_accept_widths_that_are_not_powers_of_two() {
 }
 
 #[test]
+fn equal_sample_edits_are_cut_off() {
+    let mut r = resampled(0.2);
+    r.graph.run().unwrap();
+    let before = r.graph.run_count(r.again);
+
+    // Re-setting the policy to its current value re-runs the sample node
+    // and cuts everything after it off.
+    r.graph
+        .set_sample_policy(r.sample, SamplePolicy::Linear)
+        .unwrap();
+    let summary = r.graph.run().unwrap();
+    assert_eq!(summary.executed_nodes, 1, "{summary:?}");
+    assert_eq!(r.graph.run_count(r.again), before);
+}
+
+#[test]
 fn sample_nodes_change_only_near_changed_tiles() {
     let mut r = resampled(0.2);
     r.graph.run().unwrap();
@@ -1672,4 +1688,66 @@ fn morphology_nodes_keep_masks_and_recompute_locally() {
             ..
         }
     ));
+}
+
+#[test]
+fn sample_policy_edits_reach_downstream_realizations() {
+    // Realize between texel centers, where the policies disagree.
+    let build = || {
+        let mut r = resampled(0.2);
+        r.graph.set_resolution(r.again, 96, 96).unwrap();
+        r
+    };
+    let mut r = build();
+    r.graph.run().unwrap();
+    r.graph
+        .set_sample_policy(r.sample, SamplePolicy::Nearest)
+        .unwrap();
+    r.graph.run().unwrap();
+
+    let mut fresh = build();
+    fresh
+        .graph
+        .set_sample_policy(fresh.sample, SamplePolicy::Nearest)
+        .unwrap();
+    fresh.graph.run().unwrap();
+
+    let bits = |g: &MaterialGraph, n| -> Vec<u32> {
+        scalar(g, n).values().iter().map(|v| v.to_bits()).collect()
+    };
+    assert_eq!(bits(&r.graph, r.again), bits(&fresh.graph, fresh.again));
+
+    let mut linear = build();
+    linear.graph.run().unwrap();
+    assert_ne!(
+        bits(&linear.graph, linear.again),
+        bits(&fresh.graph, fresh.again),
+        "the policies must differ here, or this test proves nothing"
+    );
+}
+
+#[test]
+fn budgeted_runs_converge_through_sample_nodes() {
+    let mut r = resampled(0.2);
+    r.graph.run().unwrap();
+    r.graph.set_tile_budget(Some(3));
+    r.graph.set_field_op(r.disk, disk_op(0.6)).unwrap();
+    // The sampled image keeps its fingerprint while the budgeted rasters
+    // behind it fill in, so only its reported change reaches the realization.
+    for runs in 0.. {
+        r.graph.run().unwrap();
+        if r.graph.tile_report().pending_tiles == 0 {
+            break;
+        }
+        assert!(runs < 100, "budgeted runs must converge");
+    }
+    // Settled: nothing left to run.
+    assert_eq!(r.graph.run().unwrap().executed_nodes, 0);
+
+    let mut fresh = resampled(0.6);
+    fresh.graph.run().unwrap();
+    let bits = |g: &MaterialGraph, n| -> Vec<u32> {
+        scalar(g, n).values().iter().map(|v| v.to_bits()).collect()
+    };
+    assert_eq!(bits(&r.graph, r.again), bits(&fresh.graph, fresh.again));
 }

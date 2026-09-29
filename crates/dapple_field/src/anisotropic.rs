@@ -124,6 +124,9 @@ impl Covariance2 {
     /// with an isotropic footprint as wide as the major width over `n` (at
     /// least the minor width). Averaging a field over them approximates
     /// its average over the footprint without blurring the minor axis.
+    ///
+    /// A footprint with no extent at all takes a single tap; one with a
+    /// major axis but no minor axis (a line) takes `max_taps`.
     #[must_use]
     pub fn taps(self, max_taps: u32) -> Vec<(Vec2, Footprint)> {
         let axes = self.axes();
@@ -146,8 +149,11 @@ impl Covariance2 {
 fn tap_layout(major: f32, minor: f32, max_taps: u32) -> (Vec<f32>, f32) {
     let ratio = if minor > 0.0 {
         major / minor
-    } else {
+    } else if major > 0.0 {
         f32::INFINITY
+    } else {
+        // A point footprint needs one tap, not the maximum.
+        1.0
     };
     #[expect(
         clippy::cast_possible_truncation,
@@ -330,6 +336,14 @@ pub fn reference_parallelogram(field: &impl ScalarField, p: Vec2, jacobian: Mat2
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn point_footprints_take_one_tap_and_lines_take_the_most() {
+        assert_eq!(Covariance2::isotropic(0.0).taps(16).len(), 1);
+        assert_eq!(tap_layout(0.0, 0.0, 16).0.len(), 1);
+        assert_eq!(tap_layout(1.0, 0.0, 16).0.len(), 16);
+        assert_eq!(tap_layout(4.0, 1.0, 16).0.len(), 4);
+    }
 
     #[test]
     fn axes_follow_the_map() {

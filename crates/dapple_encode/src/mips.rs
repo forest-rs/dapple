@@ -155,7 +155,7 @@ pub fn color_mips(image: &Image, filter: Filter) -> MipChain {
     }
     let premultiply = |img: &Image| {
         let mut out = img.clone();
-        for t in out.values.chunks_exact_mut(4) {
+        for t in out.values.as_chunks_mut::<4>().0 {
             for c in 0..3 {
                 t[c] *= t[3];
             }
@@ -164,7 +164,7 @@ pub fn color_mips(image: &Image, filter: Filter) -> MipChain {
     };
     let unpremultiply = |img: &Image| {
         let mut out = img.clone();
-        for t in out.values.chunks_exact_mut(4) {
+        for t in out.values.as_chunks_mut::<4>().0 {
             for c in 0..3 {
                 t[c] = if t[3] > 0.0 { t[c] / t[3] } else { 0.0 };
             }
@@ -333,7 +333,9 @@ pub fn normal_mips(
     let renormalize = |image: &Image| Image {
         values: image
             .values
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|t| {
                 let len = libm::sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
                 if len > 1e-6 {
@@ -355,7 +357,7 @@ pub fn normal_mips(
         };
         let mut rough = Vec::with_capacity(a2.values.len());
         let mut level_max = 0.0_f32;
-        for (t, &a2) in n.values.chunks_exact(3).zip(&a2.values) {
+        for (t, &a2) in n.values.as_chunks::<3>().0.iter().zip(&a2.values) {
             let len = libm::sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
             // Level 0 is the input: its own spread is not measured here.
             let variance = if index == 0 {
@@ -476,7 +478,9 @@ mod tests {
         assert!(
             level1
                 .values
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .all(|n| n[0] == 0.0 && n[1] == 0.0 && (n[2] - 1.0).abs() < 1e-6)
         );
         // L = 1/√2, σ² = √2 − 1.
@@ -644,7 +648,7 @@ mod tests {
         let theirs = texture_bake_chain(w, h, &xy);
         assert_eq!(ours.normals.levels().len(), theirs.len());
         for (level, (a, b)) in ours.normals.levels().iter().zip(&theirs).enumerate() {
-            for (i, (n, t)) in a.values.chunks_exact(3).zip(b).enumerate() {
+            for (i, (n, t)) in a.values.as_chunks::<3>().0.iter().zip(b).enumerate() {
                 let q = [
                     quantize_unorm8(n[0] * 0.5 + 0.5),
                     quantize_unorm8(n[1] * 0.5 + 0.5),

@@ -371,9 +371,7 @@ mod tests {
                 let src = image(w, h, 2, edge);
                 let whole = next_level(&src, filter);
                 let mut tiled = next_level(&image(w, h, 2, edge), filter);
-                for v in &mut tiled.values {
-                    *v = f32::NAN;
-                }
+                tiled.values.fill(f32::NAN);
                 let (dw, dh) = (whole.width(), whole.height());
                 let step = 3_u32;
                 for y0 in (0..dh).step_by(3) {
@@ -456,7 +454,7 @@ mod tests {
         for filter in [Filter::Box, Filter::Kaiser] {
             let down = downsample(&image, filter);
             assert_eq!((down.width, down.height), (3, 2));
-            for t in down.values.chunks_exact(2) {
+            for t in down.values.as_chunks::<2>().0 {
                 assert!((t[0] - 0.25).abs() < 1e-6 && (t[1] - 0.75).abs() < 1e-6);
             }
         }

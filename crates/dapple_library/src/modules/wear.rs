@@ -380,7 +380,9 @@ impl Module for ByExample {
             .ok_or_else(|| fail("an exemplar without levels"))?;
         let texels: Vec<[f32; 3]> = level
             .values()
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| [c[0], c[1], c[2]])
             .collect();
         let exemplar = Raster::from_values(

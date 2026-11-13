@@ -30,68 +30,25 @@ pub struct Lowering {
 /// is bound. [`Aux::Height`] stays with the material: consumers that
 /// displace read it directly.
 ///
+/// The walk follows the `openpbr` parameter enumeration ([`Param::ALL`]):
+/// each parameter's type gives its channel count and its default decides
+/// whether leaving it out loses anything, so one match names which
+/// parameters have a field.
+///
 /// # Errors
 ///
 /// Never for a valid material.
 pub fn maps(material: &Material) -> Result<(MaterialMaps, Lowering), MaterialError> {
-    let grid = material.grid();
-    let mut lowering = Lowering::default();
-    let image = |c: ChannelId, channels: usize| -> Result<Option<Image>, MaterialError> {
-        if material.channel(c).is_none() {
-            return Ok(None);
-        }
-        let mut values = Vec::with_capacity(grid.len() * channels);
-        for i in 0..grid.len() {
-            let v = material.value(c, i);
-            for k in 0..channels {
-                values.push(v.component(k).unwrap_or(0.0));
-            }
-        }
-        Ok(Some(
-            Image::new(grid.width, grid.height, channels, grid.edge, values)
-                .map_err(|_| MaterialError::GridMismatch)?,
-        ))
-    };
-    let p = ChannelId::Param;
     let mut maps = MaterialMaps {
-        base_color: image(p(Param::BaseColor), 3)?,
-        opacity: image(p(Param::GeometryOpacity), 1)?,
-        normal: image(p(Param::GeometryNormal), 3)?,
-        specular_roughness: image(p(Param::SpecularRoughness), 1)?,
-        base_metalness: image(p(Param::BaseMetalness), 1)?,
-        occlusion: image(ChannelId::Aux(Aux::Occlusion), 1)?,
-        subsurface_weight: image(p(Param::SubsurfaceWeight), 1)?,
-        subsurface_color: image(p(Param::SubsurfaceColor), 3)?,
-        transmission_weight: image(p(Param::TransmissionWeight), 1)?,
-        coat_weight: image(p(Param::CoatWeight), 1)?,
-        coat_roughness: image(p(Param::CoatRoughness), 1)?,
-        coat_color: image(p(Param::CoatColor), 3)?,
+        occlusion: image(material, ChannelId::Aux(Aux::Occlusion))?,
         ..MaterialMaps::default()
     };
-    if maps.normal.is_none() && material.aux(Aux::Height).is_some() {
-        let normals = HeightToNormal { scale: 1.0 }.apply(&material.height()?)?;
-        maps.normal = Some(Image::from(&normals));
-        lowering.normal_from_height = true;
-    }
-    let carried = [
-        Param::BaseColor,
-        Param::GeometryOpacity,
-        Param::GeometryNormal,
-        Param::SpecularRoughness,
-        Param::BaseMetalness,
-        Param::SubsurfaceWeight,
-        Param::SubsurfaceColor,
-        Param::TransmissionWeight,
-        Param::CoatWeight,
-        Param::CoatRoughness,
-        Param::CoatColor,
-    ];
+    let mut lowering = Lowering::default();
     for param in Param::ALL {
-        if carried.contains(&param) {
+        if lower_param(material, param, &mut maps)? {
             continue;
         }
-        let c = p(param);
-        let differs = match material.channel(c) {
+        let differs = match material.param(param) {
             None => false,
             Some(ch) => ch.constant() != Some(param_default(param)),
         };
@@ -99,7 +56,59 @@ pub fn maps(material: &Material) -> Result<(MaterialMaps, Lowering), MaterialErr
             lowering.dropped.push(param);
         }
     }
+    if maps.normal.is_none() && material.aux(Aux::Height).is_some() {
+        let normals = HeightToNormal { scale: 1.0 }.apply(&material.height()?)?;
+        maps.normal = Some(Image::from(&normals));
+        lowering.normal_from_height = true;
+    }
     Ok((maps, lowering))
+}
+
+/// Lowers `param` into its field of `maps` and returns true, or returns
+/// false when [`MaterialMaps`] has no field for it. Adding a field is one
+/// arm here.
+fn lower_param(
+    material: &Material,
+    param: Param,
+    maps: &mut MaterialMaps,
+) -> Result<bool, MaterialError> {
+    let m = material;
+    let c = ChannelId::Param(param);
+    match param {
+        Param::BaseColor => maps.base_color = image(m, c)?,
+        Param::BaseMetalness => maps.base_metalness = image(m, c)?,
+        Param::SpecularRoughness => maps.specular_roughness = image(m, c)?,
+        Param::TransmissionWeight => maps.transmission_weight = image(m, c)?,
+        Param::SubsurfaceWeight => maps.subsurface_weight = image(m, c)?,
+        Param::SubsurfaceColor => maps.subsurface_color = image(m, c)?,
+        Param::CoatWeight => maps.coat_weight = image(m, c)?,
+        Param::CoatColor => maps.coat_color = image(m, c)?,
+        Param::CoatRoughness => maps.coat_roughness = image(m, c)?,
+        Param::GeometryOpacity => maps.opacity = image(m, c)?,
+        Param::GeometryNormal => maps.normal = image(m, c)?,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// Channel `c` as an image on the material's grid with as many channels as
+/// its type has components, or `None` when it is unbound.
+fn image(material: &Material, c: ChannelId) -> Result<Option<Image>, MaterialError> {
+    if material.channel(c).is_none() {
+        return Ok(None);
+    }
+    let grid = material.grid();
+    let channels = c.port().components();
+    let mut values = Vec::with_capacity(grid.len() * channels);
+    for i in 0..grid.len() {
+        let v = material.value(c, i);
+        for k in 0..channels {
+            values.push(v.component(k).unwrap_or(0.0));
+        }
+    }
+    Image::new(grid.width, grid.height, channels, grid.edge, values)
+        .map(Some)
+        .map_err(|_| MaterialError::GridMismatch)
 }
 
 #[cfg(test)]

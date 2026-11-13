@@ -1524,6 +1524,7 @@ name = "varnished_board"
 version = "0.0.0"
 dependencies = [
  "dapple_encode",
+ "dapple_export",
  "dapple_lab",
  "dapple_library",
  "dapple_material",

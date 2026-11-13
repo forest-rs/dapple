@@ -5,10 +5,12 @@
 
 The 80 × 20 cm faces share geometry, UVs and lighting. Domain +x follows
 the long edge; image rows start at domain y = -0.1. Flipping UV v makes
-the glTF normal maps' tangent frame match this image convention.
-Principled approximates OpenPBR; independent coat tint (the raw profile's
-linear `coat_color.png`) and coat normals are preserved. The dark backing
-is a display mount, not synthesized end grain.
+the glTF normal maps' tangent frame match this image convention. Each
+variant's material is built from its `dapple_export` manifest by the
+repository's `tools/blender/dapple_export.py`: Principled approximates
+OpenPBR, and the coat's tint (which glTF cannot carry), IOR and normals
+come from the manifest. The dark backing is a display mount, not
+synthesized end grain.
 """
 
 import os
@@ -16,6 +18,9 @@ import sys
 
 import bpy
 from mathutils import Vector
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), *[".."] * 3, "tools", "blender"))
+import dapple_export  # noqa: E402
 
 gallery = os.path.abspath(sys.argv[sys.argv.index("--") + 1])
 bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -57,37 +62,7 @@ def plain(name, color, roughness=0.8):
 
 
 def package_material(variant):
-    mat = bpy.data.materials.new(variant)
-    mat.use_nodes = True
-    nodes, links = mat.node_tree.nodes, mat.node_tree.links
-    bsdf = nodes["Principled BSDF"]
-    bsdf.inputs["IOR"].default_value = 1.5
-    bsdf.inputs["Coat IOR"].default_value = 1.5
-
-    def texture(name, color=False):
-        node = nodes.new("ShaderNodeTexImage")
-        node.image = bpy.data.images.load(os.path.join(gallery, variant, name + ".png"))
-        node.image.colorspace_settings.name = "sRGB" if color else "Non-Color"
-        node.extension = "EXTEND"
-        return node.outputs["Color"]
-
-    links.new(texture("base_color", True), bsdf.inputs["Base Color"])
-    # The raw profile stores the tint linearly.
-    links.new(texture("coat_color"), bsdf.inputs["Coat Tint"])
-    orm = nodes.new("ShaderNodeSeparateColor")
-    links.new(texture("orm"), orm.inputs["Color"])
-    links.new(orm.outputs["Green"], bsdf.inputs["Roughness"])
-    links.new(orm.outputs["Blue"], bsdf.inputs["Metallic"])
-    coat = nodes.new("ShaderNodeSeparateColor")
-    links.new(texture("clearcoat"), coat.inputs["Color"])
-    links.new(coat.outputs["Red"], bsdf.inputs["Coat Weight"])
-    links.new(coat.outputs["Green"], bsdf.inputs["Coat Roughness"])
-    for name, socket in [("normal", "Normal"), ("clearcoat_normal", "Coat Normal")]:
-        normal = nodes.new("ShaderNodeNormalMap")
-        normal.uv_map = "UVMap"
-        links.new(texture(name), normal.inputs["Color"])
-        links.new(normal.outputs["Normal"], bsdf.inputs[socket])
-    return mat
+    return dapple_export.material(os.path.join(gallery, variant), name=variant)
 
 
 def point_at(obj, point):

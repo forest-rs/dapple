@@ -2,16 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Bakes the actual varnished-board JSON package, at its defaults and with
-//! its `dark_and_worn` preset. See the example README for rendering commands.
+//! its `dark_and_worn` preset, and exports each through `dapple_export`.
+//! See the example README for rendering commands.
 
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use dapple_encode::{Edge, PackSettings, Profile, pack};
+use dapple_encode::{Edge, PackSettings};
+use dapple_export::{Settings, Source};
 use dapple_library::packages::{VARNISHED_BOARD, registry};
+use dapple_material::Grid;
 use dapple_material::module::{Bind, Context};
 use dapple_material::resource::NoResources;
-use dapple_material::{Grid, Material, lower};
 use dapple_package::Package;
 use glam::Vec2;
 
@@ -32,6 +33,15 @@ fn main() -> Result<()> {
         origin: Vec2::new(0.0, -0.1),
         texel: Vec2::splat(0.8 / 1536.0),
         edge: Edge::Clamp,
+    };
+    // The coat ripple is below one 8-bit normal step. Keep 16-bit normals
+    // so packing does not turn it into sign-only noise.
+    let settings = Settings {
+        pack: PackSettings {
+            sixteen_bit_normals: true,
+            ..PackSettings::default()
+        },
+        ..Settings::default()
     };
     for (name, bind) in [("default", Bind::new()), ("dark_and_worn", worn)] {
         let start = std::time::Instant::now();
@@ -54,51 +64,17 @@ fn main() -> Result<()> {
             )
             .into());
         }
-        write_maps(&dir, &material)?;
+        let source = Source {
+            diagnostics: Some(&diagnostics),
+            lab: Some(&report),
+            ..Source::new(name, &material)
+        };
+        let exported = dapple_export::export(&source, &settings)?;
+        exported.write_dir(&dir)?;
+        for p in exported.parameters.iter().filter(|p| !p.notes.is_empty()) {
+            println!("{name}: {}: {}", p.name, p.notes.join("; "));
+        }
         println!("{name}: baked and checked in {:.2?}", start.elapsed());
     }
-    Ok(())
-}
-
-/// Packs the material for the glTF profile and writes it as PNG files, with
-/// the raw profile's textures for whatever glTF reports it cannot carry.
-fn write_maps(dir: &Path, material: &Material) -> Result<()> {
-    let (maps, lowering) = lower::maps(material)?;
-    // The coat ripple is below one 8-bit normal step. Keep 16-bit normals
-    // so packing does not turn it into sign-only noise.
-    let settings = PackSettings {
-        sixteen_bit_normals: true,
-        ..PackSettings::default()
-    };
-    let gltf = pack(&maps, Profile::Gltf, &settings)?;
-    let raw = pack(&maps, Profile::Raw, &settings)?;
-    let mut textures: Vec<_> = gltf.textures.iter().collect();
-    let mut notes = String::new();
-    for name in &gltf.report.unsupported {
-        match raw.texture(name) {
-            Some(texture) => {
-                textures.push(texture);
-                writeln!(notes, "{name} is carried by the raw profile's {name}.png.")?;
-            }
-            None => writeln!(notes, "{name} is the constant {:?}.", raw.constant(name))?,
-        }
-    }
-    for texture in textures {
-        std::fs::write(
-            dir.join(format!("{}.png", texture.name)),
-            dapple_encode::png::write(texture)?,
-        )?;
-    }
-    if let Some(height) = raw.placement("height") {
-        let [lo, hi] = height.range;
-        std::fs::write(dir.join("height.txt"), format!("{lo} {hi}\n"))?;
-    }
-    std::fs::write(
-        dir.join("lowering.txt"),
-        format!(
-            "{lowering:#?}\nglTF constants: {:#?}\nPacking: {:#?}\n{notes}Blender uses IOR 1.5 for both base and coat; CoatDarkening has no exact Principled equivalent.\n",
-            gltf.constants, gltf.report
-        ),
-    )?;
     Ok(())
 }

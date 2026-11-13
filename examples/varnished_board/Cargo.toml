@@ -9,7 +9,8 @@ description = "Bakes the varnished oak package and its preset for a Blender comp
 publish = false
 
 [dependencies]
-dapple_encode = { features = ["std"], workspace = true }
+dapple_encode.workspace = true
+dapple_export = { features = ["std"], workspace = true }
 dapple_lab.workspace = true
 dapple_library.workspace = true
 dapple_material.workspace = true

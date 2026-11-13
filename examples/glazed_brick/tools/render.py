@@ -5,10 +5,11 @@
 
 Usage: blender --background --python render.py -- <gallery-dir>
 
-Reads `<gallery-dir>/maps/` (base_color.png, orm.png, normal.png,
-clearcoat.png, coat_color.png, height.png and height.txt, as
-`cargo run --release -p glazed_brick -- [wall|sill]` writes them) and writes
-into <gallery-dir>:
+Builds the material from `<gallery-dir>/maps/`, the `dapple_export`
+directory `cargo run --release -p glazed_brick -- [wall|sill]` writes,
+through the repository's `tools/blender/dapple_export.py`, which reads the
+manifest for files, color spaces, ranges and IORs. Writes into
+<gallery-dir>:
 
 - `blender-front.png`: the wall face on, under sky and a low sun;
 - `blender-grazing.png`: along the wall at a grazing angle, where the
@@ -18,13 +19,14 @@ into <gallery-dir>:
   by `normal.png` alone, to check the packed normal map against the
   displaced geometry.
 
-The glaze is OpenPBR's coat, rendered as Principled BSDF's coat: weight
-and roughness from `clearcoat.png` (R, G), tint from `coat_color.png`
-(linear, from the raw profile), IOR 1.5; the base under it is the glaze's
-pigment (or the exposed body).
+The glaze is OpenPBR's coat, rendered as Principled BSDF's coat (weight,
+roughness, tint and IOR as the manifest gives them); the base under it is
+the glaze's pigment (or the exposed body), and the moss's fuzz is
+Principled's sheen.
 
 The wall is 2 m wide (two repeats of the 1 m tile) and 1 m tall, displaced
-by the height map in meters. The maps' rows start at domain `y = 0` at the
+by the height map in meters; the displaced wall leaves the normal maps out,
+since they carry the same relief. The maps' rows start at domain `y = 0` at the
 image top (glTF's convention), so the wall's UVs run `v = 1` at its foot to
 `v = 0` at its top: domain `+y` is up the wall, and the tangent frame's
 bitangent points down it, as the glTF normal map's green channel expects.
@@ -40,10 +42,11 @@ import bpy
 import numpy as np
 from mathutils import Vector
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), *[".."] * 3, "tools", "blender"))
+import dapple_export  # noqa: E402
+
 gallery = sys.argv[sys.argv.index("--") + 1] if "--" in sys.argv else "."
 maps = os.path.join(gallery, "maps")
-with open(os.path.join(maps, "height.txt")) as f:
-    height_lo, height_hi = (float(v) for v in f.read().split())
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
 scene = bpy.context.scene
@@ -116,65 +119,10 @@ grey.node_tree.nodes["Principled BSDF"].inputs["Roughness"].default_value = 0.9
 ground.data.materials.append(grey)
 
 
-def image(name, colorspace):
-    img = bpy.data.images.load(os.path.join(maps, name))
-    img.colorspace_settings.name = colorspace
-    return img
-
-
-base_color = image("base_color.png", "sRGB")
-orm = image("orm.png", "Non-Color")
-normal = image("normal.png", "Non-Color")
-clearcoat = image("clearcoat.png", "Non-Color")
-# The raw profile stores the tint linearly.
-coat_color = image("coat_color.png", "Non-Color")
-height = image("height.png", "Non-Color")
-
-
 def material(name, displaced):
-    mat = bpy.data.materials.new(name)
-    tree = mat.node_tree
-    n, links = tree.nodes, tree.links
-    bsdf = n["Principled BSDF"]
-    bsdf.inputs["IOR"].default_value = 1.5
-
-    uv = n.new("ShaderNodeUVMap")
-
-    def texture(img, interpolation="Linear"):
-        t = n.new("ShaderNodeTexImage")
-        t.image = img
-        t.extension = "REPEAT"
-        t.interpolation = interpolation
-        links.new(uv.outputs["UV"], t.inputs["Vector"])
-        return t
-
-    links.new(texture(base_color).outputs["Color"], bsdf.inputs["Base Color"])
-    split = n.new("ShaderNodeSeparateColor")
-    links.new(texture(orm).outputs["Color"], split.inputs["Color"])
-    links.new(split.outputs["Green"], bsdf.inputs["Roughness"])
-    links.new(split.outputs["Blue"], bsdf.inputs["Metallic"])
-    coat = n.new("ShaderNodeSeparateColor")
-    links.new(texture(clearcoat).outputs["Color"], coat.inputs["Color"])
-    links.new(coat.outputs["Red"], bsdf.inputs["Coat Weight"])
-    links.new(coat.outputs["Green"], bsdf.inputs["Coat Roughness"])
-    bsdf.inputs["Coat IOR"].default_value = 1.5
-    links.new(texture(coat_color).outputs["Color"], bsdf.inputs["Coat Tint"])
-    output = n["Material Output"]
-    if displaced:
-        # Height in meters: lo + h · (hi − lo) = (h − midlevel) · scale.
-        scale = height_hi - height_lo
-        displacement = n.new("ShaderNodeDisplacement")
-        displacement.inputs["Scale"].default_value = scale
-        displacement.inputs["Midlevel"].default_value = -height_lo / scale
-        links.new(texture(height, "Cubic").outputs["Color"], displacement.inputs["Height"])
-        links.new(displacement.outputs["Displacement"], output.inputs["Displacement"])
-        mat.displacement_method = "BOTH"
-    else:
-        normal_map = n.new("ShaderNodeNormalMap")
-        normal_map.uv_map = "UVMap"
-        links.new(texture(normal).outputs["Color"], normal_map.inputs["Color"])
-        links.new(normal_map.outputs["Normal"], bsdf.inputs["Normal"])
-    return mat
+    return dapple_export.material(
+        maps, name=name, extension="REPEAT", displacement=displaced, normal_maps=not displaced
+    )
 
 
 def wall(name, subdivisions, mat):

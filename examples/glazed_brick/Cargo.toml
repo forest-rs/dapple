@@ -9,7 +9,7 @@ description = "Builds glazed-brick assets from dapple_library's material modules
 publish = false
 
 [dependencies]
-dapple_encode = { features = ["std"], workspace = true }
+dapple_export = { features = ["std"], workspace = true }
 dapple_field.workspace = true
 dapple_lab.workspace = true
 dapple_library.workspace = true

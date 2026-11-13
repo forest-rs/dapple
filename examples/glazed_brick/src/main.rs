@@ -12,33 +12,35 @@
 //! `.local/gallery/stone-sill`. Images show one 1 m period with domain `+y`
 //! up.
 //!
-//! `maps/` holds the material packed by `dapple_encode` for the glTF
-//! profile: `base_color.png` (sRGB), `normal.png` (tangent-space, `+Y`
-//! toward the image top), `orm.png` (occlusion, roughness, metalness),
-//! `clearcoat.png` (R coat weight, G coat roughness), `clearcoat_normal.png`
-//! and `sheen.png` (the moss's fuzz: sRGB color times weight, A roughness).
-//! What glTF cannot carry comes from the raw profile instead:
-//! `coat_color.png` (linear coat tint) and `height.png`, 16-bit height over
-//! the range `height.txt` gives in meters. Rows run from domain `y = 0` at
-//! the image top, as glTF reads textures. `tools/render.py` renders them in
-//! Blender as a displaced wall.
+//! `maps/` holds the material as `dapple_export` writes it for glTF:
+//! `material.gltf` (the material on a 1 m quad, viewable in any glTF
+//! viewer), its textures (`base_color.png`, `normal.png`, `orm.png`,
+//! `clearcoat.png`, `clearcoat_normal.png`, and `sheen.png` for the moss's
+//! fuzz), the raw profile's textures for what glTF cannot carry
+//! (`coat_color.png`, the linear coat tint, and `height.png`, 16-bit
+//! height), and `manifest.json`, which says what every parameter is, which
+//! channels hold it, how to decode them (the height's range in meters,
+//! for one) and what glTF loses. Rows run from domain `y = 0` at the image
+//! top, as glTF reads textures. `tools/render.py` renders them in Blender
+//! as a displaced wall, building the material from the manifest.
 //!
 //! `diagnostics.txt` lists every module instance by path and every
 //! material operation's approximation report, attributed to the instance
 //! that made it; `report.json` is `dapple_lab`'s machine-readable report,
-//! and the run fails when it does.
+//! whose verdict the manifest records too, and the run fails when it
+//! does.
 
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
-use dapple_encode::{Edge, PackSettings, Profile, pack};
-use dapple_field::Value;
+use dapple_export::{Settings, Source};
+use dapple_field::{Edge, Value};
 use dapple_library::glazed_brick::{BODY, DIRT, GLAZE, MORTAR, SALT, STONE};
 use dapple_library::modules::{GlazedBrickWall, StoneSill};
 use dapple_material::module::{Bind, Context, Module};
 use dapple_material::resource::NoResources;
-use dapple_material::{Aux, ChannelId, Grid, Material, Param, lower};
+use dapple_material::{Aux, ChannelId, Grid, Material, Param};
 use glam::{Vec2, Vec3};
 
 const SIZE: u32 = 2048;
@@ -80,13 +82,28 @@ fn main() -> Result<()> {
     print!("{diagnostics}");
 
     write_previews(&out, &material)?;
-    write_maps(&out.join("maps"), &material)?;
 
     // The lab's report: ranges, invalid values, seams against the tiling
     // promise (checked across the wrap when the asset was built), lowering
     // losses, and a material-wide transform that must move every channel.
     let report = lab_report(&asset, &material);
     std::fs::write(out.join("report.json"), report.to_json())?;
+
+    let source = Source {
+        diagnostics: Some(&diagnostics),
+        lab: Some(&report),
+        ..Source::new(&asset, &material)
+    };
+    let exported = dapple_export::export(&source, &Settings::default())?;
+    let maps = out.join("maps");
+    let manifest = exported.write_dir(&maps)?;
+    for file in &manifest.files {
+        println!("{}", maps.join(&file.path).display());
+    }
+    for p in exported.parameters.iter().filter(|p| !p.notes.is_empty()) {
+        println!("{}: {}", p.name, p.notes.join("; "));
+    }
+
     if !report.passed() {
         for f in report.failures() {
             eprintln!("FAILED: {f:?}");
@@ -191,43 +208,6 @@ fn write_previews(out: &Path, m: &Material) -> Result<()> {
         _ => [1.0, 0.0, 1.0],
     });
     write_png(&out.join("surface.png"), w, h, &surfaces, false)?;
-    Ok(())
-}
-
-/// Packs the material for the glTF profile and writes it as PNG files,
-/// with the raw profile's textures for whatever glTF reports it cannot
-/// carry.
-fn write_maps(dir: &Path, m: &Material) -> Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let (maps, lowering) = lower::maps(m)?;
-    println!(
-        "lowered: normal from height {}, dropped {:?}",
-        lowering.normal_from_height, lowering.dropped
-    );
-    let settings = PackSettings::default();
-    let gltf = pack(&maps, Profile::Gltf, &settings)?;
-    let constants: Vec<_> = gltf.constants.iter().map(|c| c.name).collect();
-    println!(
-        "glTF constants {constants:?}; could not carry {:?}",
-        gltf.report.unsupported
-    );
-    let raw = pack(&maps, Profile::Raw, &settings)?;
-    let mut textures: Vec<_> = gltf.textures.iter().collect();
-    for name in &gltf.report.unsupported {
-        match raw.texture(name) {
-            Some(texture) => textures.push(texture),
-            None => println!("{name} is the constant {:?}", raw.constant(name)),
-        }
-    }
-    for texture in textures {
-        let path = dir.join(format!("{}.png", texture.name));
-        std::fs::write(&path, dapple_encode::png::write(texture)?)?;
-        println!("{}", path.display());
-    }
-    if let Some(height) = raw.placement("height") {
-        let [lo, hi] = height.range;
-        std::fs::write(dir.join("height.txt"), format!("{lo} {hi}\n"))?;
-    }
     Ok(())
 }
 

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "benchmarks/dapple_wind_tunnel",
     "crates/dapple_compress",
     "crates/dapple_elements",
     "crates/dapple_encode",
@@ -87,6 +88,7 @@ clippy.wildcard_dependencies = "warn"
 clippy.allow_attributes = "warn"
 
 [workspace.dependencies]
+criterion = "0.8.2"
 dapple_compress = { path = "crates/dapple_compress" }
 dapple_elements = { path = "crates/dapple_elements" }
 dapple_encode = { path = "crates/dapple_encode" }

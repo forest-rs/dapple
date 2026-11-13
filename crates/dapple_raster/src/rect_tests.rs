@@ -228,3 +228,24 @@ fn kept_digests_follow_every_mutation() {
     .unwrap();
     assert_eq!(normals_into.digest(), normals.digest());
 }
+
+/// Clones share their texels, and a change through one clone copies them
+/// first: the other clone never sees it.
+#[test]
+fn clones_share_texels_until_one_changes() {
+    let realization = realizations()[1];
+    let field = fbm(Domain::Plane);
+    let whole = realize(&field, realization).unwrap();
+    let before = whole.values().to_vec();
+    let mut copy = whole.clone();
+    assert_eq!(copy.values().as_ptr(), whole.values().as_ptr(), "shared");
+    copy.map_rect(TexelRect::full(4, 4), |_, _| -1.0);
+    assert_ne!(copy.values().as_ptr(), whole.values().as_ptr(), "copied");
+    assert_eq!(whole.values(), &before[..], "the original is untouched");
+    assert_eq!(copy.values()[0], -1.0);
+    // A raster nothing shares is changed in place.
+    let unique = copy.values().as_ptr();
+    realize_into(&field, realization, TexelRect::full(40, 20), &mut copy).unwrap();
+    assert_eq!(copy.values().as_ptr(), unique, "in place");
+    assert_eq!(copy, whole);
+}

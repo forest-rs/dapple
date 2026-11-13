@@ -33,8 +33,10 @@ constants for a profile:
 - `Raw`: one texture per parameter map, and every constant.
 
 The bundle says which channels of which texture hold each parameter
-(`Placement`), which parameters are constants, and which the profile could
-not carry at all, so nothing is dropped silently. Normals can be 16-bit RGB.
+(`Placement`), which parameters are constants, which the profile could
+not carry at all, and which it carries only approximately (glTF's
+thin-walled translucency on a material that is not thin-walled), so nothing
+is dropped or changed silently. Normals can be 16-bit RGB.
 
 `encode_data` writes any chain, such as height or identifiers, in 8-bit,
 16-bit or float formats. `ktx2::write` writes a texture with its whole mip

@@ -38,7 +38,8 @@ pub enum Profile {
     /// carried as glTF's factors (`specular_ior` only as one, through
     /// `KHR_materials_ior`), except occlusion (glTF has no occlusion
     /// factor), coat tint (no extension has one) and height (glTF has no
-    /// displacement).
+    /// displacement). What glTF's model only approximates is reported in
+    /// [`PackReport::approximated`].
     Gltf,
     /// One texture per parameter map, normals in the input frame, and
     /// every constant as one; for inspection and tools rather than
@@ -140,9 +141,8 @@ pub struct MaterialMaps {
     /// OpenPBR `specular_ior`, the dielectric index of refraction.
     pub specular_ior: Option<Input<1>>,
     /// OpenPBR `subsurface_weight`. On a thin-walled material
-    /// (`geometry_thin_walled`, a material constant rather than a map), this
-    /// is diffuse translucency: the share of light scattered through a thin
-    /// sheet such as a leaf.
+    /// ([`Self::thin_walled`]), this is diffuse translucency: the share of
+    /// light scattered through a thin sheet such as a leaf.
     pub subsurface_weight: Option<Input<1>>,
     /// OpenPBR `subsurface_color`: the tint of that scattered light.
     pub subsurface_color: Option<Input<3>>,
@@ -173,6 +173,12 @@ pub struct MaterialMaps {
     /// unit (meters for `dapple_material`); an auxiliary output, not an
     /// OpenPBR parameter.
     pub height: Option<Input<1>>,
+    /// OpenPBR `geometry_thin_walled`: the surface bounds an infinitely
+    /// thin sheet rather than a volume, so subsurface scattering and
+    /// transmission pass through it without refraction. The same for the
+    /// whole material, so a flag rather than an input; `false`, the
+    /// specification's default, is not given.
+    pub thin_walled: bool,
 }
 
 /// OpenPBR 1.1's defaults for what [`MaterialMaps`] carries.
@@ -200,6 +206,9 @@ mod default {
     pub(super) const EMISSION_LUMINANCE: [f32; 1] = [0.0];
     pub(super) const EMISSION_COLOR: [f32; 3] = [1.0; 3];
     pub(super) const HEIGHT: [f32; 1] = [0.0];
+    pub(super) const THIN_WALLED: [f32; 1] = [0.0];
+    /// `geometry_thin_walled` set, as a constant.
+    pub(super) const THIN: [f32; 1] = [1.0];
 }
 
 /// One [`MaterialMaps`] field, seen without its type.
@@ -245,7 +254,7 @@ fn normal_entry<'a>(name: &'static str, map: Option<&'a Image>) -> Entry<'a> {
 
 impl MaterialMaps {
     /// Every field, in declaration order.
-    fn entries(&self) -> [Entry<'_>; 24] {
+    fn entries(&self) -> [Entry<'_>; 25] {
         use default as d;
         [
             entry("base_color", &self.base_color, &d::BASE_COLOR, true),
@@ -337,6 +346,14 @@ impl MaterialMaps {
                 true,
             ),
             entry("height", &self.height, &d::HEIGHT, false),
+            Entry {
+                name: "thin_walled",
+                channels: 1,
+                map: None,
+                constant: self.thin_walled.then_some(d::THIN.as_slice()),
+                default: &d::THIN_WALLED,
+                unit: true,
+            },
         ]
     }
 }
@@ -433,6 +450,19 @@ pub struct PackReport {
     /// their values are not in the bundle. A constant equal to the
     /// specification's default loses nothing and is not listed.
     pub unsupported: Vec<&'static str>,
+    /// Parameters the profile carries, but in a model that differs from
+    /// OpenPBR's in a way that changes how they look, in field order.
+    pub approximated: Vec<Approximation>,
+}
+
+/// A parameter a profile carries only approximately; see
+/// [`PackReport::approximated`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Approximation {
+    /// The parameter, by its [`MaterialMaps`] field name.
+    pub name: &'static str,
+    /// What the profile's model does differently.
+    pub why: &'static str,
 }
 
 /// Where a [`Bundle`] holds one parameter: which channels of which texture,
@@ -680,14 +710,21 @@ fn encode(
 /// - `transmission` (R `transmission_weight`, linear) is Lightweald's
 ///   `Transmission` slot and glTF's `KHR_materials_transmission`
 ///   `transmissionTexture`.
-/// - glTF packs thin-walled subsurface as `diffuse_transmission`: sRGB RGB
+/// - glTF packs subsurface as `diffuse_transmission`: sRGB RGB
 ///   `subsurface_color` and linear A `subsurface_weight`, the layout of
 ///   `KHR_materials_diffuse_transmission`, whose
 ///   `diffuseTransmissionColorTexture` reads RGB and
 ///   `diffuseTransmissionTexture` reads A of the same image. That extension
-///   models OpenPBR's thin-walled subsurface; on a volumetric material the
-///   projection is lossy. Color mips are weighted by the weight, like base
-///   color by opacity.
+///   models OpenPBR's thin-walled subsurface; on a material that is not
+///   [`MaterialMaps::thin_walled`], the projection is reported in
+///   [`PackReport::approximated`]. Color mips are weighted by the weight,
+///   like base color by opacity.
+/// - glTF's transmission is thin-walled too unless `KHR_materials_volume`
+///   gives the surface a thickness, which a texture set cannot know, so
+///   transmission on a material that is not thin-walled is reported
+///   approximated as well.
+/// - `thin_walled` is a constant in every profile; glTF states it by
+///   leaving out `KHR_materials_volume`.
 /// - Lightweald has no subsurface slot yet, so its profile reports
 ///   subsurface maps in [`PackReport::unsupported`] instead of packing them.
 ///
@@ -779,6 +816,9 @@ pub fn pack(
             Some(value) if value == e.default => {}
             _ => report.unsupported.push(e.name),
         }
+    }
+    if profile == Profile::Gltf {
+        report.approximated = gltf_approximations(maps);
     }
     Ok(Bundle {
         profile,
@@ -1497,6 +1537,52 @@ fn textures(
     Ok((textures, placements))
 }
 
+/// Whether a weight is given and not the constant 0, which turns its lobe
+/// off.
+fn active(weight: &Option<Input<1>>) -> bool {
+    match weight {
+        None => false,
+        Some(Input::Constant([w])) => *w != 0.0,
+        Some(Input::Map(_)) => true,
+    }
+}
+
+/// Why glTF's diffuse transmission only approximates volumetric subsurface
+/// scattering.
+const THIN_SUBSURFACE: &str = "glTF's diffuse transmission is thin-walled: on a material that is not, \
+     subsurface scattering through the volume becomes diffuse transmission through the surface";
+/// Why glTF's transmission only approximates volumetric transmission.
+const THIN_TRANSMISSION: &str = "glTF's transmission without KHR_materials_volume is thin-walled: on a material \
+     that is not, the volume's refraction is lost";
+
+/// What glTF carries for `maps` only approximately, in field order.
+fn gltf_approximations(maps: &MaterialMaps) -> Vec<Approximation> {
+    let mut out = Vec::new();
+    if !maps.thin_walled {
+        if active(&maps.subsurface_weight) {
+            out.push(Approximation {
+                name: "subsurface_weight",
+                why: THIN_SUBSURFACE,
+            });
+            if maps.subsurface_color.is_some() {
+                out.push(Approximation {
+                    name: "subsurface_color",
+                    why: THIN_SUBSURFACE,
+                });
+            }
+        }
+        if active(&maps.transmission_weight) {
+            out.push(Approximation {
+                name: "transmission_weight",
+                why: THIN_TRANSMISSION,
+            });
+        }
+    }
+    let entries = maps.entries();
+    out.sort_by_key(|a| entries.iter().position(|e| e.name == a.name));
+    out
+}
+
 /// A raw profile's texture for one map of `[0, 1]` data: R8 for one
 /// channel, RGBA8 with alpha 1 for three.
 fn raw_map(
@@ -2057,6 +2143,51 @@ mod tests {
             ..MaterialMaps::default()
         };
         assert!(pack(&mismatched, Profile::Gltf, &settings).is_err());
+    }
+
+    #[test]
+    fn gltf_reports_thin_walled_translucency_as_approximate() {
+        let maps = MaterialMaps {
+            subsurface_weight: Some(flat(1, &[0.6]).into()),
+            subsurface_color: Some([0.5, 0.9, 0.2].into()),
+            transmission_weight: Some(0.25.into()),
+            ..MaterialMaps::default()
+        };
+        let settings = PackSettings::default();
+        let approximated = |maps: &MaterialMaps, profile| {
+            pack(maps, profile, &settings)
+                .unwrap()
+                .report
+                .approximated
+                .iter()
+                .map(|a| a.name)
+                .collect::<Vec<_>>()
+        };
+        // A volume's subsurface and transmission become thin-walled lobes.
+        assert_eq!(
+            approximated(&maps, Profile::Gltf),
+            [
+                "subsurface_weight",
+                "subsurface_color",
+                "transmission_weight"
+            ]
+        );
+        assert!(approximated(&maps, Profile::Raw).is_empty());
+        // On a thin-walled material they are what glTF models.
+        let thin = MaterialMaps {
+            thin_walled: true,
+            ..maps.clone()
+        };
+        assert!(approximated(&thin, Profile::Gltf).is_empty());
+        let gltf = pack(&thin, Profile::Gltf, &settings).unwrap();
+        assert_eq!(gltf.constant("thin_walled"), Some([1.0].as_slice()));
+        // A weight of 0 turns the lobe off: nothing is approximated.
+        let off = MaterialMaps {
+            subsurface_weight: Some(0.0.into()),
+            transmission_weight: None,
+            ..maps
+        };
+        assert!(approximated(&off, Profile::Gltf).is_empty());
     }
 
     #[test]

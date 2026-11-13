@@ -204,8 +204,9 @@ impl fmt::Debug for CompiledPackage {
 }
 
 impl CompiledPackage {
-    /// A fingerprint of the source and of the identities of the modules it
-    /// was compiled against.
+    /// A fingerprint of the source and of the identities and
+    /// [definitions](Module::definition_fingerprint) of the modules it was
+    /// compiled against: the package's own definition fingerprint.
     #[must_use]
     pub const fn fingerprint(&self) -> u64 {
         self.fingerprint
@@ -481,6 +482,9 @@ fn compile(registry: &Registry, package: &Package) -> Result<CompiledPackage, Pa
     for m in &requires.modules {
         words.extend([name_word(1, &m.name), u64::from(m.version)]);
     }
+    // What the steps' identities do not name: a step that is itself a
+    // compiled package can be redefined under its name and version.
+    words.extend(steps.iter().map(|s| s.module.definition_fingerprint()));
     Ok(CompiledPackage {
         interface,
         steps,
@@ -497,6 +501,12 @@ fn output_error(name: &str) -> ModuleError {
 impl Module for CompiledPackage {
     fn interface(&self) -> Interface {
         self.interface.clone()
+    }
+
+    /// [`CompiledPackage::fingerprint`]: the package is its data, which its
+    /// name and version do not pin down while it is being written.
+    fn definition_fingerprint(&self) -> u64 {
+        self.fingerprint
     }
 
     fn build(&self, cx: &mut Context<'_>, args: &Args) -> Result<Outputs, ModuleError> {

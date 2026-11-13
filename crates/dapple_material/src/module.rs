@@ -543,8 +543,8 @@ impl Args {
     }
 
     /// A fingerprint of everything that decides the instance's result: the
-    /// module identity, the context grid, every argument, and the instance
-    /// seed. The seed comes from the instance path, so equal arguments at
+    /// module identity and [definition](Module::definition_fingerprint),
+    /// the context grid, every argument, and the instance seed. The seed comes from the instance path, so equal arguments at
     /// two paths have different fingerprints, as they draw different
     /// randomness, even for a module that never reads it.
     #[must_use]
@@ -695,9 +695,26 @@ impl fmt::Display for ModuleError {
 impl core::error::Error for ModuleError {}
 
 /// A material module: see the [module docs](self).
+///
+/// A body's result must be a function of its [`Args`], its context's grid
+/// and its instance path, and of nothing else: [`Args::fingerprint`] stands
+/// for all of them.
 pub trait Module {
     /// The public interface.
     fn interface(&self) -> Interface;
+
+    /// A fingerprint of whatever decides the body's behavior that its
+    /// [`ModuleId`] does not name; part of every instance's
+    /// [`Args::fingerprint`].
+    ///
+    /// A module compiled into the program is its code, which its identity
+    /// names, and keeps the default, 0. A module defined by data (a
+    /// compiled package) returns a fingerprint of that data, including the
+    /// definitions of the modules it instantiates, so that two definitions
+    /// under one name and version never share a fingerprint.
+    fn definition_fingerprint(&self) -> u64 {
+        0
+    }
 
     /// Builds the outputs from checked arguments, in `cx`.
     ///
@@ -883,9 +900,12 @@ impl<'a> Context<'a> {
                 return Err(fail(ModuleErrorKind::Unknown(n.clone())));
             }
         }
+        // The identity, and what the identity does not name: two package
+        // definitions under one name and version build different results.
         let mut words = alloc::vec![
             name_word(1, &interface.id.name),
-            u64::from(interface.id.version)
+            u64::from(interface.id.version),
+            module.definition_fingerprint(),
         ];
         // The context grid: the same arguments on another grid, or with
         // another edge, build another result even with no material input.

@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 dapple_field.workspace = true
 dapple_library.workspace = true
+dapple_raster.workspace = true
 glam.workspace = true
 
 [dev-dependencies]
@@ -27,6 +28,10 @@ harness = false
 
 [[bench]]
 name = "field"
+harness = false
+
+[[bench]]
+name = "raster"
 harness = false
 
 [lints]

@@ -2002,3 +2002,33 @@ fn whole_computations_count_against_tile_budgets() {
         assert!(runs < 100, "budgeted runs must converge");
     }
 }
+
+#[test]
+fn raster_nodes_follow_their_inputs_texel_size() {
+    // 25 and 24 rows both mip to 12, with texels of a 25th and a 24th of the
+    // period, twice as tall.
+    let build = |rows: u32| {
+        let mut g = MaterialGraph::with_tile_size(8);
+        let disk = g.field("disk", disk_op(0.2), &[]).unwrap();
+        let map = g.realize("map", disk, 24, rows).unwrap();
+        let mip = g.mip("mip", map, Filter::Box).unwrap();
+        let soft = g
+            .raster(
+                "soft",
+                RasterParams::Blur(GaussianBlur { sigma: 0.02 }),
+                mip,
+            )
+            .unwrap();
+        (g, map, soft)
+    };
+    let (mut g, map, soft) = build(25);
+    g.run().unwrap();
+    g.set_resolution(map, 24, 24).unwrap();
+    g.run().unwrap();
+
+    let (mut fresh, _, fresh_soft) = build(24);
+    fresh.run().unwrap();
+    let (ours, theirs) = (scalar(&g, soft), scalar(&fresh, fresh_soft));
+    assert_eq!(ours.texel(), theirs.texel());
+    assert_eq!(ours.digest(), theirs.digest());
+}

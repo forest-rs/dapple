@@ -107,7 +107,8 @@ const fn blur(sigma: f32) -> RasterParams {
 /// Every node kind, wired so edits reach each through the others:
 ///
 /// - `noise` and `disk` → `height` → `map`, blurred into `soft`, whose box
-///   mips `mip1` and `mip2` are sampled back as `sampled`, warped by `dx`
+///   mips `mip1` (blurred again as `coarse`) and `mip2` are sampled back as
+///   `sampled`, warped by `dx`
 ///   and `dy`, and realized again as `again` and as `warp.normals`;
 /// - `soft` → `relief` (height to normal), `map` → `dist` (a global
 ///   distance transform), sampled as `dist.sample` and added to `noise` in
@@ -143,6 +144,7 @@ fn initial_recipe() -> Recipe {
     .unwrap();
     let mip1 = g.mip("mip1", soft, Filter::Box).unwrap();
     let mip2 = g.mip("mip2", mip1, Filter::Box).unwrap();
+    g.raster("coarse", blur(0.04), mip1).unwrap();
     let sampled = g
         .sample("sampled", &[soft, mip1, mip2], SamplePolicy::Linear)
         .unwrap();
@@ -183,7 +185,7 @@ fn initial_recipe() -> Recipe {
 }
 
 /// Every node, for picking where to inject a failure.
-const LABELS: [&str; 27] = [
+const LABELS: [&str; 28] = [
     "noise",
     "disk",
     "height",
@@ -195,6 +197,7 @@ const LABELS: [&str; 27] = [
     "relief",
     "mip1",
     "mip2",
+    "coarse",
     "sampled",
     "warp",
     "again",
@@ -288,7 +291,7 @@ fn random_edit(rng: &mut Rng) -> Action {
             "warp",
             Params::Field(warp(rng.pick(&[0.0, 0.01, 0.02, 0.04]))),
         ),
-        8 => edit("soft", soft_params(rng)),
+        8 => edit(rng.pick(&["soft", "soft", "coarse"]), soft_params(rng)),
         9 => edit(
             "dist",
             Params::Raster(RasterParams::DistanceTransform(DistanceTransform {

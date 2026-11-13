@@ -817,7 +817,7 @@ dependencies = [
 name = "glazed_brick"
 version = "0.0.0"
 dependencies = [
- "dapple_encode",
+ "dapple_export",
  "dapple_field",
  "dapple_lab",
  "dapple_library",

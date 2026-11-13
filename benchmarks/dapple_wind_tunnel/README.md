@@ -64,3 +64,20 @@ across lengths.
   imported.
 - `import_again`: the same import into a builder that already holds every
   node, so each is found and none copied.
+
+## `raster`
+
+Realizing fields over one period, reported as texels per second. The `small`
+fixtures are cheap enough that the realization loop itself shows; `bark` and
+`bark_color` are the library's oak bark at 256 texels a side only, to keep the
+suite short.
+
+- `raster/realize_scalar/<program>/<size>`: `dapple_raster::realize`.
+- `raster/realize_value/<program>/<size>`: `typed::realize_value` of a color
+  program.
+- `raster/realize_normals/<program>/<size>`: `realize_normals`, normals from
+  the field's gradient.
+- `raster/height_to_normal/<size>`: `HeightToNormal` on an already realized
+  height raster, by central differences.
+
+Sizes are 256 and 1024 texels a side.

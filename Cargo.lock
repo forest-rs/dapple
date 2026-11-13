@@ -484,6 +484,7 @@ dependencies = [
  "criterion",
  "dapple_field",
  "dapple_library",
+ "dapple_raster",
  "glam",
 ]
 

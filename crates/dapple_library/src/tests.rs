@@ -768,3 +768,63 @@ mod breadth {
         );
     }
 }
+
+mod coverage {
+    use alloc::vec::Vec;
+
+    use dapple_field::Edge;
+    use dapple_raster::Raster;
+    use glam::Vec2;
+
+    use crate::modules::coverage;
+
+    /// A ramp of `n` distinct scores, below it a run of `zeros` zeros.
+    fn scores(n: u32, zeros: u32) -> Raster {
+        let values = (0..zeros + n)
+            .map(|i| {
+                if i < zeros {
+                    0.0
+                } else {
+                    (i - zeros + 1) as f32
+                }
+            })
+            .collect();
+        Raster::from_values(zeros + n, 1, Vec2::ZERO, Vec2::ONE, Edge::Wrap, values).unwrap()
+    }
+
+    fn covered(r: &Raster) -> f32 {
+        r.values().iter().sum::<f32>() / r.values().len() as f32
+    }
+
+    #[test]
+    fn the_extremes_cover_nothing_and_everything() {
+        for (score, softness) in [scores(200, 0), scores(100, 100)]
+            .iter()
+            .flat_map(|s| [0.0, 0.01, 0.12].map(|soft| (s, soft)))
+        {
+            let none = coverage(score, 0.0, softness).unwrap();
+            assert!(
+                none.values().iter().all(|&v| v == 0.0),
+                "a share of 0 covers nothing (softness {softness})"
+            );
+            let all = coverage(score, 1.0, softness).unwrap();
+            assert!(
+                all.values().iter().all(|&v| v == 1.0),
+                "a share of 1 covers everything (softness {softness})"
+            );
+        }
+        let score = scores(100, 100);
+        // Out-of-range shares clamp to the extremes.
+        assert_eq!(covered(&coverage(&score, -0.5, 0.05).unwrap()), 0.0);
+        assert_eq!(covered(&coverage(&score, 1.5, 0.05).unwrap()), 1.0);
+        // In between, the share is about what was asked.
+        let some: Vec<f32> = [0.1, 0.3]
+            .iter()
+            .map(|&f| covered(&coverage(&score, f, 0.01).unwrap()))
+            .collect();
+        assert!(
+            (some[0] - 0.1).abs() < 0.02 && (some[1] - 0.3).abs() < 0.02,
+            "{some:?}"
+        );
+    }
+}

@@ -175,12 +175,30 @@ pub(crate) fn fbm(
 /// A mask covering about `fraction` of the texels where `score` is
 /// highest, with a soft edge `softness` wide in percentile: authoring by
 /// coverage rather than by raw threshold.
+///
+/// The extremes are exact: a `fraction` of 0 covers nothing and 1 covers
+/// everything, where the soft edge alone would leave a sliver of the
+/// highest scores covered, or of the lowest uncovered. In between, a soft
+/// edge that falls inside a run of equal scores covers the whole run
+/// ([`PercentileRemap`]'s rule), so a module whose score is 0 wherever it
+/// does not apply masks the result itself.
 pub(crate) fn coverage(
     score: &Raster,
     fraction: f32,
     softness: f32,
 ) -> Result<Raster, ModuleError> {
     let f = fraction.clamp(0.0, 1.0);
+    if f <= 0.0 || f >= 1.0 {
+        return Ok(Raster::from_values(
+            score.width(),
+            score.height(),
+            score.origin(),
+            score.texel(),
+            score.edge(),
+            alloc::vec![f; score.values().len()],
+        )
+        .map_err(MaterialError::Raster)?);
+    }
     let lo = (1.0 - f - softness).clamp(0.0, 1.0);
     let hi = (1.0 - f + softness).clamp(lo, 1.0);
     Ok(PercentileRemap {

@@ -76,6 +76,7 @@ mod streak;
 pub mod synthesis;
 pub mod typed;
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -224,9 +225,15 @@ impl TexelRect {
 /// stands for that square, and its center is at `origin + texel * (x + ½, y + ½)`.
 /// Row `y` increases with the domain's y axis.
 ///
-/// A raster keeps its [`digest`](Raster::digest) once computed, until its
-/// texels change, so content identity costs one pass over the texels per
-/// content rather than per question. Equality and `Debug` ignore it.
+/// **Sharing.** Clones share their texels: cloning a raster, or a typed
+/// raster or material holding it, copies no texels. Changing a raster
+/// through `&mut` copies its texels first when they are shared (copy on
+/// write), so no change is ever seen through another clone.
+///
+/// A raster keeps its [`digest`](Raster::digest) once computed, with its
+/// texels and until they change, so content identity costs one pass over
+/// the texels per content rather than per question, whichever clone asks.
+/// Equality and `Debug` ignore it.
 #[derive(Clone)]
 pub struct Raster<T = f32> {
     width: u32,
@@ -234,8 +241,22 @@ pub struct Raster<T = f32> {
     origin: Vec2,
     texel: Vec2,
     edge: Edge,
+    texels: Arc<Texels<T>>,
+}
+
+/// A raster's texels and their kept digest, shared between clones.
+struct Texels<T> {
     values: Vec<T>,
     digest: DigestCell,
+}
+
+impl<T: Clone> Clone for Texels<T> {
+    fn clone(&self) -> Self {
+        Self {
+            values: self.values.clone(),
+            digest: self.digest.clone(),
+        }
+    }
 }
 
 impl<T: PartialEq> PartialEq for Raster<T> {
@@ -245,7 +266,7 @@ impl<T: PartialEq> PartialEq for Raster<T> {
             && self.origin == other.origin
             && self.texel == other.texel
             && self.edge == other.edge
-            && self.values == other.values
+            && self.texels.values == other.texels.values
     }
 }
 
@@ -257,7 +278,7 @@ impl<T: fmt::Debug> fmt::Debug for Raster<T> {
             .field("origin", &self.origin)
             .field("texel", &self.texel)
             .field("edge", &self.edge)
-            .field("values", &self.values)
+            .field("values", &self.texels.values)
             .finish_non_exhaustive()
     }
 }
@@ -346,8 +367,10 @@ impl<T: Copy> Raster<T> {
             origin,
             texel,
             edge,
-            values,
-            digest: DigestCell::empty(),
+            texels: Arc::new(Texels {
+                values,
+                digest: DigestCell::empty(),
+            }),
         })
     }
 
@@ -384,14 +407,14 @@ impl<T: Copy> Raster<T> {
     /// The row-major values.
     #[must_use]
     pub fn values(&self) -> &[T] {
-        &self.values
+        &self.texels.values
     }
 
     /// The value at `(x, y)`, continued past the border by the edge policy.
     #[must_use]
     pub fn at(&self, x: i64, y: i64) -> T {
         let (x, y) = self.resolve(x, y);
-        self.values[y * self.width as usize + x]
+        self.texels.values[y * self.width as usize + x]
     }
 
     fn resolve(&self, x: i64, y: i64) -> (usize, usize) {
@@ -427,11 +450,13 @@ impl<T: Copy> Raster<T> {
         Ok(())
     }
 
-    /// The texels, to change: every mutation goes through here, so the
-    /// kept digest is dropped with the texels it described.
+    /// The texels, to change: every mutation goes through here, so shared
+    /// texels are copied first and the kept digest is dropped with the
+    /// texels it described.
     fn values_mut(&mut self) -> &mut [T] {
-        self.digest.clear();
-        &mut self.values
+        let texels = Arc::make_mut(&mut self.texels);
+        texels.digest.clear();
+        &mut texels.values
     }
 
     /// Recomputes the texels of `rect` by `f`, leaving the rest.
@@ -454,8 +479,8 @@ impl<T: Copy> Raster<T> {
     pub fn copy_rect(&mut self, source: &Self, rect: TexelRect) -> Result<(), RasterError> {
         if !self.same_grid(source) {
             return Err(RasterError::LengthMismatch {
-                expected: self.values.len(),
-                found: source.values.len(),
+                expected: self.values().len(),
+                found: source.values().len(),
             });
         }
         self.check_rect(rect)?;
@@ -465,7 +490,7 @@ impl<T: Copy> Raster<T> {
 
     /// A raster with the same grid and `values` computed per texel by `f`.
     pub(crate) fn map_texels<U>(&self, mut f: impl FnMut(i64, i64) -> U) -> Raster<U> {
-        let mut values = Vec::with_capacity(self.values.len());
+        let mut values = Vec::with_capacity(self.values().len());
         for y in 0..i64::from(self.height) {
             for x in 0..i64::from(self.width) {
                 values.push(f(x, y));
@@ -477,8 +502,10 @@ impl<T: Copy> Raster<T> {
             origin: self.origin,
             texel: self.texel,
             edge: self.edge,
-            values,
-            digest: DigestCell::empty(),
+            texels: Arc::new(Texels {
+                values,
+                digest: DigestCell::empty(),
+            }),
         }
     }
 
@@ -488,7 +515,6 @@ impl<T: Copy> Raster<T> {
     pub fn rolled(&self, dx: i64, dy: i64) -> Self {
         let wrap = Self {
             edge: Edge::Wrap,
-            digest: DigestCell::empty(),
             ..self.clone()
         };
         Self {
@@ -544,7 +570,7 @@ impl<T: DigestValue> Raster<T> {
                     });
                     (out, n)
                 };
-                words(self.values[i]) == words(other.values[i])
+                words(self.texels.values[i]) == words(other.texels.values[i])
             })
         })
     }
@@ -555,11 +581,11 @@ impl<T: DigestValue> Raster<T> {
     /// Computed on first use and kept until the texels change.
     #[must_use]
     pub fn digest(&self) -> u64 {
-        if let Some(digest) = self.digest.get() {
+        if let Some(digest) = self.texels.digest.get() {
             return digest;
         }
         let digest = self.compute_digest();
-        self.digest.set(digest);
+        self.texels.digest.set(digest);
         digest
     }
 
@@ -579,7 +605,7 @@ impl<T: DigestValue> Raster<T> {
                 },
             ],
         );
-        for value in &self.values {
+        for value in self.values() {
             value.words(&mut |w| h = hash(h, &[w]));
         }
         h
@@ -892,7 +918,7 @@ fn check_realization_grid<T: Copy>(
     {
         return Err(RasterError::LengthMismatch {
             expected: check_size(realization.width, realization.height)?,
-            found: output.values.len(),
+            found: output.values().len(),
         });
     }
     Ok(())
@@ -975,8 +1001,8 @@ pub(crate) fn check_into<T: Copy>(
 ) -> Result<(), RasterError> {
     if !input.same_grid(output) {
         return Err(RasterError::LengthMismatch {
-            expected: input.values.len(),
-            found: output.values.len(),
+            expected: input.values().len(),
+            found: output.values().len(),
         });
     }
     output.check_rect(rect)
@@ -1035,7 +1061,7 @@ impl ScalarField for SampledField {
             self.domain.period(),
         );
         bilinear(
-            &self.raster.values,
+            self.raster.values(),
             [self.raster.width, self.raster.height],
             self.raster.edge,
             t,

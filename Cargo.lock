@@ -482,9 +482,11 @@ name = "dapple_wind_tunnel"
 version = "0.0.0"
 dependencies = [
  "criterion",
+ "dapple_encode",
  "dapple_field",
  "dapple_graph",
  "dapple_library",
+ "dapple_material",
  "dapple_raster",
  "execution_graph",
  "glam",

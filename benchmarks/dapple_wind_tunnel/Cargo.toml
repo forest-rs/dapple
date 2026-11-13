@@ -15,7 +15,9 @@ glam.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+dapple_encode.workspace = true
 dapple_graph.workspace = true
+dapple_material.workspace = true
 dapple_raster.workspace = true
 execution_graph.workspace = true
 
@@ -34,6 +36,10 @@ harness = false
 
 [[bench]]
 name = "graph"
+harness = false
+
+[[bench]]
+name = "material"
 harness = false
 
 [[bench]]

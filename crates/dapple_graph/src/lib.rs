@@ -1321,18 +1321,21 @@ fn run_raster(
                     tiles.depend(state.keys[t as usize], inputs);
                 }
             }
-            None => tiles.detach(&state.keys),
+            None => tiles.depend_whole(&state.keys, value.tile_space, grid),
         }
     }
     let marked = tiles.take_marked(&state.keys);
     let dirty: Dirty = if !same {
         None
     } else if footprint.is_none() {
-        // Global: pending tiles cannot occur, as every run recomputes whole.
-        if value.changed {
-            None
-        } else {
+        // Global: any changed input tile recomputes the whole raster, so
+        // pending tiles cannot occur. The marks, not `value.changed`, say
+        // whether anything changed since this node last ran: a failed run
+        // can keep a changed output from it.
+        if marked.is_empty() {
             Some(Vec::new())
+        } else {
+            None
         }
     } else {
         Some(marked)
@@ -1573,18 +1576,15 @@ fn run_reduce(
         });
     }
     let derivation = reduce_fingerprint(policy, level, value.fingerprint);
-    run_whole(
-        tiles,
-        node,
-        state,
-        derivation,
-        value.port,
-        value.changed,
-        || {
-            let base = value.data.to_typed(value.port)?;
-            dapple_raster::typed::reduce(&base, policy, level).map_err(NodeError::Typed)
-        },
-    )
+    // A mark on the first tile says some input tile changed since this node
+    // last took its marks, even through outputs it never saw.
+    let first = [tiles.key(node, 0)];
+    tiles.depend_whole(&first, value.tile_space, value.data.grid(tiles.size()));
+    let stale = !tiles.take_marked(&first).is_empty();
+    run_whole(tiles, node, state, derivation, value.port, stale, || {
+        let base = value.data.to_typed(value.port)?;
+        dapple_raster::typed::reduce(&base, policy, level).map_err(NodeError::Typed)
+    })
 }
 
 /// The domain an image of `data` samples over: the period a wrapping

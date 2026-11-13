@@ -3363,6 +3363,69 @@ mod tests {
     const IMPORT_NODES: usize = 1315;
     const IMPORT_DIGEST: u128 = 0x1565_1b4a_874c_0331_45ea_764c_e4da_408f;
 
+    /// `eval` builds a throwaway evaluator per call, inline for small plans
+    /// and on the heap for large ones; both must give the bits a kept
+    /// evaluator gives.
+    #[test]
+    fn eval_matches_a_kept_evaluator_bit_for_bit() {
+        let mut b = ProgramBuilder::new();
+        let x = noise(&mut b, 1);
+        let two = b
+            .add(Op::Constant {
+                domain: torus(),
+                value: 2.0,
+            })
+            .unwrap();
+        let sum = b.add(Op::Add { a: x, b: two }).unwrap();
+        let square = b.add(Op::Mul { a: sum, b: sum }).unwrap();
+        let tiny = b.finish(square).unwrap();
+
+        let mut b = ProgramBuilder::new();
+        let out = bark(&mut b);
+        let bark_program = b.finish(out).unwrap();
+
+        let deep = scalar_chain(60, 3);
+
+        let mut b = ProgramBuilder::new();
+        let (r, g, bl) = (noise(&mut b, 1), noise(&mut b, 2), noise(&mut b, 3));
+        let color = b.add(Op::Color { r, g, b: bl }).unwrap();
+        let color_program = b.finish_value(color).unwrap();
+
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 40) as f32 / (1_u64 << 24) as f32 * 3.0 - 1.0
+        };
+        for program in [&tiny, &bark_program, &deep] {
+            assert!(
+                program.evaluation_stats().instances > 0,
+                "the plan has registers"
+            );
+            let mut kept = program.evaluator();
+            for _ in 0..200 {
+                let p = Vec2::new(next(), next());
+                let footprint = Footprint::new(next().abs() * 0.01).unwrap();
+                let fresh = ScalarField::eval(program, p, footprint);
+                let reused = kept.eval_value(p, footprint);
+                assert_eq!(
+                    alloc::format!("{:?}", Value::Scalar(fresh)),
+                    alloc::format!("{reused:?}")
+                );
+            }
+        }
+        let mut kept = color_program.evaluator();
+        for _ in 0..200 {
+            let p = Vec2::new(next(), next());
+            let footprint = Footprint::new(next().abs() * 0.01).unwrap();
+            assert_eq!(
+                alloc::format!("{:?}", color_program.eval(p, footprint)),
+                alloc::format!("{:?}", kept.eval_value(p, footprint))
+            );
+        }
+    }
+
     #[test]
     fn programs_evaluate_like_the_direct_fields() {
         let d = torus();

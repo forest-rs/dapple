@@ -22,7 +22,9 @@
 //! - **Modules** ([`module`]): typed public interfaces with units, ranges
 //!   and defaults, material, map and host-resolved resource inputs
 //!   ([`resource`]), named outputs and versioned identity; instances derive
-//!   seeds from their path and keep their boundary in diagnostics.
+//!   seeds from their path and keep their boundary in diagnostics. An
+//!   opt-in [`module::InstanceCache`] reuses instances whose arguments have
+//!   not changed, bit for bit.
 //! - **Lowering** ([`lower::maps`]) to `dapple_encode`'s maps, naming what
 //!   the maps cannot carry.
 //!
@@ -33,6 +35,7 @@
 
 extern crate alloc;
 
+mod cache;
 pub mod lower;
 mod material;
 pub mod module;

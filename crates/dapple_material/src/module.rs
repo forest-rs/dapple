@@ -31,6 +31,11 @@
 //! the result is one flat material. The module body is Rust (a builder,
 //! identified by its [`ModuleId`] as a registered function is by its name);
 //! what it builds, and every instance's arguments, are inspectable values.
+//!
+//! **Reuse is opt-in.** A context with an [`InstanceCache`] attached
+//! ([`Context::with_cache`]) hands back an instance's kept result, and
+//! replays its diagnostics, when the instance's arguments are exactly those
+//! of an earlier one; nested instances are kept and found the same way.
 
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
@@ -45,6 +50,8 @@ use dapple_field::{Edge, PortType, SampleImage, SamplePolicy};
 use dapple_raster::typed::TypedRaster;
 use glam::Vec3;
 
+pub use crate::cache::{CacheStats, InstanceCache, ModuleStats};
+use crate::cache::{Key, Resolution};
 use crate::material::{Grid, Material, MaterialError};
 use crate::report::Report;
 use crate::resource::{self, Resolved, ResourceError, ResourceHost, ResourceRef, ResourceRequest};
@@ -53,8 +60,9 @@ use crate::resource::{self, Resolved, ResourceError, ResourceHost, ResourceRef, 
 /// name the version they were written against.
 ///
 /// Names are borrowed for modules compiled into the program and owned for
-/// modules loaded as data (packages).
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+/// modules loaded as data (packages). Identities order by name, then
+/// version.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct ModuleId {
     /// The module's stable name, such as `"dapple_library.mortar"`.
     pub name: Cow<'static, str>,
@@ -330,6 +338,11 @@ impl Outputs {
             _ => None,
         }
     }
+
+    /// Every output, by name, in the order they were added.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Output)> + '_ {
+        self.entries.iter().map(|(n, o)| (n.as_ref(), o))
+    }
 }
 
 /// An instance's explicit bindings.
@@ -562,9 +575,11 @@ pub(crate) fn edge_word(edge: Edge) -> u64 {
     }
 }
 
-/// What makes an image sample differently besides its texels: the sampling
-/// policy, edge, origin, and every level's size and texel size.
+/// What makes an image sample differently besides its texels: their type,
+/// the sampling policy, edge, origin, and every level's size and texel
+/// size.
 fn image_words(image: &SampleImage, words: &mut Vec<u64>) {
+    words.push(image.port().word());
     words.push(match image.policy() {
         SamplePolicy::Linear => 1,
         SamplePolicy::Nearest => 2,
@@ -698,7 +713,8 @@ impl core::error::Error for ModuleError {}
 ///
 /// A body's result must be a function of its [`Args`], its context's grid
 /// and its instance path, and of nothing else: [`Args::fingerprint`] stands
-/// for all of them.
+/// for all of them, and an [`InstanceCache`] hands back kept results by
+/// them.
 pub trait Module {
     /// The public interface.
     fn interface(&self) -> Interface;
@@ -802,12 +818,17 @@ struct Frame {
 }
 
 /// Where modules are instantiated: the grid they build on, the resource
-/// host, the instance path and the diagnostics.
+/// host, the instance path, the diagnostics, and an optional
+/// [`InstanceCache`].
 pub struct Context<'a> {
     grid: Grid,
     host: &'a dyn ResourceHost,
     stack: Vec<Frame>,
     diagnostics: Diagnostics,
+    cache: Option<&'a mut InstanceCache>,
+    /// With a cache: every resource resolved so far, in order, so a kept
+    /// result can record the ones resolved beneath it.
+    resolutions: Vec<Resolution>,
 }
 
 impl fmt::Debug for Context<'_> {
@@ -816,8 +837,25 @@ impl fmt::Debug for Context<'_> {
             .field("grid", &self.grid)
             .field("path", &self.path())
             .field("diagnostics", &self.diagnostics.entries.len())
+            .field("cache", &self.cache)
             .finish_non_exhaustive()
     }
+}
+
+/// What a resource contributes to a fingerprint besides its name: the
+/// host's content fingerprint of its texels, how they are sampled and how
+/// its levels were reduced.
+fn resource_words(resolved: &Resolved) -> Vec<u64> {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "splitting the 128-bit fingerprint into its halves"
+    )]
+    let mut words = alloc::vec![resolved.content.0 as u64, (resolved.content.0 >> 64) as u64];
+    // The same texels at another physical scale, sampled another way, or
+    // reduced another way, give different results.
+    image_words(&resolved.image, &mut words);
+    words.extend(resolved.mips.fingerprint());
+    words
 }
 
 impl<'a> Context<'a> {
@@ -829,7 +867,24 @@ impl<'a> Context<'a> {
             host,
             stack: Vec::new(),
             diagnostics: Diagnostics::default(),
+            cache: None,
+            resolutions: Vec::new(),
         }
+    }
+
+    /// The same context, reusing and keeping instance results in `cache`:
+    /// see [`InstanceCache`]. What it builds is bit for bit what it builds
+    /// without one, diagnostics included.
+    #[must_use]
+    pub fn with_cache(mut self, cache: &'a mut InstanceCache) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    /// The attached cache, if any.
+    #[must_use]
+    pub fn cache(&self) -> Option<&InstanceCache> {
+        self.cache.as_deref()
     }
 
     /// The grid every material and map is on.
@@ -868,6 +923,10 @@ impl<'a> Context<'a> {
 
     /// Instantiates `module` as `name` under the current instance, with
     /// `bind`'s arguments.
+    ///
+    /// With an [`InstanceCache`] attached, an instance whose arguments are
+    /// exactly those of a kept result returns that result without running
+    /// the body, and records the diagnostics the body recorded.
     ///
     /// # Errors
     ///
@@ -942,6 +1001,7 @@ impl<'a> Context<'a> {
             params.push((decl.name.clone(), value));
         }
         let mut inputs = Vec::with_capacity(interface.inputs.len());
+        let resolved_before = self.resolutions.len();
         for decl in &interface.inputs {
             let given = bind.inputs.iter().rev().find(|(n, _)| *n == decl.name);
             let invalid = || fail(ModuleErrorKind::InvalidInput(decl.name.to_string()));
@@ -971,19 +1031,12 @@ impl<'a> Context<'a> {
                         .map_err(|e| fail(ModuleErrorKind::Resource(e)))?;
                     resource::check(reference, request, &resolved)
                         .map_err(|e| fail(ModuleErrorKind::Resource(e)))?;
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        reason = "splitting the 128-bit fingerprint into its halves"
-                    )]
-                    words.extend([
-                        name_word(3, &decl.name),
-                        resolved.content.0 as u64,
-                        (resolved.content.0 >> 64) as u64,
-                    ]);
-                    // The same texels at another physical scale, sampled another
-                    // way, or reduced another way, give different results.
-                    image_words(&resolved.image, &mut words);
-                    words.extend(resolved.mips.fingerprint());
+                    let resource = resource_words(&resolved);
+                    words.push(name_word(3, &decl.name));
+                    words.extend_from_slice(&resource);
+                    if self.cache.is_some() {
+                        self.resolutions.push((reference.clone(), resource));
+                    }
                     Some(Bound::Resource(reference.clone(), resolved))
                 }
                 _ => return Err(invalid()),
@@ -996,12 +1049,34 @@ impl<'a> Context<'a> {
         // The seed comes from the instance path, so the same arguments at two
         // paths draw different randomness and must not share a fingerprint.
         words.push(seed);
+        let fingerprint = hash(0x6172_6773, &words); // "args"
+
+        // The instance's own resources are in its key; those resolved
+        // beneath it are checked when it is found.
+        let own = self.resolutions.len();
+        let key = self
+            .cache
+            .is_some()
+            .then(|| Key::new(path.clone(), interface.id.clone(), words));
+        if let (Some(cache), Some(key)) = (self.cache.as_deref_mut(), &key) {
+            let host = self.host;
+            let hit = cache.lookup(key, |reference| {
+                host.resolve(reference).ok().map(|r| resource_words(&r))
+            });
+            if let Some(hit) = hit {
+                self.diagnostics.entries.extend(hit.entries);
+                self.resolutions.extend(hit.resources);
+                return Ok(hit.outputs);
+            }
+        }
+
         let args = Args {
             params,
             inputs,
             seed,
-            fingerprint: hash(0x6172_6773, &words), // "args"
+            fingerprint,
         };
+        let first_entry = self.diagnostics.entries.len();
         self.diagnostics.entries.push(Entry {
             path: path.clone(),
             module: interface.id.clone(),
@@ -1041,6 +1116,21 @@ impl<'a> Context<'a> {
                     seam: e.seam,
                 }));
             }
+        }
+        if let (Some(cache), Some(key)) = (self.cache.as_deref_mut(), key) {
+            let mine = &self.resolutions[resolved_before..own];
+            let mut beneath: Vec<Resolution> = Vec::new();
+            for r in &self.resolutions[own..] {
+                if !mine.contains(r) && !beneath.contains(r) {
+                    beneath.push(r.clone());
+                }
+            }
+            cache.store(
+                key,
+                outputs.clone(),
+                self.diagnostics.entries[first_entry..].to_vec(),
+                beneath,
+            );
         }
         Ok(outputs)
     }

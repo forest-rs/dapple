@@ -136,3 +136,17 @@ grid with default parameters. Reported as texels per second.
   material's channels as images for packing.
 - `material/pack_gltf/<module>`: `dapple_encode::pack` of those maps for the
   glTF profile, with mip chains.
+
+With a `dapple_material::module::InstanceCache` attached, on those two
+modules and `glazed_brick_wall` (ceramic body, glaze, mortar, wear and four
+kinds of weathering), with a budget that keeps everything:
+
+- `material/memo/cold/<module>`: a build into an empty cache; the difference
+  from `material/instantiate` is what fingerprinting and keeping every
+  instance costs.
+- `material/memo/warm/<module>`: the same build again with nothing changed.
+- `material/memo/edit_dirt/<module>` (`varnished_board`,
+  `glazed_brick_wall`): a build after editing the asset's `dirt` from 0.2 to
+  0.25, on a fresh copy of the warmed cache each iteration (the copy is not
+  timed). The edit reaches the grime and, on the wall, the weathering after
+  it; every other nested instance is found in the cache.

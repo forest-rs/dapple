@@ -2032,3 +2032,42 @@ fn raster_nodes_follow_their_inputs_texel_size() {
     assert_eq!(ours.texel(), theirs.texel());
     assert_eq!(ours.digest(), theirs.digest());
 }
+
+#[test]
+fn budgeted_nodes_resume_through_their_pending_tiles() {
+    let mut s = stamped(0.2, 1);
+    s.graph.run().unwrap();
+    s.graph.set_tile_budget(Some(3));
+    s.graph.set_field_op(s.disk, disk_op(0.6)).unwrap();
+    s.graph.run().unwrap();
+    assert!(s.graph.tile_report().pending_tiles > 0);
+
+    // The map stopped at the budget, so its output depends on the tiles it
+    // left, which the run invalidated.
+    let space = s.graph.raster_value(s.map).unwrap().tile_space;
+    let reads_pending = |g: &MaterialGraph| {
+        g.execution_graph()
+            .node_dependencies(s.map)
+            .unwrap()
+            .any(|key| *key == changes::pending_tiles(space))
+    };
+    assert!(reads_pending(&s.graph));
+    let runs = s.graph.run_count(s.map).unwrap();
+    let summary = s.graph.run().unwrap();
+    assert!(summary.executed_nodes > 0, "{summary:?}");
+    assert_eq!(s.graph.run_count(s.map), Some(runs + 1));
+
+    for runs in 0.. {
+        if s.graph.tile_report().pending_tiles == 0 {
+            break;
+        }
+        s.graph.run().unwrap();
+        assert!(runs < 100, "budgeted runs must converge");
+    }
+    // Settled: the map no longer depends on pending tiles, and nothing runs.
+    assert!(!reads_pending(&s.graph));
+    assert_eq!(s.graph.run().unwrap().executed_nodes, 0);
+    let mut fresh = stamped(0.6, 1);
+    fresh.graph.run().unwrap();
+    assert_eq!(digests(&s), digests(&fresh));
+}

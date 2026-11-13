@@ -71,6 +71,12 @@
 //! 7. It records its layout and the field version it consumed, and keeps
 //!    the output, noting the node for another run if tiles are pending.
 //!
+//! A node left with pending tiles records a read of them, as the host
+//! state [`pending_tiles`] names, and `MaterialGraph::run` invalidates that
+//! state once the run that left them ends, which schedules the node for the
+//! next run's budget. A node whose tiles are all done no longer depends on
+//! it.
+//!
 //! Steps 3 and 4 spend state the kept output relies on: the marks, and the
 //! pending tiles. A run that fails after them, while computing, must not
 //! leave the node believing its kept output current, and it does not: the
@@ -90,6 +96,7 @@ use dapple_field::PortType;
 use dapple_field::program::{Change, Fingerprint};
 use dapple_field::raster::Region;
 use dapple_raster::{Raster, Realization, TexelRect};
+use execution_graph::{HostOpId, ResourceKey};
 use glam::Vec2;
 use invalidation::intern::InternId;
 
@@ -124,6 +131,19 @@ pub(crate) fn repeats(
     change: &Change,
 ) -> bool {
     previous == Some(fingerprint) && *change == Change::Nowhere
+}
+
+/// The host operation whose state, keyed by a node's tile space, is the
+/// tiles a budget left pending in that node.
+pub(crate) const PENDING_TILES: HostOpId = HostOpId::new(0x0070_656e_6469_6e67); // "pending"
+
+/// The tiles a budget left pending in the node with tile space `node`, as a
+/// resource its output depends on until they are done.
+pub(crate) fn pending_tiles(node: u32) -> ResourceKey {
+    ResourceKey::HostState {
+        op: PENDING_TILES,
+        key: u64::from(node),
+    }
 }
 
 /// What a tile node's output was computed with, besides the content of its
@@ -171,6 +191,13 @@ pub(crate) struct TileState {
     keys: Vec<InternId>,
     /// Tiles still to recompute against `layout`, left by a tile budget.
     pending: Vec<u32>,
+}
+
+impl TileState {
+    /// Whether a budget left tiles of the kept output to recompute.
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
 }
 
 /// How a tile node learns which tiles an input change reaches.

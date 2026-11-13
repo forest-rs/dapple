@@ -180,8 +180,24 @@ fn wall(n: u32, p: &[f64]) -> Result<Material> {
     build(&GlazedBrickWall, n, wall_preset(p).bind())
 }
 
-/// Saves `preset` for `module` as a preset document, reads it back and
-/// checks that it rebuilds `fitted` bit for bit.
+/// Writes `preset` for `module` as a preset document, reads it back and
+/// checks that it rebuilds `fitted` bit for bit; returns the document.
+fn rebuild_check(module: &dyn Module, n: u32, preset: Preset, fitted: &Material) -> Result<String> {
+    let interface = module.interface();
+    let set = PresetSet::new(&interface.id, vec![preset]);
+    set.check(&interface)?;
+    let json = set.to_json();
+    let again = PresetSet::from_json(&json)?;
+    again.check(&interface)?;
+    let rebuilt = build(module, n, again.get("fitted").ok_or("no preset")?.bind())?;
+    if rebuilt.digest() != fitted.digest() {
+        return Err("the saved preset does not rebuild the fitted material".into());
+    }
+    Ok(json)
+}
+
+/// Saves `preset` for `module` as a preset document under `out`, after
+/// checking that it rebuilds `fitted` bit for bit.
 fn save_preset(
     out: &Path,
     name: &str,
@@ -190,17 +206,9 @@ fn save_preset(
     preset: Preset,
     fitted: &Material,
 ) -> Result<()> {
-    let interface = module.interface();
-    let set = PresetSet::new(&interface.id, vec![preset]);
-    set.check(&interface)?;
+    let json = rebuild_check(module, n, preset, fitted)?;
     let path = out.join(format!("{name}.json"));
-    std::fs::write(&path, set.to_json())?;
-    let again = PresetSet::from_json(&std::fs::read_to_string(&path)?)?;
-    again.check(&interface)?;
-    let rebuilt = build(module, n, again.get("fitted").ok_or("no preset")?.bind())?;
-    if rebuilt.digest() != fitted.digest() {
-        return Err("the saved preset does not rebuild the fitted material".into());
-    }
+    std::fs::write(&path, json)?;
     println!("{} (rebuilds the fit bit for bit)", path.display());
     Ok(())
 }
@@ -358,4 +366,49 @@ fn repository() -> &'static Path {
         .ancestors()
         .nth(2)
         .expect("the crate lives two levels below the repository root")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const N: u32 = 96;
+
+    /// A fitted wall's and stone's presets survive their document and
+    /// rebuild the material they came from bit for bit: the gate `main`
+    /// applies to each fit's result, here on fixed parameters instead of a
+    /// search (the fits themselves take minutes).
+    #[test]
+    fn presets_rebuild_their_materials_bit_for_bit() {
+        let wall_params = [0.4, 0.35, 0.74, 0.64, 0.44, 0.035];
+        let fitted = wall(N, &wall_params).expect("builds");
+        let json = rebuild_check(&GlazedBrickWall, N, wall_preset(&wall_params), &fitted)
+            .expect("the wall preset rebuilds");
+        assert!(json.contains("\"fitted\""), "{json}");
+
+        let stone_params = [1.12, 0.78, 0.45, 0.0011];
+        let fitted = stone(N, &stone_params).expect("builds");
+        rebuild_check(&Stone, N, stone_preset(&stone_params), &fitted)
+            .expect("the stone preset rebuilds");
+    }
+
+    /// The gate fails for a material the preset does not make.
+    #[test]
+    fn a_preset_that_does_not_rebuild_is_refused() {
+        let other = stone(N, &[1.0, 1.0, 0.12, 0.0007]).expect("builds");
+        let params = [1.12, 0.78, 0.45, 0.0011];
+        assert!(rebuild_check(&Stone, N, stone_preset(&params), &other).is_err());
+    }
+
+    /// The measurements the fits search over are finite numbers in the
+    /// shape their targets expect.
+    #[test]
+    fn measurements_are_finite_and_complete() {
+        let w = wall_measures(&wall(N, &[0.4, 0.35, 0.74, 0.64, 0.44, 0.035]).unwrap()).unwrap();
+        assert_eq!(w.len(), 5);
+        assert!(w.iter().all(|v| v.is_finite()), "{w:?}");
+        let s = stone_measures(&stone(N, &[1.0, 1.0, 0.12, 0.0007]).unwrap()).unwrap();
+        assert_eq!(s.len(), 8);
+        assert!(s.iter().all(|v| v.is_finite()), "{s:?}");
+    }
 }

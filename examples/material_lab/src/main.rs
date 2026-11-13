@@ -39,6 +39,30 @@ use glam::Vec2;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// The grid sizes of a run: the lab's gates are the same at any scale, but
+/// the resolution check needs texels of about a millimeter to resolve the
+/// stone's tooling, so only [`FULL`] runs it.
+#[derive(Copy, Clone)]
+struct Scale {
+    /// Texels a side of the sweeps' materials.
+    sweep: u32,
+    /// Texels a side of the weathered wall.
+    wall: u32,
+    /// Texels a side of the composite check's realization.
+    composite: u32,
+    /// Texels a side of the coarse realization of the resolution check
+    /// (the fine one has twice as many), if it is run.
+    resolution: Option<u32>,
+}
+
+/// The sizes `main` runs at.
+const FULL: Scale = Scale {
+    sweep: 256,
+    wall: 512,
+    composite: 256,
+    resolution: Some(1024),
+};
+
 /// A low light from the upper left, as a grazing view shows relief.
 const AZIMUTH: f32 = 2.4;
 const ELEVATION: f32 = 0.3;
@@ -53,7 +77,7 @@ fn build(module: &dyn Module, grid: Grid, bind: Bind) -> Result<Material> {
 /// A sweep: for each value, the material's raking preview stacked over its
 /// base color, and its report.
 fn sweep(
-    out: &Path,
+    out: Option<&Path>,
     report: &mut Report,
     name: &str,
     values: &[f32],
@@ -74,23 +98,24 @@ fn sweep(
     )
 }
 
-fn write(out: &Path, name: &str, picture: &Picture) -> Result<()> {
+/// Writes `picture` as `name.png` under `out`, if there is an output
+/// directory.
+fn write(out: Option<&Path>, name: &str, picture: &Picture) -> Result<()> {
+    let Some(out) = out else { return Ok(()) };
     let path = out.join(format!("{name}.png"));
     picture.write_png(&path)?;
     println!("{}", path.display());
     Ok(())
 }
 
-fn main() -> Result<()> {
-    let out = std::env::args_os()
-        .nth(1)
-        .map_or_else(|| repository().join(".local/gallery/lab"), PathBuf::from);
-    std::fs::create_dir_all(&out)?;
+/// Runs every sweep and check at `scale`, writing images under `out` when
+/// there is one, and returns the lab's report.
+fn run(out: Option<&Path>, scale: Scale) -> Result<Report> {
     let mut report = Report::new("dapple_library modules");
-    let small = unit_tile(256);
+    let small = unit_tile(scale.sweep);
 
     // Sweeps.
-    sweep(&out, &mut report, "stone-bedding", &[0.0, 0.3, 0.8], |v| {
+    sweep(out, &mut report, "stone-bedding", &[0.0, 0.3, 0.8], |v| {
         build(&Stone, small, Bind::new().scalar("bedding_strength", v))
     })?;
     let bare_wall = build(
@@ -98,7 +123,7 @@ fn main() -> Result<()> {
         small,
         Bind::new().flag("weathered", false),
     )?;
-    sweep(&out, &mut report, "grime-coverage", &[0.1, 0.3, 0.5], |v| {
+    sweep(out, &mut report, "grime-coverage", &[0.1, 0.3, 0.5], |v| {
         build(
             &Grime,
             small,
@@ -107,31 +132,25 @@ fn main() -> Result<()> {
                 .scalar("coverage", v),
         )
     })?;
-    sweep(
-        &out,
-        &mut report,
-        "moss-coverage",
-        &[0.02, 0.05, 0.1],
-        |v| {
-            build(
-                &Moss,
-                small,
-                Bind::new()
-                    .material("base", bare_wall.clone())
-                    .scalar("coverage", v),
-            )
-        },
-    )?;
+    sweep(out, &mut report, "moss-coverage", &[0.02, 0.05, 0.1], |v| {
+        build(
+            &Moss,
+            small,
+            Bind::new()
+                .material("base", bare_wall.clone())
+                .scalar("coverage", v),
+        )
+    })?;
 
     // The weathered wall: tiled, raking, mips, report, transform.
-    let wall = build(&GlazedBrickWall, unit_tile(512), Bind::new())?;
-    write(&out, "wall-tiled", &tiled(&base_color(&wall), 2, 2))?;
+    let wall = build(&GlazedBrickWall, unit_tile(scale.wall), Bind::new())?;
+    write(out, "wall-tiled", &tiled(&base_color(&wall), 2, 2))?;
     write(
-        &out,
+        out,
         "wall-raking-tiled",
         &tiled(&raking(&wall, AZIMUTH, ELEVATION)?, 2, 2),
     )?;
-    write(&out, "wall-mips", &mips(&wall, 5)?)?;
+    write(out, "wall-mips", &mips(&wall, 5)?)?;
     report.merge("wall", material_report("wall", &wall));
     report.merge("wall", transform_check(&wall));
 
@@ -139,8 +158,9 @@ fn main() -> Result<()> {
     // grid resolves the finest features (the stone's 3 mm tooling needs
     // texels of about a millimeter).
     for (name, module) in [("stone", &Stone as &dyn Module), ("mortar", &Mortar)] {
-        let coarse = build(module, unit_tile(1024), Bind::new())?;
-        let fine = build(module, unit_tile(2048), Bind::new())?;
+        let Some(n) = scale.resolution else { break };
+        let coarse = build(module, unit_tile(n), Bind::new())?;
+        let fine = build(module, unit_tile(2 * n), Bind::new())?;
         report.merge(
             name,
             resolution_check(name, ChannelId::Aux(Aux::Height), &coarse, &fine),
@@ -156,8 +176,8 @@ fn main() -> Result<()> {
         instance: &instance,
         background: &glazed_brick::BACKGROUND,
         domain,
-        width: 256,
-        height: 256,
+        width: scale.composite,
+        height: scale.composite,
         tile_size: 32,
     };
     let mut realized = Realized::composite(&composite(&set))?;
@@ -182,6 +202,15 @@ fn main() -> Result<()> {
         ),
     );
 
+    Ok(report)
+}
+
+fn main() -> Result<()> {
+    let out = std::env::args_os()
+        .nth(1)
+        .map_or_else(|| repository().join(".local/gallery/lab"), PathBuf::from);
+    std::fs::create_dir_all(&out)?;
+    let report = run(Some(&out), FULL)?;
     let path = out.join("report.json");
     std::fs::write(&path, report.to_json())?;
     println!("{}", path.display());
@@ -202,4 +231,38 @@ fn repository() -> &'static Path {
         .ancestors()
         .nth(2)
         .expect("the crate lives two levels below the repository root")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The lab's gates at a reduced scale, writing nothing: every sweep's
+    /// and the wall's report, the transform check and the incremental
+    /// composite all pass. The resolution check, which needs texels of
+    /// about a millimeter, runs only in the binary.
+    #[test]
+    fn the_lab_passes_at_a_reduced_scale() {
+        let report = run(
+            None,
+            Scale {
+                sweep: 48,
+                wall: 64,
+                composite: 64,
+                resolution: None,
+            },
+        )
+        .expect("the lab runs");
+        let failures: Vec<_> = report.failures().collect();
+        assert!(failures.is_empty(), "lab checks failed: {failures:#?}");
+        let has = |name: &str| {
+            report.entries.iter().any(|e| match e {
+                dapple_lab::Entry::Check(c) => c.name == name,
+                dapple_lab::Entry::Measurement(m) => m.name == name,
+            })
+        };
+        assert!(has("composite.incremental_equals_clean"));
+        assert!(has("wall.no_channel_left_behind"));
+        assert!(has("wall.ranges"));
+    }
 }

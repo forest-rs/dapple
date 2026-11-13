@@ -85,11 +85,7 @@ fn main() -> Result<()> {
     // The lab's report: ranges, invalid values, seams against the tiling
     // promise (checked across the wrap when the asset was built), lowering
     // losses, and a material-wide transform that must move every channel.
-    let mut report = dapple_lab::material::material_report(&asset, &material);
-    report.merge(
-        "relationships",
-        dapple_lab::material::transform_check(&material),
-    );
+    let report = lab_report(&asset, &material);
     std::fs::write(out.join("report.json"), report.to_json())?;
     if !report.passed() {
         for f in report.failures() {
@@ -98,6 +94,18 @@ fn main() -> Result<()> {
         return Err("the lab report has failures".into());
     }
     Ok(())
+}
+
+/// The lab's report on `material`: ranges, invalid values, seams against
+/// the tiling promise and lowering losses, and a material-wide transform
+/// that must move every channel.
+fn lab_report(asset: &str, material: &Material) -> dapple_lab::Report {
+    let mut report = dapple_lab::material::material_report(asset, material);
+    report.merge(
+        "relationships",
+        dapple_lab::material::transform_check(material),
+    );
+    report
 }
 
 /// Writes linear RGB rows (top row first) as an 8-bit PNG, sRGB-encoded
@@ -228,4 +236,38 @@ fn repository() -> &'static Path {
         .ancestors()
         .nth(2)
         .expect("the crate lives two levels below the repository root")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both assets pass the lab's report at a small grid: the gate `main`
+    /// applies at 2048².
+    #[test]
+    fn the_assets_pass_the_lab_report() {
+        for (asset, module) in [
+            ("wall", &GlazedBrickWall as &dyn Module),
+            ("sill", &StoneSill),
+        ] {
+            let n = 64;
+            #[expect(clippy::cast_precision_loss, reason = "a small grid size")]
+            let grid = Grid {
+                width: n,
+                height: n,
+                origin: Vec2::ZERO,
+                texel: Vec2::splat(1.0 / n as f32),
+                edge: Edge::Wrap,
+            };
+            let mut cx = Context::new(grid, &NoResources);
+            let material = cx
+                .instantiate(module, asset, Bind::new())
+                .expect("instantiates")
+                .take_material("material")
+                .expect("a material");
+            let report = lab_report(asset, &material);
+            let failures: Vec<_> = report.failures().collect();
+            assert!(failures.is_empty(), "{asset}: {failures:#?}");
+        }
+    }
 }

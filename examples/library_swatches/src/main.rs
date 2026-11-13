@@ -529,3 +529,44 @@ fn repository() -> &'static Path {
         .nth(2)
         .expect("the crate lives two levels below the repository root")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stated references are what the embedded spectra give, the
+    /// conversion matches the color checker, and the plausibility gate
+    /// holds for them and rejects the rejected tile: the gate `main` runs
+    /// first. Pure arithmetic over the tables; no realization.
+    #[test]
+    fn the_references_derive_from_the_spectra() {
+        derive_references().expect("the references hold");
+    }
+
+    /// One calibration at a small grid, on a module with a luminance-only
+    /// reference: the fit runs, reports its targets and the plausibility
+    /// check, lands within tolerance, and is reproducible. (The ten fits
+    /// at the binary's 128 texels take most of a minute in release, and at
+    /// 32 texels the flint's measured luminance, 0.108, is outside its
+    /// plausible range: the report is not a gate in the binary.)
+    #[test]
+    fn a_calibration_runs_and_is_reproducible() {
+        let (module, reference) = (&Beech, &REFERENCES[0]);
+        assert_eq!(module.interface().id.name, reference.module, "table order");
+        let report = calibrate(module, reference, 32).expect("fits");
+        let failures: Vec<_> = report.failures().collect();
+        assert!(failures.is_empty(), "{failures:#?}");
+        assert!(
+            report.entries.iter().any(|e| matches!(
+                e,
+                dapple_lab::Entry::Check(c) if c.name == "plausible"
+            )),
+            "the plausibility check is reported"
+        );
+        assert_eq!(
+            report.to_json(),
+            calibrate(module, reference, 32).expect("fits").to_json(),
+            "the fit is deterministic"
+        );
+    }
+}

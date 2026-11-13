@@ -366,16 +366,22 @@ pub struct PackSettings {
     /// (Toksvig). Off, roughness is filtered alone and the textures match a
     /// plain bake of the same maps.
     pub fold_normal_variance: bool,
+    /// Store glTF and raw normal maps, base and coat, as 16-bit RGB
+    /// ([`PixelFormat::Rgb16Unorm`]) instead of 8-bit RGBA, for close
+    /// views where 8-bit normals band. Lightweald's two-channel normal stays
+    /// 8-bit, as its pool formats are.
+    pub sixteen_bit_normals: bool,
 }
 
 impl Default for PackSettings {
-    /// Box filtering, no coverage preservation, and normal variance folded
-    /// into roughness.
+    /// Box filtering, no coverage preservation, normal variance folded
+    /// into roughness, and 8-bit normals.
     fn default() -> Self {
         Self {
             filter: Filter::Box,
             alpha_cutoff: None,
             fold_normal_variance: true,
+            sixteen_bit_normals: false,
         }
     }
 }
@@ -917,7 +923,7 @@ fn textures(
         }
     }
     if let Some(normals) = &normals {
-        let texture = normal_texture("normal", normals, profile);
+        let texture = normal_texture("normal", normals, profile, settings);
         let channels = 0..texture.format.channels().min(3);
         place(&mut placements, "normal", &[("normal", channels, SIGNED)]);
         textures.push(texture);
@@ -1284,7 +1290,12 @@ fn textures(
                 }
             }
             if let Some(normals) = &coat_normals {
-                textures.push(normal_texture("clearcoat_normal", normals, profile));
+                textures.push(normal_texture(
+                    "clearcoat_normal",
+                    normals,
+                    profile,
+                    settings,
+                ));
                 place(
                     &mut placements,
                     "clearcoat_normal",
@@ -1319,7 +1330,7 @@ fn textures(
                 );
             }
             if let Some(normals) = &coat_normals {
-                textures.push(normal_texture("coat_normal", normals, profile));
+                textures.push(normal_texture("coat_normal", normals, profile, settings));
                 place(
                     &mut placements,
                     "coat_normal",
@@ -1608,12 +1619,19 @@ fn srgb_rgb_linear_a(name: &'static str, chain: &MipChain) -> EncodedTexture {
 }
 
 /// A chain of unit normals as `profile` stores them: Lightweald keeps XY,
-/// glTF and raw XYZ (with alpha 1); Lightweald and glTF negate Y so `+Y`
-/// points to the image top, and are [`TextureKind::Normal`].
-fn normal_texture(name: &'static str, normals: &MipChain, profile: Profile) -> EncodedTexture {
+/// glTF and raw XYZ (with alpha 1 in 8 bits, or as 16-bit RGB); Lightweald
+/// and glTF negate Y so `+Y` points to the image top, and are
+/// [`TextureKind::Normal`].
+fn normal_texture(
+    name: &'static str,
+    normals: &MipChain,
+    profile: Profile,
+    settings: &PackSettings,
+) -> EncodedTexture {
     let unit = |v: f32| v * 0.5 + 0.5;
     let format = match profile {
         Profile::Lightweald => PixelFormat::Rg8Unorm,
+        Profile::Gltf | Profile::Raw if settings.sixteen_bit_normals => PixelFormat::Rgb16Unorm,
         Profile::Gltf | Profile::Raw => PixelFormat::Rgba8Unorm,
     };
     let raw = profile == Profile::Raw;
@@ -1625,11 +1643,17 @@ fn normal_texture(name: &'static str, normals: &MipChain, profile: Profile) -> E
         |level, i, out| {
             let n = &normals.levels()[level].values[i * 3..i * 3 + 3];
             let y = if raw { n[1] } else { -n[1] };
-            out.push(quantize_unorm8(unit(n[0])));
-            out.push(quantize_unorm8(unit(y)));
-            if format == PixelFormat::Rgba8Unorm {
-                out.push(quantize_unorm8(unit(n[2])));
-                out.push(255);
+            match format {
+                PixelFormat::Rgb16Unorm => {
+                    for v in [n[0], y, n[2]] {
+                        out.extend_from_slice(&quantize_unorm16(unit(v)).to_le_bytes());
+                    }
+                }
+                PixelFormat::Rgba8Unorm => {
+                    out.extend([unit(n[0]), unit(y), unit(n[2])].map(quantize_unorm8));
+                    out.push(255);
+                }
+                _ => out.extend([unit(n[0]), unit(y)].map(quantize_unorm8)),
             }
         },
         |level| {
@@ -1680,7 +1704,7 @@ pub fn encode_data(
                     } else {
                         linear_to_srgb(v)
                     })),
-                    PixelFormat::R16Unorm => {
+                    PixelFormat::R16Unorm | PixelFormat::Rgb16Unorm => {
                         bytes.extend_from_slice(&quantize_unorm16(v).to_le_bytes());
                     }
                     PixelFormat::R32Float => bytes.extend_from_slice(&v.to_le_bytes()),
@@ -2286,5 +2310,69 @@ mod tests {
             TextureKind::Data,
             "raw normals stay in the input frame"
         );
+    }
+
+    #[test]
+    fn normals_can_be_sixteen_bit() {
+        let tilted = [0.6, 0.0, 0.8];
+        let maps = MaterialMaps {
+            normal: Some(flat(3, &tilted)),
+            coat_normal: Some(flat(3, &tilted)),
+            ..MaterialMaps::default()
+        };
+        let settings = PackSettings {
+            sixteen_bit_normals: true,
+            ..PackSettings::default()
+        };
+        let gltf = pack(&maps, Profile::Gltf, &settings).unwrap();
+        let unit = |v: f32| quantize_unorm16(v * 0.5 + 0.5).to_le_bytes();
+        for name in ["normal", "clearcoat_normal"] {
+            let texture = gltf.texture(name).unwrap();
+            assert_eq!(texture.format, PixelFormat::Rgb16Unorm);
+            assert_eq!(texture.kind, TextureKind::Normal);
+            assert_eq!(texture.levels[0].len(), 16 * 6);
+            assert_eq!(
+                texture.levels[0][..6],
+                [unit(0.6), unit(-0.0), unit(0.8)].concat()
+            );
+        }
+        assert_eq!(gltf.placement("coat_normal").unwrap().channels, 0..3);
+        let raw = pack(&maps, Profile::Raw, &settings).unwrap();
+        assert_eq!(
+            raw.texture("coat_normal").unwrap().format,
+            PixelFormat::Rgb16Unorm
+        );
+        let lightweald = pack(&maps, Profile::Lightweald, &settings).unwrap();
+        assert_eq!(
+            lightweald.texture("normal").unwrap().format,
+            PixelFormat::Rg8Unorm
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn png_writes_sixteen_bit_rgb() {
+        let maps = MaterialMaps {
+            normal: Some(flat(3, &[0.6, 0.0, 0.8])),
+            ..MaterialMaps::default()
+        };
+        let settings = PackSettings {
+            sixteen_bit_normals: true,
+            ..PackSettings::default()
+        };
+        let bundle = pack(&maps, Profile::Gltf, &settings).unwrap();
+        let normal = bundle.texture("normal").unwrap();
+        let bytes = crate::png::write(normal).unwrap();
+        let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+            .read_info()
+            .unwrap();
+        let info = reader.info();
+        assert_eq!(info.color_type, png::ColorType::Rgb);
+        assert_eq!(info.bit_depth, png::BitDepth::Sixteen);
+        let mut samples = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut samples).unwrap();
+        // PNG samples are big-endian; the texture's levels little-endian.
+        let le: Vec<u8> = samples.chunks(2).flat_map(|b| [b[1], b[0]]).collect();
+        assert_eq!(le, normal.levels[0]);
     }
 }

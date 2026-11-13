@@ -10,8 +10,8 @@
 //! - every level of the texture's chain, uncompressed (no
 //!   supercompression);
 //! - the Vulkan format of its [`PixelFormat`]: `VK_FORMAT_R8_UNORM`,
-//!   `R8G8_UNORM`, `R8G8B8A8_UNORM`, `R8G8B8A8_SRGB`, `R16_UNORM` or
-//!   `R32_SFLOAT`;
+//!   `R8G8_UNORM`, `R8G8B8A8_UNORM`, `R8G8B8A8_SRGB`, `R16_UNORM`,
+//!   `R16G16B16_UNORM` or `R32_SFLOAT`;
 //! - a Basic Data Format Descriptor (KDF 1.3) with one sample per channel,
 //!   BT.709 primaries, and the sRGB or linear transfer function; in sRGB
 //!   files the alpha sample is flagged linear;
@@ -21,7 +21,8 @@
 //!   largest first.
 //!
 //! The 8-bit formats are the uncompressed formats `lightweald_texture_io`
-//! reads; the 16-bit and float formats carry data such as height.
+//! reads; the 16-bit and float formats carry data such as height and
+//! normals that 8 bits would band.
 //! Block-compressed formats are a later step.
 
 use alloc::vec::Vec;
@@ -46,6 +47,7 @@ pub const fn vk_format(format: PixelFormat) -> u32 {
         PixelFormat::Rgba8Unorm => 37,
         PixelFormat::Rgba8Srgb => 43,
         PixelFormat::R16Unorm => 70,
+        PixelFormat::Rgb16Unorm => 84,
         PixelFormat::R32Float => 100,
     }
 }
@@ -55,6 +57,15 @@ const LEVEL_INDEX_ENTRY: usize = 3 * 8;
 
 fn align(offset: usize, to: usize) -> usize {
     offset.div_ceil(to) * to
+}
+
+/// The least common multiple of two positive sizes.
+fn lcm(a: usize, b: usize) -> usize {
+    let (mut x, mut y) = (a, b);
+    while y != 0 {
+        (x, y) = (y, x % y);
+    }
+    a / x * b
 }
 
 fn put_u32(out: &mut Vec<u8>, v: u32) {
@@ -154,10 +165,7 @@ pub fn write(texture: &EncodedTexture) -> Vec<u8> {
 
     let dfd_offset = HEADER_BYTES + levels * LEVEL_INDEX_ENTRY;
     let kvd_offset = dfd_offset + dfd.len();
-    let level_alignment = match texel {
-        1 | 2 | 4 => 4,
-        _ => unreachable!("texel sizes are 1, 2 or 4 bytes"),
-    };
+    let level_alignment = lcm(texel, 4);
     // Levels are stored smallest first.
     let mut offsets = alloc::vec![0_usize; levels];
     let mut cursor = kvd_offset + kvd.len();
@@ -252,6 +260,7 @@ mod tests {
             PixelFormat::Rgba8Unorm,
             PixelFormat::Rgba8Srgb,
             PixelFormat::R16Unorm,
+            PixelFormat::Rgb16Unorm,
             PixelFormat::R32Float,
         ] {
             let tex = texture(format, 8, 3);
@@ -281,7 +290,7 @@ mod tests {
                 let entry = 80 + index * 24;
                 let (offset, length) = (u64_at(&file, entry), u64_at(&file, entry + 8));
                 assert_eq!(u64_at(&file, entry + 16), length);
-                assert_eq!(offset % 4, 0);
+                assert_eq!(offset % lcm(format.bytes_per_texel(), 4), 0);
                 assert!(offset < previous_offset, "smaller levels come first");
                 previous_offset = offset;
                 assert_eq!(&file[offset..offset + length], level.as_slice());
@@ -309,6 +318,15 @@ mod tests {
         assert_eq!(u32_at(&float, 40), 1.0_f32.to_bits(), "sampleUpper");
         let short = data_format_descriptor(PixelFormat::R16Unorm);
         assert_eq!(u32_at(&short, 40), 65535, "sampleUpper");
+        let normal = data_format_descriptor(PixelFormat::Rgb16Unorm);
+        assert_eq!(u32_at(&normal, 20), 6, "bytesPlane0");
+        assert_eq!(
+            u32_at(&normal, 28 + 2 * 16) & 0xFFFF,
+            32,
+            "B starts at bit 32"
+        );
+        assert_eq!(u32_at(&normal, 28 + 2 * 16) >> 24, 2, "blue");
+        assert_eq!(lcm(6, 4), 12);
         let linear = data_format_descriptor(PixelFormat::Rg8Unorm);
         assert_eq!((u32_at(&linear, 12) >> 16) & 0xFF, 1, "linear transfer");
         assert_eq!(u32_at(&linear, 28 + 16) & 0xFFFF, 8, "G starts at bit 8");

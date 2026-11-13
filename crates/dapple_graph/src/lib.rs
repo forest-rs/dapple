@@ -646,6 +646,11 @@ impl DappleExecutor {
             return Err(NodeError::WrongValue { expected: "params" });
         };
         let upstream = &inputs[1..];
+        // Field and sample nodes fail before they change any state.
+        #[cfg(test)]
+        if node.kind.outputs_field() {
+            self.tiles.injected_failure(node.key)?;
+        }
         let value = match (node.kind, params.as_ref()) {
             (NodeKind::Field, Params::Field(op)) => {
                 run_field(&mut node.field, &mut self.tiles.report, op, upstream)?
@@ -1150,6 +1155,8 @@ fn run_realize(
         fingerprint,
     );
     let dirty = tiles.schedule(&mut state.pending, dirty, grid.count());
+    #[cfg(test)]
+    tiles.injected_failure(node)?;
     let (raster, recomputed) = refresh(
         grid,
         &dirty,
@@ -1214,6 +1221,8 @@ fn run_normals(
         fingerprint,
     );
     let dirty = tiles.schedule(&mut state.pending, dirty, grid.count());
+    #[cfg(test)]
+    tiles.injected_failure(node)?;
     let (raster, recomputed) = refresh(
         grid,
         &dirty,
@@ -1341,6 +1350,8 @@ fn run_raster(
         Some(marked)
     };
     let dirty = tiles.schedule(&mut state.pending, dirty, grid.count());
+    #[cfg(test)]
+    tiles.injected_failure(node)?;
     let previous_output = state.output.clone();
     let previous_scalar = match previous_output.as_ref().map(|v| &v.data) {
         Some(RasterData::Scalar(r)) if same => Some(r),
@@ -1440,6 +1451,8 @@ fn run_mip(
     let marked = tiles.take_marked(&state.keys);
     let dirty: Dirty = if same { Some(marked) } else { None };
     let dirty = tiles.schedule(&mut state.pending, dirty, grid.count());
+    #[cfg(test)]
+    tiles.injected_failure(node)?;
     let image = Image::new(sw, sh, 1, edge, raster.values().to_vec()).map_err(NodeError::Mip)?;
     let previous = match state.output.as_ref().map(|v| &v.data) {
         Some(RasterData::Scalar(r)) if same => Some(r),
@@ -1545,6 +1558,8 @@ fn run_whole(
         };
         return Ok(keep(tiles, node, state, value));
     }
+    #[cfg(test)]
+    tiles.injected_failure(node)?;
     let raster = compute()?;
     debug_assert_eq!(raster.port(), port, "a whole raster keeps its node's type");
     let data = RasterData::Typed(raster);
@@ -2350,5 +2365,7 @@ impl MaterialGraph {
     }
 }
 
+#[cfg(test)]
+mod history_tests;
 #[cfg(test)]
 mod tests;

@@ -43,4 +43,7 @@ they detect changes, not tampering. Textures are PNG, the only lossless
 format glTF core reads; 16-bit normal maps stay 16-bit, which glTF allows
 for PNG.
 
+`tools/blender/dapple_export.py` builds a Blender material from a manifest,
+and checks a `material.gltf` against Blender's own glTF importer.
+
 `#![no_std]` with `alloc`; the `std` feature adds directory writing.

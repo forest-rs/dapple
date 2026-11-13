@@ -20,8 +20,9 @@ use dapple_raster::{DistanceTransform, Raster, RasterOp};
 use glam::{Vec2, Vec3};
 
 use super::{
-    CeramicBody, EdgeWear, Efflorescence, Finish, Grime, Mortar, Moss, Stone, Streaks, Wood, color,
-    fail, flag, fraction, integer, mask_map, meters, scalar_map, seed, smoothstep,
+    CeramicBody, Copper, EdgeWear, Efflorescence, Finish, Grime, Mortar, Moss, Patina, Rust, Steel,
+    Stone, Streaks, Wood, color, fail, flag, fraction, integer, mask_map, meters, scalar_map, seed,
+    smoothstep,
 };
 use crate::glazed_brick::{self, GLAZE, JOINT, Palette, Structure, glazes};
 
@@ -478,6 +479,105 @@ impl Module for Threshold {
                     .scalar("roughness", 0.3)
                     .scalar("thickness", 0.00002)
                     .scalar("peel", 0.0),
+            )?,
+        )?;
+        Ok(Outputs::new().with("material", Output::Material(m)))
+    }
+}
+
+/// Copper cladding weathered by `age`: [`Copper`], brushed as `brushing`
+/// says, under a [`Patina`] whose water follows the seams and laps as far
+/// as `wetness` says. From bright metal (`age` 0) through brown tarnish to
+/// a blue-green verdigris crust (1).
+#[derive(Copy, Clone, Debug, Default)]
+pub struct WeatheredCopper;
+
+impl Module for WeatheredCopper {
+    fn interface(&self) -> Interface {
+        Interface {
+            id: ModuleId::new("dapple_library.weathered_copper", 1),
+            doc: "copper cladding, tarnished and grown with verdigris".into(),
+            params: vec![
+                fraction("brushing", 0.3, "how deeply the copper is brushed"),
+                fraction(
+                    "age",
+                    0.5,
+                    "how far it has weathered: 0 bright, 1 verdigris",
+                ),
+                fraction("wetness", 0.6, "how much water's paths decide where"),
+                seed(),
+            ],
+            inputs: vec![],
+            outputs: material_output(),
+        }
+    }
+
+    fn build(&self, cx: &mut Context<'_>, args: &Args) -> Result<Outputs, ModuleError> {
+        let copper = take(cx.instantiate(
+            &Copper,
+            "copper",
+            Bind::new().scalar("brushing", args.scalar("brushing")),
+        )?)?;
+        let m = take(
+            cx.instantiate(
+                &Patina,
+                "patina",
+                Bind::new()
+                    .material("base", copper)
+                    .scalar("age", args.scalar("age"))
+                    .scalar("wetness", args.scalar("wetness")),
+            )?,
+        )?;
+        Ok(Outputs::new().with("material", Output::Material(m)))
+    }
+}
+
+/// Bare riveted steel rusting by `age`: [`Steel`], ground as `brushing`
+/// says and under `mill_scale`, then [`Rust`] where water stays and runs as
+/// far as `wetness` says. From fresh plate (`age` 0) through flash rust to
+/// a deep, pitted crust (1).
+#[derive(Copy, Clone, Debug, Default)]
+pub struct RustedSteel;
+
+impl Module for RustedSteel {
+    fn interface(&self) -> Interface {
+        Interface {
+            id: ModuleId::new("dapple_library.rusted_steel", 1),
+            doc: "riveted steel plate, rusting".into(),
+            params: vec![
+                fraction("brushing", 0.0, "how deeply the steel is ground"),
+                fraction("mill_scale", 0.6, "share of the plate under mill scale"),
+                fraction(
+                    "age",
+                    0.5,
+                    "how far it has rusted: 0 fresh, 1 deep and pitted",
+                ),
+                fraction("wetness", 0.6, "how much water's paths decide where"),
+                seed(),
+            ],
+            inputs: vec![],
+            outputs: material_output(),
+        }
+    }
+
+    fn build(&self, cx: &mut Context<'_>, args: &Args) -> Result<Outputs, ModuleError> {
+        let steel = take(
+            cx.instantiate(
+                &Steel,
+                "steel",
+                Bind::new()
+                    .scalar("brushing", args.scalar("brushing"))
+                    .scalar("mill_scale", args.scalar("mill_scale")),
+            )?,
+        )?;
+        let m = take(
+            cx.instantiate(
+                &Rust,
+                "rust",
+                Bind::new()
+                    .material("base", steel)
+                    .scalar("age", args.scalar("age"))
+                    .scalar("wetness", args.scalar("wetness")),
             )?,
         )?;
         Ok(Outputs::new().with("material", Output::Material(m)))

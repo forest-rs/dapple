@@ -165,6 +165,20 @@ const GOLDEN: &[(&str, u32, &str, u64)] = &[
     ),
     ("dapple_library.copper", 1, "defaults", 0xdf904f754a80358e),
     ("dapple_library.steel", 1, "defaults", 0xa6dbeb0c926ba2c3),
+    ("dapple_library.patina", 1, "defaults", 0x3eac5c0178494337),
+    ("dapple_library.rust", 1, "defaults", 0xd0f98a46b30f81f1),
+    (
+        "dapple_library.weathered_copper",
+        1,
+        "defaults",
+        0x867a28acb988541a,
+    ),
+    (
+        "dapple_library.rusted_steel",
+        1,
+        "defaults",
+        0x89d1d3d8ac613708,
+    ),
     (
         "dapple_library.packages.varnished_board",
         1,
@@ -176,6 +190,66 @@ const GOLDEN: &[(&str, u32, &str, u64)] = &[
         1,
         "preset:dark_and_worn",
         0xfd49441ffd65982e,
+    ),
+    (
+        "dapple_library.packages.weathered_copper",
+        1,
+        "defaults",
+        0x867a28acb988541a,
+    ),
+    (
+        "dapple_library.packages.weathered_copper",
+        1,
+        "preset:bright",
+        0x3d3e7568e5e49ced,
+    ),
+    (
+        "dapple_library.packages.weathered_copper",
+        1,
+        "preset:tarnished",
+        0xc909e42dca7dd5fb,
+    ),
+    (
+        "dapple_library.packages.weathered_copper",
+        1,
+        "preset:streaked",
+        0x81f99a26a997a5cc,
+    ),
+    (
+        "dapple_library.packages.weathered_copper",
+        1,
+        "preset:verdigris",
+        0xc7fa2f4eb99ab0c2,
+    ),
+    (
+        "dapple_library.packages.rusted_steel",
+        1,
+        "defaults",
+        0x89d1d3d8ac613708,
+    ),
+    (
+        "dapple_library.packages.rusted_steel",
+        1,
+        "preset:fresh",
+        0x5af086edaa52cfbb,
+    ),
+    (
+        "dapple_library.packages.rusted_steel",
+        1,
+        "preset:flash_rusted",
+        0x4c5ed4d484e806f1,
+    ),
+    (
+        "dapple_library.packages.rusted_steel",
+        1,
+        "preset:rusting",
+        0x719266f99e5e4e6d,
+    ),
+    (
+        "dapple_library.packages.rusted_steel",
+        1,
+        "preset:pitted",
+        0x7ff172e6f0bf74a5,
     ),
 ];
 

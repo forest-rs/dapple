@@ -1,0 +1,96 @@
+{
+  "format": "dapple.package",
+  "version": 1,
+  "interface": {
+    "module": { "name": "dapple_library.packages.rusted_steel", "version": 1 },
+    "doc": "riveted steel plate, as a package: bare steel under mill scale, rusting where water stays and runs",
+    "params": [
+      {
+        "name": "brushing",
+        "doc": "how deeply the steel is ground",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.0 } }
+      },
+      {
+        "name": "mill_scale",
+        "doc": "share of the plate under mill scale",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.6 } }
+      },
+      {
+        "name": "age",
+        "doc": "how far it has rusted: 0 fresh, 1 deep and pitted",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.5 } }
+      },
+      {
+        "name": "wetness",
+        "doc": "how much water's paths decide where",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.6 } }
+      }
+    ],
+    "outputs": [
+      {
+        "name": "material",
+        "doc": "the plate",
+        "type": "material",
+        "semantics": {
+          "channels": ["base_color", "base_metalness", "specular_roughness", "height"],
+          "tiling": "both"
+        }
+      }
+    ]
+  },
+  "requires": {
+    "capabilities": [
+      { "name": "dapple.graph", "version": 1 },
+      { "name": "dapple.semantics", "version": 1 }
+    ],
+    "modules": [
+      { "name": "dapple_library.steel", "version": 1 },
+      { "name": "dapple_library.rust", "version": 1 }
+    ]
+  },
+  "presets": [
+    {
+      "name": "fresh",
+      "doc": "new plate, mostly under its mill scale",
+      "values": { "mill_scale": { "scalar": 0.8 }, "age": { "scalar": 0.0 } }
+    },
+    {
+      "name": "flash_rusted",
+      "doc": "ground steel left out a few wet weeks: an orange haze, heaviest where water sat",
+      "values": {
+        "brushing": { "scalar": 0.5 },
+        "mill_scale": { "scalar": 0.15 },
+        "age": { "scalar": 0.16 }
+      }
+    },
+    {
+      "name": "rusting",
+      "doc": "years out: rust through in the wet places, flash rust elsewhere, runs below the laps",
+      "values": { "age": { "scalar": 0.5 }, "wetness": { "scalar": 0.75 } }
+    },
+    {
+      "name": "pitted",
+      "doc": "derelict: a deep, pitted crust of rust over everything",
+      "values": { "age": { "scalar": 1.0 } }
+    }
+  ],
+  "body": {
+    "steps": [
+      {
+        "name": "steel",
+        "module": { "name": "dapple_library.steel", "version": 1 },
+        "params": {
+          "brushing": { "param": "brushing" },
+          "mill_scale": { "param": "mill_scale" }
+        }
+      },
+      {
+        "name": "rust",
+        "module": { "name": "dapple_library.rust", "version": 1 },
+        "params": { "age": { "param": "age" }, "wetness": { "param": "wetness" } },
+        "inputs": { "base": { "output": { "step": "steel", "output": "material" } } }
+      }
+    ],
+    "outputs": { "material": { "step": "rust", "output": "material" } }
+  }
+}

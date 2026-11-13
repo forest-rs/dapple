@@ -24,6 +24,8 @@
 //! | [`AshlarLimestone`], [`RubbleWall`], [`FlintWall`], [`RomanBrick`], [`Marble`], [`TerracottaTile`] | Masonry on a unit layout, the host's or their own ([`crate::masonry`]). |
 //! | [`Copper`] | Copper cladding: standing seams and cross laps, brushed or rolled. |
 //! | [`Steel`] | Riveted mild-steel plate, ground or under mill scale. |
+//! | [`Patina`] | Copper's tarnish, then verdigris where water stays and runs. |
+//! | [`Rust`] | Rust on bare steel: flash rust, deep pitted rust, and its runoff. |
 //!
 //! The bark and masonry modules' colors are calibrated against measured
 //! reflectance, and the metals' F0 against tabulated reflectance checked
@@ -32,8 +34,10 @@
 //! Assets compose them without copying their graphs:
 //! [`GlazedBrickWall`] (ceramic body, glaze finish, mortar, weathering),
 //! [`StoneSill`] (a glazed wall, a stone sill on a mortar bed, weathering),
-//! [`VarnishedBoard`] (wood, varnish finish, grime) and [`Threshold`]
-//! (stone, wood and an oil finish).
+//! [`VarnishedBoard`] (wood, varnish finish, grime), [`Threshold`]
+//! (stone, wood and an oil finish), [`WeatheredCopper`] (copper and its
+//! patina) and [`RustedSteel`] (steel and
+//! rust).
 //!
 //! Modules build on whatever grid their context has; on a wrapping grid
 //! their noise uses whole lattice cells per period, so they tile.
@@ -56,6 +60,7 @@ mod assets;
 mod bark;
 pub mod calibration;
 mod ceramic;
+mod corrosion;
 mod finish;
 mod masonry;
 mod metal;
@@ -65,9 +70,12 @@ mod wear;
 mod weathering;
 mod wood;
 
-pub use assets::{GlazedBrickWall, StoneSill, Threshold, VarnishedBoard};
+pub use assets::{
+    GlazedBrickWall, RustedSteel, StoneSill, Threshold, VarnishedBoard, WeatheredCopper,
+};
 pub use bark::{Beech, Birch, ScotsPine, Spruce};
 pub use ceramic::CeramicBody;
+pub use corrosion::{Patina, Rust};
 pub use finish::Finish;
 pub use masonry::{AshlarLimestone, FlintWall, Marble, RomanBrick, RubbleWall, TerracottaTile};
 pub use metal::{Copper, Steel};

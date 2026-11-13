@@ -46,6 +46,11 @@ pub(crate) fn node(kind: NodeKind, key: u32) -> ScopeGuard {
 
 /// Adds the finished report of a run to the counters, one add per field.
 pub(crate) fn report(report: &TileReport) {
+    // One level check for all eight, so a run that nobody listens to pays for
+    // one, not eight.
+    if !footfall::max_level().captures_counters() {
+        return;
+    }
     // Destructured so that a new field cannot be forgotten here.
     let TileReport {
         tiles_recomputed,

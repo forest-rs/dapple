@@ -67,6 +67,8 @@ pub const BARK: u32 = 9;
 pub const FLINT: u32 = 10;
 /// Surface-material identifier of marble.
 pub const MARBLE: u32 = 11;
+/// Surface-material identifier of bare metal (and mill scale).
+pub const METAL: u32 = 12;
 
 /// Bricks per course and courses per 1 m tile: 250 × 71 mm courses
 /// including the joints.

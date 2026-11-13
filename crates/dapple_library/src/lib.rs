@@ -24,6 +24,8 @@
 //!   rubble, flint, Roman brick, marble, roof tile) laid on a unit layout,
 //!   the host's or its own ([`masonry`]), all calibrated against measured
 //!   reflectance ([`modules::calibration`]).
+//! - [`modules`] also holds metals: copper cladding and riveted steel
+//!   plate, calibrated to tabulated F0.
 //! - [`packages`]: those modules offered to portable packages
 //!   (`dapple_package`), and the varnished board written as one.
 

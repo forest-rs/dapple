@@ -163,6 +163,8 @@ const GOLDEN: &[(&str, u32, &str, u64)] = &[
         "defaults",
         0x445412d937b81948,
     ),
+    ("dapple_library.copper", 1, "defaults", 0xdf904f754a80358e),
+    ("dapple_library.steel", 1, "defaults", 0xa6dbeb0c926ba2c3),
     (
         "dapple_library.packages.varnished_board",
         1,

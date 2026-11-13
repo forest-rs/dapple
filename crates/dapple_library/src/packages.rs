@@ -15,9 +15,9 @@ use alloc::sync::Arc;
 use dapple_package::Registry;
 
 use crate::modules::{
-    AshlarLimestone, Beech, Birch, ByExample, CeramicBody, EdgeWear, Efflorescence, Finish,
+    AshlarLimestone, Beech, Birch, ByExample, CeramicBody, Copper, EdgeWear, Efflorescence, Finish,
     FlintWall, GlazedBrickWall, Grime, Marble, Mortar, Moss, RomanBrick, RubbleWall, ScotsPine,
-    Spruce, Stone, StoneSill, Streaks, TerracottaTile, Threshold, VarnishedBoard, Wood,
+    Spruce, Steel, Stone, StoneSill, Streaks, TerracottaTile, Threshold, VarnishedBoard, Wood,
 };
 
 /// The varnished board's package source.
@@ -57,4 +57,6 @@ pub fn registry() -> Registry {
         .with(Arc::new(RomanBrick))
         .with(Arc::new(Marble))
         .with(Arc::new(TerracottaTile))
+        .with(Arc::new(Copper))
+        .with(Arc::new(Steel))
 }

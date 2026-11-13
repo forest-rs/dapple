@@ -1,0 +1,23 @@
+[package]
+name = "weathered_metal"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bakes dapple_library's weathered metals at their package presets and writes their maps"
+publish = false
+
+[dependencies]
+dapple_encode.workspace = true
+dapple_export = { features = ["std"], workspace = true }
+dapple_field.workspace = true
+dapple_lab.workspace = true
+dapple_library.workspace = true
+dapple_material.workspace = true
+dapple_package.workspace = true
+glam.workspace = true
+png.workspace = true
+
+[lints]
+workspace = true

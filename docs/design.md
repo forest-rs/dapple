@@ -308,9 +308,8 @@ come.
 
 ### On `execution_graph`
 
-A compiled material becomes an `ExecutionGraph<DappleExecutor>`, using the
-executor generalization (`Executor`, `NodeAccess`) that is landing in the
-execution repo:
+A compiled material becomes an `ExecutionGraph<DappleExecutor>`, using
+`execution_graph`'s executor seam (`Executor`, `NodeAccess`):
 
 - **Nodes:** each material node is one execution node. Its body is a dapple op
   plus its parameters.

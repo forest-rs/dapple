@@ -372,11 +372,11 @@ dependencies = [
 
 [[package]]
 name = "execution_graph"
-version = "0.0.1"
-source = "git+https://github.com/forest-rs/execution?rev=ce961177dc05a7d0742b88c46c33cb5b49a8fdc1#ce961177dc05a7d0742b88c46c33cb5b49a8fdc1"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "261f53755a37ef53f96631714e6c3ddccbfaf361802f4147880a914aa80df4a4"
 dependencies = [
  "hashbrown",
- "invalidation",
 ]
 
 [[package]]

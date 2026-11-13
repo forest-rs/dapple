@@ -1069,6 +1069,11 @@ meaning.
     weathering needs raster passes anyway; modules stay resolution
     independent until instantiated on a grid. Material operations run
     whole-raster and do not yet join `dapple_graph`'s tile invalidation.
+    Reuse is per module instance instead: a context with a caller-owned
+    `InstanceCache` returns an instance's kept outputs, and replays its
+    diagnostics, when its path, module and exact arguments (grid, inputs'
+    content digests, resources, seed) match a kept result, so an edit
+    re-runs only the instances whose arguments changed, bit for bit.
   - **Four operations, four contracts** (`dapple_material::ops`), each
     returning a `Report` of approximations counted on the texels where
     they made a difference:

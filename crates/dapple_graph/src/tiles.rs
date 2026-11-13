@@ -161,6 +161,9 @@ pub(crate) struct Tiles {
     remaining: Option<u64>,
     /// Nodes left with pending tiles by this run.
     pub(crate) pending_nodes: Vec<u32>,
+    /// Tile spaces of nodes whose computation fails, for tests of recovery.
+    #[cfg(test)]
+    pub(crate) failing: alloc::collections::BTreeSet<u32>,
 }
 
 impl Tiles {
@@ -173,6 +176,21 @@ impl Tiles {
 
     pub(crate) const fn size(&self) -> u32 {
         self.size
+    }
+
+    /// Fails when a test asked `node`'s computation to fail. Callers check
+    /// where the node's real computation can fail: a tile node after it has
+    /// taken its marks and scheduled its tiles, others before they change
+    /// any state.
+    #[cfg(test)]
+    pub(crate) fn injected_failure(&self, node: u32) -> Result<(), crate::NodeError> {
+        if self.failing.contains(&node) {
+            Err(crate::NodeError::WrongValue {
+                expected: "no injected failure",
+            })
+        } else {
+            Ok(())
+        }
     }
 
     /// Starts a run: a fresh report and budget.

@@ -253,6 +253,56 @@ impl Module for Grime {
     }
 }
 
+/// How strongly each texel is a ledge that sheds water: the surface faces
+/// up (its normal's `+y`, the domain's up) at the scale of units, sills and
+/// laps, not of tooling or grain; in `[0, 1]`.
+pub(crate) fn ledges(base: &Material) -> Result<Raster, ModuleError> {
+    let smooth = GaussianBlur { sigma: 0.003 }.apply(&base.height()?)?;
+    let normals = HeightToNormal { scale: 1.0 }.apply(&smooth)?;
+    Ok(base.grid().raster(
+        normals
+            .values()
+            .iter()
+            .map(|n| ((n[1] - 0.12) * 5.0).clamp(0.0, 1.0))
+            .collect(),
+    )?)
+}
+
+/// Water's trails from `sources`, a mask: each runs `length` down the face
+/// (domain `−y`) and fades by `1/e`, some more strongly than others in
+/// vertical runs, carried along a downward flow that wanders sideways
+/// ([`Advect`]) so trails bend and soften. A trail is as strong as its
+/// source, so what runs off is what was there to run off; the seeds are
+/// `args`' `runs` and `wander`.
+pub(crate) fn runoff(
+    grid: Grid,
+    args: &Args,
+    sources: &Raster,
+    length: f32,
+) -> Result<Raster, ModuleError> {
+    let trails = Streak {
+        flow: Flow::NegativeY,
+        length,
+    }
+    .apply(sources)?;
+    let runs = realize_scalar(grid, |b, d| fbm(b, d, [70.0, 2.0], args.seed("runs"), 3))?;
+    let score: Vec<f32> = trails
+        .values()
+        .iter()
+        .zip(runs.values())
+        .map(|(t, r)| t * (0.35 + 0.65 * super::smoothstep(-0.4, 0.5, *r)))
+        .collect();
+    // Water does not run plumb: carry the trails along a flow that runs
+    // down the face and wanders sideways, so they bend and soften.
+    let wander = realize_scalar(grid, |b, d| fbm(b, d, [12.0, 6.0], args.seed("wander"), 3))?;
+    let flow = grid.raster(wander.values().iter().map(|w| [0.6 * w, -1.0]).collect())?;
+    Ok(Advect {
+        step: 2.0 * grid.texel.y,
+        steps: 6,
+    }
+    .apply(&grid.raster(score)?, &flow)?)
+}
+
 /// Grime washed down a face from its ledges: upward-facing surfaces (the
 /// lower lips of joints, a sill's drip) shed trails that run `length` down
 /// the face and fade, some ledges more than others, in vertical runs,
@@ -296,40 +346,16 @@ impl Module for Streaks {
     fn build(&self, cx: &mut Context<'_>, args: &Args) -> Result<Outputs, ModuleError> {
         let grid = cx.grid();
         let base = args.material("base").ok_or_else(|| fail("base"))?;
-        // Ledges at the scale of units and sills, not of tooling or grain.
-        let smooth = GaussianBlur { sigma: 0.003 }.apply(&base.height()?)?;
-        let normals = HeightToNormal { scale: 1.0 }.apply(&smooth)?;
+        let ledges = ledges(base)?;
         let gate = realize_scalar(grid, |b, d| fbm(b, d, [7.0, 3.0], args.seed("gate"), 3))?;
         let extra = args.map("sources");
         let mut sources = Vec::with_capacity(grid.len());
-        for (i, n) in normals.values().iter().enumerate() {
-            // Upward-facing: the normal's +y (the domain's up).
-            let ledge = ((n[1] - 0.12) * 5.0).clamp(0.0, 1.0);
+        for (i, &ledge) in ledges.values().iter().enumerate() {
             let shed = super::smoothstep(0.15, 0.45, gate.values()[i]);
             let more = extra.map_or(0.0, |m| m.value(i).component(0).unwrap_or(0.0));
             sources.push((ledge * shed).max(more));
         }
-        let trails = Streak {
-            flow: Flow::NegativeY,
-            length: args.scalar("length"),
-        }
-        .apply(&grid.raster(sources)?)?;
-        let runs = realize_scalar(grid, |b, d| fbm(b, d, [70.0, 2.0], args.seed("runs"), 3))?;
-        let score: Vec<f32> = trails
-            .values()
-            .iter()
-            .zip(runs.values())
-            .map(|(t, r)| t * (0.35 + 0.65 * super::smoothstep(-0.4, 0.5, *r)))
-            .collect();
-        // Water does not run plumb: carry the trails along a flow that runs
-        // down the face and wanders sideways, so they bend and soften.
-        let wander = realize_scalar(grid, |b, d| fbm(b, d, [12.0, 6.0], args.seed("wander"), 3))?;
-        let flow = grid.raster(wander.values().iter().map(|w| [0.6 * w, -1.0]).collect())?;
-        let score = Advect {
-            step: 2.0 * grid.texel.y,
-            steps: 6,
-        }
-        .apply(&grid.raster(score)?, &flow)?;
+        let score = runoff(grid, args, &grid.raster(sources)?, args.scalar("length"))?;
         let covered = coverage(&score, args.scalar("coverage"), 0.1)?;
         let covered = scaled(grid, &covered, args.scalar("strength"))?;
         let grime = deposit_material(grid, args, args.color("color"), 0.85, DIRT)?;

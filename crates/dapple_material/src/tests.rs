@@ -10,7 +10,7 @@
     reason = "small test values"
 )]
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -24,9 +24,9 @@ use dapple_raster::typed::ReductionPolicy;
 use glam::{Vec2, Vec3};
 
 use crate::module::{
-    Args, Bind, Context, Input, InputDecl, InputKind, Interface, Module, ModuleError,
-    ModuleErrorKind, ModuleId, Output, OutputDecl, OutputKind, Outputs, ParamDecl, ParamKind,
-    ParamValue, Unit,
+    Args, Bind, Context, Diagnostics, Input, InputDecl, InputKind, InstanceCache, Interface,
+    Module, ModuleError, ModuleErrorKind, ModuleId, Output, OutputDecl, OutputKind, Outputs,
+    ParamDecl, ParamKind, ParamValue, Unit,
 };
 use crate::ops::{
     self, Coating, Deposit, Detail, Layer, MaterialTransform, Transition, reoriented,
@@ -814,4 +814,251 @@ fn a_thin_deposit_mattes_the_gloss_beneath() {
         coat_rough(&deposit(4.0)) > 0.85,
         "a quarter's haze mattes it"
     );
+}
+
+/// Paints a base at its defaults and a top coat of the given color: an
+/// edit of `top` changes one nested instance's arguments, not the other's.
+struct Layered;
+
+impl Module for Layered {
+    fn interface(&self) -> Interface {
+        Interface {
+            id: ModuleId::new("test.layered", 1),
+            doc: "a base and a top coat".into(),
+            params: vec![ParamDecl {
+                name: "top".into(),
+                kind: ParamKind::Color,
+                default: ParamValue::Color(Vec3::splat(0.25)),
+                doc: "the top coat's color".into(),
+            }],
+            inputs: vec![],
+            outputs: vec![],
+        }
+    }
+
+    fn build(&self, cx: &mut Context<'_>, args: &Args) -> Result<Outputs, ModuleError> {
+        let mut base = cx.instantiate(&Paint, "base", Bind::new())?;
+        let mut top =
+            cx.instantiate(&Paint, "top", Bind::new().color("color", args.color("top")))?;
+        Ok(Outputs::new()
+            .with(
+                "base",
+                Output::Material(base.take_material("material").unwrap()),
+            )
+            .with(
+                "top",
+                Output::Material(top.take_material("material").unwrap()),
+            ))
+    }
+}
+
+/// Names its own exemplar for a nested paint rather than taking one as an
+/// input, so the exemplar is not among its arguments.
+struct Named;
+
+impl Module for Named {
+    fn interface(&self) -> Interface {
+        Interface {
+            id: ModuleId::new("test.named", 1),
+            doc: "paint tinted by a fixed exemplar".into(),
+            params: vec![],
+            inputs: vec![],
+            outputs: vec![],
+        }
+    }
+
+    fn build(&self, cx: &mut Context<'_>, _args: &Args) -> Result<Outputs, ModuleError> {
+        let tinted = Bind::new().input("exemplar", Input::Resource(ResourceRef("tint.png".into())));
+        cx.instantiate(&Paint, "paint", tinted)
+    }
+}
+
+/// Fails when asked to, after a nested instance has succeeded.
+struct Fails;
+
+impl Module for Fails {
+    fn interface(&self) -> Interface {
+        Interface {
+            id: ModuleId::new("test.fails", 1),
+            doc: "fails on request".into(),
+            params: vec![ParamDecl {
+                name: "fail".into(),
+                kind: ParamKind::Flag,
+                default: ParamValue::Flag(true),
+                doc: "whether to fail".into(),
+            }],
+            inputs: vec![],
+            outputs: vec![],
+        }
+    }
+
+    fn build(&self, cx: &mut Context<'_>, args: &Args) -> Result<Outputs, ModuleError> {
+        let out = cx.instantiate(&Paint, "paint", Bind::new())?;
+        if args.flag("fail") {
+            return Err(ModuleError::body(ModuleErrorKind::Body("asked to fail")));
+        }
+        Ok(out)
+    }
+}
+
+/// A host resolving `tint.png` to a flat image of `0`, identified by it.
+struct Tint(f32);
+
+impl ResourceHost for Tint {
+    fn resolve(&self, reference: &ResourceRef) -> Result<Resolved, ResourceError> {
+        if reference.0 != "tint.png" {
+            return Err(ResourceError::NotFound(reference.clone()));
+        }
+        let level = ImageLevel::new(2, 2, Vec2::splat(0.5), vec![self.0; 4]).unwrap();
+        let content = Fingerprint(u128::from(self.0.to_bits()));
+        let image = SampleImage::typed(
+            PortType::Scalar,
+            SamplePolicy::Linear,
+            Domain::periodic(1, 1).unwrap(),
+            Vec2::ZERO,
+            vec![level],
+            content,
+        )
+        .unwrap();
+        Ok(Resolved {
+            content,
+            image,
+            mips: ReductionPolicy::Average,
+        })
+    }
+}
+
+/// Builds `module` with `bind` on `grid`, with `cache` when given.
+fn build_with(
+    module: &dyn Module,
+    bind: Bind,
+    host: &dyn ResourceHost,
+    cache: Option<&mut InstanceCache>,
+) -> (Result<Outputs, ModuleError>, Diagnostics) {
+    let mut cx = Context::new(grid(), host);
+    if let Some(cache) = cache {
+        cx = cx.with_cache(cache);
+    }
+    let out = cx.instantiate(module, "wall", bind);
+    (out, cx.into_diagnostics())
+}
+
+#[test]
+fn cached_instances_return_the_same_bits_and_diagnostics() {
+    let mut cache = InstanceCache::new(usize::MAX);
+    let plain = build_with(&Layered, Bind::new(), &Host, None);
+    let cold = build_with(&Layered, Bind::new(), &Host, Some(&mut cache));
+    assert_eq!(cold, plain, "a cold cache changes nothing");
+    let s = cache.stats();
+    assert_eq!((s.hits, s.misses, s.stores, s.entries), (0, 3, 3, 3));
+    let warm = build_with(&Layered, Bind::new(), &Host, Some(&mut cache));
+    assert_eq!(warm, plain, "a hit replays the outputs and diagnostics");
+    assert_eq!(cache.stats().hits, 1, "the outer instance alone is asked");
+
+    // An edit of the top coat runs the outer instance and the top coat
+    // again; the base, whose arguments did not change, is reused.
+    let edited = Bind::new().color("top", Vec3::new(0.1, 0.2, 0.3));
+    let plain = build_with(&Layered, edited.clone(), &Host, None);
+    let cached = build_with(&Layered, edited, &Host, Some(&mut cache));
+    assert_eq!(cached, plain);
+    let s = cache.stats();
+    assert_eq!((s.hits, s.misses), (2, 5));
+    let paint = s
+        .modules
+        .iter()
+        .find(|m| m.module == ModuleId::new("test.paint", 1))
+        .unwrap();
+    assert_eq!((paint.hits, paint.misses), (1, 3));
+    assert!(
+        s.to_string().contains("test.paint@1: 1 hits, 3 misses"),
+        "{s}"
+    );
+    assert!(s.bytes > 0 && s.bytes <= s.budget);
+
+    // Another grid, or the same module at another path, is another result.
+    let mut cx = Context::new(Grid { width: 4, ..grid() }, &Host).with_cache(&mut cache);
+    cx.instantiate(&Layered, "wall", Bind::new()).unwrap();
+    cx.instantiate(&Layered, "other", Bind::new()).unwrap();
+    assert_eq!(
+        cache.stats().hits,
+        2,
+        "nothing reused across grids or paths"
+    );
+}
+
+#[test]
+fn the_budget_evicts_the_least_recently_used_results() {
+    let paint = |cache: &mut InstanceCache, c: f32| {
+        let bind = Bind::new().color("color", Vec3::splat(c));
+        build_with(&Paint, bind, &Host, Some(cache)).0.unwrap()
+    };
+    let mut probe = InstanceCache::new(usize::MAX);
+    paint(&mut probe, 0.1);
+    let one = probe.stats().bytes;
+    assert!(one > 0);
+
+    // Room for two results: a third evicts the least recently used.
+    let mut cache = InstanceCache::new(2 * one);
+    paint(&mut cache, 0.1);
+    paint(&mut cache, 0.2);
+    paint(&mut cache, 0.1); // 0.1 is now the most recently used
+    paint(&mut cache, 0.3); // so 0.2 goes
+    let s = cache.stats();
+    assert_eq!((s.entries, s.evictions, s.hits), (2, 1, 1));
+    paint(&mut cache, 0.1);
+    assert_eq!(cache.stats().hits, 2, "0.1 was kept");
+    paint(&mut cache, 0.2);
+    assert_eq!(cache.stats().hits, 2, "0.2 was evicted");
+
+    // A result larger than the budget is not kept; lowering the budget
+    // evicts down to it.
+    let mut tiny = InstanceCache::new(one - 1);
+    paint(&mut tiny, 0.1);
+    let s = tiny.stats();
+    assert_eq!((s.entries, s.rejected, s.bytes), (0, 1, 0));
+    cache.set_budget(one);
+    let s = cache.stats();
+    assert_eq!((s.entries, s.evictions), (1, 3));
+    assert!(s.bytes <= one);
+    cache.clear();
+    assert!(cache.is_empty() && cache.stats().bytes == 0);
+}
+
+#[test]
+fn failed_instances_are_not_kept() {
+    let mut cache = InstanceCache::new(usize::MAX);
+    let plain = build_with(&Fails, Bind::new(), &Host, None);
+    assert!(plain.0.is_err());
+    for _ in 0..2 {
+        let cached = build_with(&Fails, Bind::new(), &Host, Some(&mut cache));
+        assert_eq!(cached, plain, "the same error, the same diagnostics");
+    }
+    let s = cache.stats();
+    // The nested paint succeeded and was kept; the failure never was.
+    assert_eq!((s.stores, s.entries, s.hits, s.misses), (1, 1, 1, 3));
+}
+
+#[test]
+fn resources_resolved_beneath_a_kept_result_are_checked() {
+    let mut cache = InstanceCache::new(usize::MAX);
+    let bright = build_with(&Named, Bind::new(), &Tint(0.5), Some(&mut cache));
+    assert_eq!(bright, build_with(&Named, Bind::new(), &Tint(0.5), None));
+    assert_eq!(
+        build_with(&Named, Bind::new(), &Tint(0.5), Some(&mut cache)),
+        bright
+    );
+    assert_eq!(cache.stats().hits, 1);
+    // The exemplar is not one of `Named`'s arguments, so its key is the
+    // same; what it resolved to beneath is not.
+    let dark = build_with(&Named, Bind::new(), &Tint(0.25), Some(&mut cache));
+    assert_eq!(dark, build_with(&Named, Bind::new(), &Tint(0.25), None));
+    assert_ne!(dark.0, bright.0);
+    let s = cache.stats();
+    assert_eq!((s.hits, s.invalidated), (1, 1));
+    // A resource the instance takes itself is in its key.
+    let tinted = || Bind::new().input("exemplar", Input::Resource(ResourceRef("tint.png".into())));
+    let a = build_with(&Paint, tinted(), &Tint(0.5), Some(&mut cache));
+    let b = build_with(&Paint, tinted(), &Tint(0.25), Some(&mut cache));
+    assert_eq!(b, build_with(&Paint, tinted(), &Tint(0.25), None));
+    assert_ne!(a.0, b.0);
 }

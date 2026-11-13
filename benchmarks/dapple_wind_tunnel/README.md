@@ -105,3 +105,17 @@ iteration is a real edit, and times the edit and the run together.
   budget of four tiles, the work a caller with a frame budget pays per run.
 - `graph/budgeted_converge/<size>`: the same edit, run until the budget leaves
   nothing pending.
+
+## `material`
+
+The material layer on two real library modules: `varnished_board` (oak, a
+varnish finish and grime, an asset composing several modules) and
+`roman_brick` (masonry on a running-bond layout), on a wrapping 256 by 256
+grid with default parameters. Reported as texels per second.
+
+- `material/instantiate/<module>`: `Context::instantiate`, building the
+  material from nothing.
+- `material/lower_maps/<module>`: `dapple_material::lower::maps`, the
+  material's channels as images for packing.
+- `material/pack_gltf/<module>`: `dapple_encode::pack` of those maps for the
+  glTF profile, with mip chains.

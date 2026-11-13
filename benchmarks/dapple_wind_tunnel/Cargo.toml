@@ -20,6 +20,7 @@ dapple_graph.workspace = true
 dapple_material.workspace = true
 dapple_raster.workspace = true
 execution_graph.workspace = true
+footfall = { features = ["runtime"], workspace = true }
 
 [lib]
 # The library only holds shared fixtures; keeping it out of `cargo bench`
@@ -36,6 +37,10 @@ harness = false
 
 [[bench]]
 name = "graph"
+harness = false
+
+[[bench]]
+name = "graph_footfall"
 harness = false
 
 [[bench]]

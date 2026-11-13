@@ -261,18 +261,22 @@ fn images(id: &str, recipe: &Recipe) -> Result<MaterialMaps, BakeError> {
             material: id.into(),
             role: output.role.clone(),
         };
-        let (slot, expected) = match output.role.as_str() {
-            "base_color" => (&mut maps.base_color, 3),
-            "opacity" => (&mut maps.opacity, 1),
-            "normal" => (&mut maps.normal, 3),
-            "specular_roughness" => (&mut maps.specular_roughness, 1),
-            "base_metalness" => (&mut maps.base_metalness, 1),
-            "occlusion" => (&mut maps.occlusion, 1),
-            "anisotropy_direction" => (&mut maps.anisotropy_direction, 2),
-            "specular_roughness_anisotropy" => (&mut maps.specular_roughness_anisotropy, 1),
-            "subsurface_weight" => (&mut maps.subsurface_weight, 1),
-            "subsurface_color" => (&mut maps.subsurface_color, 3),
-            "transmission_weight" => (&mut maps.transmission_weight, 1),
+        // The role's channel count, and where its image goes.
+        type Set = fn(&mut MaterialMaps, Image);
+        let (expected, set): (usize, Set) = match output.role.as_str() {
+            "base_color" => (3, |m, i| m.base_color = Some(i.into())),
+            "opacity" => (1, |m, i| m.opacity = Some(i.into())),
+            "normal" => (3, |m, i| m.normal = Some(i)),
+            "specular_roughness" => (1, |m, i| m.specular_roughness = Some(i.into())),
+            "base_metalness" => (1, |m, i| m.base_metalness = Some(i.into())),
+            "occlusion" => (1, |m, i| m.occlusion = Some(i.into())),
+            "anisotropy_direction" => (2, |m, i| m.anisotropy_direction = Some(i.into())),
+            "specular_roughness_anisotropy" => (1, |m, i| {
+                m.specular_roughness_anisotropy = Some(i.into());
+            }),
+            "subsurface_weight" => (1, |m, i| m.subsurface_weight = Some(i.into())),
+            "subsurface_color" => (3, |m, i| m.subsurface_color = Some(i.into())),
+            "transmission_weight" => (1, |m, i| m.transmission_weight = Some(i.into())),
             _ => {
                 return Err(BakeError::UnknownRole {
                     material: id.into(),
@@ -318,7 +322,8 @@ fn images(id: &str, recipe: &Recipe) -> Result<MaterialMaps, BakeError> {
                 values.extend_from_slice(&source.values()[i * c..(i + 1) * c]);
             }
         }
-        *slot = Some(
+        set(
+            &mut maps,
             Image::new(
                 first.width(),
                 first.height(),

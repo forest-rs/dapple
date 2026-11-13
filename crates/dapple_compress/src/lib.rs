@@ -271,9 +271,9 @@ mod tests {
         }
         let map = |c, v| Map::new(n, n, c, Edge::Wrap, v).unwrap();
         MaterialMaps {
-            base_color: Some(map(3, color)),
+            base_color: Some(map(3, color).into()),
             normal: Some(map(3, normal)),
-            specular_roughness: Some(map(1, rough)),
+            specular_roughness: Some(map(1, rough).into()),
             ..MaterialMaps::default()
         }
     }
@@ -345,7 +345,7 @@ mod tests {
     fn rejects_what_pools_cannot_hold() {
         let odd = Map::new(12, 8, 3, Edge::Clamp, vec![0.5; 12 * 8 * 3]).unwrap();
         let maps = MaterialMaps {
-            base_color: Some(odd),
+            base_color: Some(odd.into()),
             ..MaterialMaps::default()
         };
         let bundle = pack(&maps, Profile::Lightweald, &PackSettings::default()).unwrap();
@@ -356,7 +356,7 @@ mod tests {
         ));
         let tiny = Map::new(2, 2, 3, Edge::Clamp, vec![0.5; 12]).unwrap();
         let maps = MaterialMaps {
-            base_color: Some(tiny),
+            base_color: Some(tiny.into()),
             ..MaterialMaps::default()
         };
         let bundle = pack(&maps, Profile::Lightweald, &PackSettings::default()).unwrap();

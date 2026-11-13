@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use dapple_encode::{
-    Edge, Filter, Image, PackSettings, PixelFormat, Profile, data_mips, encode_data, pack,
+    Edge, Filter, Image, Input, PackSettings, PixelFormat, Profile, data_mips, encode_data, pack,
     quantize_unorm16,
 };
 use dapple_library::packages::{VARNISHED_BOARD, registry};
@@ -74,19 +74,17 @@ fn write_maps(dir: &Path, material: &Material) -> Result<()> {
     // glTF has no coat tint or independent coat normal. Carry both in
     // sidecar maps, using the same color and normal conventions as above.
     let grid = material.grid();
-    let tint = maps.coat_color.as_ref().ok_or("missing coat tint")?;
-    let tint = Image::new(
-        grid.width,
-        grid.height,
-        4,
-        grid.edge,
-        tint.values()
+    let tint = match maps.coat_color.as_ref().ok_or("missing coat tint")? {
+        Input::Map(tint) => tint
+            .values()
             .as_chunks::<3>()
             .0
             .iter()
             .flat_map(|c| [c[0], c[1], c[2], 1.0])
             .collect(),
-    )?;
+        Input::Constant(c) => [c[0], c[1], c[2], 1.0].repeat(grid.len()),
+    };
+    let tint = Image::new(grid.width, grid.height, 4, grid.edge, tint)?;
     let tint = encode_data(
         "coat_color",
         &data_mips(&tint, Filter::Box),

@@ -373,10 +373,10 @@ fn bark_set(
         .collect();
     let image = |channels, values| Image::new(SIZE, SIZE, channels, edge, values);
     let maps = MaterialMaps {
-        base_color: Some(image(3, base_color)?),
+        base_color: Some(image(3, base_color)?.into()),
         normal: Some(Image::from(normals)),
-        specular_roughness: Some(image(1, roughness)?),
-        occlusion: Some(Image::from(ao)),
+        specular_roughness: Some(image(1, roughness)?.into()),
+        occlusion: Some(Image::from(ao).into()),
         ..MaterialMaps::default()
     };
     let settings = PackSettings {

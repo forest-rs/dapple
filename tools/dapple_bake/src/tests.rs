@@ -83,10 +83,8 @@ fn bakes_pack_each_profile_and_check_roles() {
         |i: usize| -> Vec<&str> { baked.bundles[i].1.textures.iter().map(|t| t.name).collect() };
     // Normal variance widens roughness, so normals bring an ORM texture.
     assert_eq!(names(0), ["base_color", "normal", "orm"]);
-    assert_eq!(
-        names(1),
-        ["base_color", "opacity", "normal", "specular_roughness"]
-    );
+    // Raw writes one texture per map: no base color was given.
+    assert_eq!(names(1), ["opacity", "normal", "specular_roughness"]);
     assert!(!baked.bundles[0].1.report.coverage.is_empty());
 
     let mut unknown = small();

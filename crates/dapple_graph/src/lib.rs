@@ -141,7 +141,9 @@ use dapple_field::raster::Region;
 use dapple_field::{
     Domain, DomainError, ImageLevel, NormalFrame, PortType, SampleImage, SamplePolicy,
 };
-use dapple_raster::typed::{ReductionPolicy, Storage, TypedError, TypedRaster, realize_value};
+use dapple_raster::typed::{
+    ReductionPolicy, Storage, TypedError, TypedRaster, level_size, realize_value,
+};
 use dapple_raster::{
     AmbientOcclusion, DistanceTransform, Edge, GaussianBlur, HeightToNormal, Morphology,
     MorphologyOp, Raster, RasterError, RasterOp, Realization, TexelRect, realize, realize_into,
@@ -151,9 +153,13 @@ use execution_graph::{ExecutionGraph, Executor, GraphError, NodeAccess, NodeId, 
 use glam::Vec2;
 use invalidation::intern::InternId;
 
+mod changes;
 mod recipe;
 mod tiles;
 
+use changes::{
+    Layout, Reads, TileJob, TileState, change_since, refresh, repeats, run_tiles, version, wire,
+};
 pub use recipe::{
     NodeFingerprint, RECIPE_VERSION, Recipe, RecipeError, RecipeNode, RecipeOutput, Step,
 };
@@ -237,6 +243,20 @@ pub enum RasterData {
 }
 
 impl RasterData {
+    const fn scalar(&self) -> Option<&Raster> {
+        match self {
+            Self::Scalar(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    const fn vector3(&self) -> Option<&Raster<[f32; 3]>> {
+        match self {
+            Self::Vector3(r) => Some(r),
+            _ => None,
+        }
+    }
+
     fn same_grid(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Scalar(a), Self::Scalar(b)) => a.same_grid(b),
@@ -403,53 +423,6 @@ struct FieldState {
     inputs: Vec<(Fingerprint, u64)>,
     output: Option<Fingerprint>,
     serial: u64,
-}
-
-/// State a realize or raster node keeps between runs.
-#[derive(Clone, Debug, Default)]
-struct TileState {
-    /// What the previous output was computed from: the input program's
-    /// fingerprint, or the raster operation and its input grid.
-    source: Option<Source>,
-    /// The previous output, shared with the graph's output value.
-    output: Option<Arc<RasterValue>>,
-    keys: Vec<InternId>,
-    /// Tiles still to recompute against `source`, left by a tile budget.
-    pending: Vec<u32>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum Source {
-    Realize {
-        program: Fingerprint,
-        serial: u64,
-        width: u32,
-        height: u32,
-    },
-    Normals {
-        program: Fingerprint,
-        serial: u64,
-        width: u32,
-        height: u32,
-        scale: u32,
-    },
-    Raster {
-        params: RasterParams,
-        input: u32,
-        /// The input's shape: kernels and the output's texels depend on its
-        /// texel size, which can change while its grid stays (a mip of 24
-        /// rows or of 25 has 12).
-        shape: Shape,
-    },
-    Mip {
-        filter: Filter,
-        input: u32,
-        /// The source's shape: its size sets the taps of each tile and its
-        /// texel size the level's, even when the level keeps its grid.
-        source: Shape,
-    },
-    /// A raster computed whole, from a derivation fingerprint.
-    Whole { derivation: u64 },
 }
 
 /// State a sample node keeps between runs.
@@ -781,26 +754,9 @@ fn run_field(
         Some(previous) => op.change_from(previous),
         None => Change::Everywhere,
     };
-    let consumed: Vec<(Fingerprint, u64)> = fields
-        .iter()
-        .map(|f| (f.program.fingerprint(), f.serial))
-        .collect();
+    let consumed: Vec<(Fingerprint, u64)> = fields.iter().map(|f| version(f)).collect();
     for (i, field) in fields.iter().enumerate() {
-        let last = state.inputs.get(i).copied();
-        let same_inputs = state.inputs.len() == fields.len();
-        // An input's reported change applies once, to the output right after
-        // the one consumed last; a missed output leaves nothing to trust,
-        // not even an equal fingerprint (a sampled image keeps its
-        // fingerprint while its texels change).
-        let input_change = match last {
-            Some(seen) if seen == consumed[i] && same_inputs => Change::Nowhere,
-            Some((fingerprint, serial))
-                if field.previous == Some(fingerprint) && field.serial == serial + 1 =>
-            {
-                field.change.clone()
-            }
-            _ => Change::Everywhere,
-        };
+        let input_change = change_since(field, state.inputs.get(i).copied());
         let input_change = match (input_change, op) {
             (Change::Nowhere, _) => Change::Nowhere,
             (change, Op::Warp { input, .. }) if input.index() as usize == i => {
@@ -822,9 +778,7 @@ fn run_field(
     } else {
         Change::Everywhere
     };
-    // An output equal to the last is cut off, so consumers never see it.
-    let equal = previous == Some(fingerprint) && change == Change::Nowhere;
-    let serial = state.serial + u64::from(!equal);
+    let serial = state.serial + u64::from(!repeats(previous, fingerprint, &change));
     *state = FieldState {
         op: Some(op.clone()),
         inputs: consumed,
@@ -951,170 +905,6 @@ fn fingerprint_words(fp: Fingerprint) -> [u64; 2] {
     [fp.0 as u64, (fp.0 >> 64) as u64]
 }
 
-/// Tiles holding a texel whose center lies within `region` grown by `pad`,
-/// or `None` when the region is not finite.
-fn region_tiles(
-    grid: Grid,
-    realization: &Realization,
-    region: &Region,
-    pad: f32,
-) -> Option<Vec<u32>> {
-    let texel = realization.texel();
-    let origin = realization.origin();
-    let lo = (region.origin - Vec2::splat(pad) - origin) / texel - Vec2::splat(0.5);
-    let hi = (region.origin + region.size + Vec2::splat(pad) - origin) / texel - Vec2::splat(0.5);
-    if !(lo.is_finite() && hi.is_finite()) {
-        return None;
-    }
-    let limit = f64::from(u32::MAX);
-    let to_index = |v: f32| {
-        let v = f64::from(v).clamp(-limit, limit);
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "clamped to the u32 range before the cast"
-        )]
-        let i = v as i64;
-        i
-    };
-    // Conservative by one texel on each side of the exact center test.
-    let (x0, y0) = (
-        to_index(libm::floorf(lo.x)) - 1,
-        to_index(libm::floorf(lo.y)) - 1,
-    );
-    let (x1, y1) = (
-        to_index(libm::ceilf(hi.x)) + 2,
-        to_index(libm::ceilf(hi.y)) + 2,
-    );
-    Some(grid.overlapping(x0, x1, y0, y1))
-}
-
-/// Which tiles of a node's grid to recompute: `None` for all of them.
-type Dirty = Option<Vec<u32>>;
-
-/// The tiles of a realization of `field` to recompute, given the program
-/// fingerprint the previous output was realized from (`None` when there is
-/// no reusable output). Counts a recomputation an unbounded change forces
-/// over a previous output.
-///
-/// A texel's value, or its gradient, reads the field within half a footprint
-/// of its center, so the change regions grow by that much.
-fn field_dirty(
-    tiles: &mut Tiles,
-    grid: Grid,
-    realization: &Realization,
-    field: &FieldValue,
-    previous: Option<(Fingerprint, u64)>,
-    fingerprint: Fingerprint,
-) -> Dirty {
-    let (last, serial) = previous?;
-    // A program's reported change applies once, to the output right after
-    // the one realized last, whatever the fingerprint does: a sampled image
-    // keeps its fingerprint while a budgeted upstream fills in more of its
-    // texels. Seeing the same output again (to work off pending tiles) has
-    // nothing new to apply, and a missed output leaves nothing to trust.
-    let dirty = if serial == field.serial && last == fingerprint {
-        Some(Vec::new())
-    } else if field.previous == Some(last) && field.serial == serial + 1 {
-        match &field.change {
-            Change::Nowhere => Some(Vec::new()),
-            Change::Within {
-                regions,
-                footprint_scale,
-            } => {
-                // A warp widens the footprint its input sees, so a region
-                // grows by that many half texels.
-                let pad = realization.texel().max_element() * 0.5 * footprint_scale;
-                let mut dirty = Vec::new();
-                let mut bounded = true;
-                for region in regions {
-                    match region_tiles(grid, realization, region, pad) {
-                        Some(t) => dirty.extend(t),
-                        None => bounded = false,
-                    }
-                }
-                dirty.sort_unstable();
-                dirty.dedup();
-                bounded.then_some(dirty)
-            }
-            Change::Everywhere => None,
-        }
-    } else {
-        None
-    };
-    if dirty.is_none() {
-        tiles.report.unbounded_changes += 1;
-    }
-    dirty
-}
-
-/// Rewrites the tiles of `dirty` in a copy of `previous` (or computes
-/// everything), then reports which tiles' bits changed.
-fn refresh<T: Copy>(
-    grid: Grid,
-    dirty: &Dirty,
-    previous: Option<&Raster<T>>,
-    whole: impl FnOnce() -> Result<Raster<T>, NodeError>,
-    mut tile: impl FnMut(TexelRect, &mut Raster<T>) -> Result<(), NodeError>,
-) -> Result<(Raster<T>, Vec<u32>), NodeError> {
-    match (dirty, previous) {
-        (Some(tiles), Some(previous)) => {
-            let mut raster = previous.clone();
-            for &t in tiles {
-                tile(grid.rect(t), &mut raster)?;
-            }
-            Ok((raster, tiles.clone()))
-        }
-        _ => Ok((whole()?, (0..grid.count()).collect())),
-    }
-}
-
-/// Keeps `value` as the node's output, shared with the graph, and notes
-/// tiles a budget left pending so the node runs again.
-fn keep(tiles: &mut Tiles, node: u32, state: &mut TileState, value: RasterValue) -> GraphValue {
-    if !state.pending.is_empty() {
-        tiles.report.pending_tiles += state.pending.len() as u64;
-        tiles.pending_nodes.push(node);
-    }
-    let value = Arc::new(value);
-    state.output = Some(Arc::clone(&value));
-    GraphValue::Raster(value)
-}
-
-/// Keeps the new output, reports the work, and marks the dependents of the
-/// tiles whose bits changed. Returns whether any changed.
-fn settle(
-    tiles: &mut Tiles,
-    node: u32,
-    state: &mut TileState,
-    output: &RasterData,
-    recomputed: &[u32],
-    whole: bool,
-) -> bool {
-    let grid = output.grid(tiles.size());
-    let previous = state
-        .output
-        .as_ref()
-        .map(|v| &v.data)
-        .filter(|previous| previous.same_grid(output));
-    if previous.is_none() || state.keys.len() != grid.count() as usize {
-        state.keys = tiles.keys(node, grid, &state.keys);
-    }
-    let changed: Vec<u32> = recomputed
-        .iter()
-        .copied()
-        .filter(|&t| previous.is_none_or(|p| !p.rect_bits_eq(output, grid.rect(t))))
-        .collect();
-    let report = &mut tiles.report;
-    report.tiles_recomputed += recomputed.len() as u64;
-    report.tiles_reused += u64::from(grid.count()) - recomputed.len() as u64;
-    report.tiles_changed += changed.len() as u64;
-    report.texels_recomputed += recomputed.iter().map(|&t| grid.rect(t).area()).sum::<u64>();
-    report.whole_recomputes += u64::from(whole);
-    let keys: Vec<InternId> = changed.iter().map(|&t| state.keys[t as usize]).collect();
-    tiles.mark_dependents(keys);
-    !changed.is_empty()
-}
-
 fn run_realize(
     tiles: &mut Tiles,
     node: u32,
@@ -1123,68 +913,54 @@ fn run_realize(
     height: u32,
     input: &GraphValue,
 ) -> Result<GraphValue, NodeError> {
-    let field_value = field_input(input)?;
-    let program = &field_value.program;
+    let field = field_input(input)?;
+    let program = &field.program;
     let (port, domain) = (program.output_type(), program.domain());
     if !matches!(domain, Domain::Periodic { .. }) {
         return Err(NodeError::NotRealizable { port, domain });
     }
     let realization = Realization::period(domain, width, height).map_err(NodeError::Raster)?;
-    let fingerprint = program.fingerprint();
+    let grid = Grid::new(width, height, tiles.size(), Edge::Wrap);
+    let fingerprint = realize_fingerprint(program.fingerprint(), width, height);
     if !port.is_scalar() {
-        let derivation = realize_fingerprint(fingerprint, width, height);
-        return run_whole(tiles, node, state, derivation, port, true, || {
-            realize_value(program, realization).map_err(NodeError::Typed)
+        // Other types realize whole, every time the node runs.
+        let job = TileJob {
+            layout: Layout::Whole {
+                derivation: fingerprint,
+            },
+            grid,
+            reads: Reads::WholeField,
+            port,
+            fingerprint,
+        };
+        return run_tiles(tiles, node, state, job, |_| {
+            realize_value(program, realization)
+                .map(RasterData::Typed)
+                .map_err(NodeError::Typed)
         });
     }
-    let field = program.channel(0).map_err(NodeError::Program)?;
-    let grid = Grid::new(width, height, tiles.size(), Edge::Wrap);
-    let previous = match (&state.source, state.output.as_ref().map(|v| &v.data)) {
-        (
-            Some(Source::Realize {
-                program: last,
-                serial,
-                width: w,
-                height: h,
-            }),
-            Some(RasterData::Scalar(raster)),
-        ) if (*w, *h) == (width, height) => Some(((*last, *serial), raster)),
-        _ => None,
-    };
-    let dirty = field_dirty(
-        tiles,
+    let scalar = program.channel(0).map_err(NodeError::Program)?;
+    let job = TileJob {
+        layout: Layout::Realize { width, height },
         grid,
-        &realization,
-        field_value,
-        previous.map(|(seen, _)| seen),
-        fingerprint,
-    );
-    let dirty = tiles.schedule(&mut state.pending, dirty, grid.count());
-    #[cfg(test)]
-    tiles.injected_failure(node)?;
-    let (raster, recomputed) = refresh(
-        grid,
-        &dirty,
-        previous.map(|(_, raster)| raster),
-        || realize(&field, realization).map_err(NodeError::Raster),
-        |rect, raster| realize_into(&field, realization, rect, raster).map_err(NodeError::Raster),
-    )?;
-    let data = RasterData::Scalar(raster);
-    let changed = settle(tiles, node, state, &data, &recomputed, dirty.is_none());
-    let value = RasterValue {
-        data,
+        reads: Reads::Field {
+            value: field,
+            realization: &realization,
+        },
         port,
-        fingerprint: realize_fingerprint(fingerprint, width, height),
-        changed,
-        tile_space: node,
+        fingerprint,
     };
-    state.source = Some(Source::Realize {
-        program: fingerprint,
-        serial: field_value.serial,
-        width,
-        height,
-    });
-    Ok(keep(tiles, node, state, value))
+    run_tiles(tiles, node, state, job, |work| {
+        refresh(
+            grid,
+            work.and_then(|(dirty, previous)| Some((dirty, previous.scalar()?))),
+            || realize(&scalar, realization).map_err(NodeError::Raster),
+            |rect, raster| {
+                realize_into(&scalar, realization, rect, raster).map_err(NodeError::Raster)
+            },
+        )
+        .map(RasterData::Scalar)
+    })
 }
 
 fn run_normals(
@@ -1194,85 +970,54 @@ fn run_normals(
     (width, height, scale): (u32, u32, f32),
     input: &GraphValue,
 ) -> Result<GraphValue, NodeError> {
-    let field_value = field_input(input)?;
-    let program = &field_value.program;
+    let field = field_input(input)?;
+    let program = &field.program;
     let (port, domain) = (program.output_type(), program.domain());
     if !port.is_scalar() || !matches!(domain, Domain::Periodic { .. }) {
         return Err(NodeError::NotRealizable { port, domain });
     }
-    let field = program.channel(0).map_err(NodeError::Program)?;
+    let scalar = program.channel(0).map_err(NodeError::Program)?;
     let realization = Realization::period(domain, width, height).map_err(NodeError::Raster)?;
-    let fingerprint = program.fingerprint();
-    let grid = Grid::new(width, height, tiles.size(), Edge::Wrap);
-    let previous = match (&state.source, state.output.as_ref().map(|v| &v.data)) {
-        (
-            Some(Source::Normals {
-                program: last,
-                serial,
-                width: w,
-                height: h,
-                scale: k,
-            }),
-            Some(RasterData::Vector3(raster)),
-        ) if (*w, *h, *k) == (width, height, scale.to_bits()) => Some(((*last, *serial), raster)),
-        _ => None,
-    };
-    let dirty = field_dirty(
-        tiles,
-        grid,
-        &realization,
-        field_value,
-        previous.map(|(seen, _)| seen),
-        fingerprint,
-    );
-    let dirty = tiles.schedule(&mut state.pending, dirty, grid.count());
-    #[cfg(test)]
-    tiles.injected_failure(node)?;
-    let (raster, recomputed) = refresh(
-        grid,
-        &dirty,
-        previous.map(|(_, raster)| raster),
-        || realize_normals(&field, realization, scale).map_err(NodeError::Raster),
-        |rect, raster| {
-            realize_normals_into(&field, realization, scale, rect, raster)
-                .map_err(NodeError::Raster)
+    let job = TileJob {
+        layout: Layout::Normals {
+            width,
+            height,
+            scale: scale.to_bits(),
         },
-    )?;
-    let data = RasterData::Vector3(raster);
-    let changed = settle(tiles, node, state, &data, &recomputed, dirty.is_none());
-    let value = RasterValue {
-        data,
+        grid: Grid::new(width, height, tiles.size(), Edge::Wrap),
+        reads: Reads::Field {
+            value: field,
+            realization: &realization,
+        },
         port: PortType::Normal(NormalFrame::Domain),
-        fingerprint: normals_fingerprint(fingerprint, width, height, scale),
-        changed,
-        tile_space: node,
+        fingerprint: normals_fingerprint(program.fingerprint(), width, height, scale),
     };
-    state.source = Some(Source::Normals {
-        program: fingerprint,
-        serial: field_value.serial,
-        width,
-        height,
-        scale: scale.to_bits(),
-    });
-    Ok(keep(tiles, node, state, value))
+    let grid = job.grid;
+    run_tiles(tiles, node, state, job, |work| {
+        refresh(
+            grid,
+            work.and_then(|(dirty, previous)| Some((dirty, previous.vector3()?))),
+            || realize_normals(&scalar, realization, scale).map_err(NodeError::Raster),
+            |rect, raster| {
+                realize_normals_into(&scalar, realization, scale, rect, raster)
+                    .map_err(NodeError::Raster)
+            },
+        )
+        .map(RasterData::Vector3)
+    })
 }
 
-/// Runs one raster operation tile-wise: `recompute` returns the new data and
-/// the recomputed tiles.
-fn run_op<O>(
+/// Applies one raster operation to the tiles of `work`, or to all of
+/// `input`.
+fn apply<O: RasterOp>(
     op: &O,
     input: &Raster,
     grid: Grid,
-    dirty: &Dirty,
-    previous: Option<&Raster<O::Output>>,
-) -> Result<(Raster<O::Output>, Vec<u32>), NodeError>
-where
-    O: RasterOp,
-{
+    work: Option<(&[u32], &Raster<O::Output>)>,
+) -> Result<Raster<O::Output>, NodeError> {
     refresh(
         grid,
-        dirty,
-        previous,
+        work,
         || op.apply(input).map_err(NodeError::Raster),
         |rect, raster| {
             op.apply_into(input, rect, raster)
@@ -1296,7 +1041,6 @@ fn run_raster(
             port: value.port,
         });
     };
-    let port = raster_output(params, value.port);
     let grid = Grid::new(raster.width(), raster.height(), tiles.size(), raster.edge());
     let footprint = match params {
         RasterParams::Blur(op) => op.footprint(raster.texel()),
@@ -1305,100 +1049,54 @@ fn run_raster(
         RasterParams::DistanceTransform(op) => op.footprint(raster.texel()),
         RasterParams::Morphology(op) => op.footprint(raster.texel()),
     };
-    let source = Source::Raster {
-        params,
-        input: value.tile_space,
-        shape: value.data.shape(),
+    // Each output tile reads the input tiles its kernel footprint reaches;
+    // a global operation, with no footprint, reads them all.
+    let [fx, fy] = footprint.unwrap_or_default().map(i64::from);
+    let around = |t: u32| {
+        let r = grid.rect(t);
+        grid.overlapping(
+            i64::from(r.x0) - fx,
+            i64::from(r.x1) + fx,
+            i64::from(r.y0) - fy,
+            i64::from(r.y1) + fy,
+        )
     };
-    let same = state.source.as_ref() == Some(&source)
-        && state
-            .output
-            .as_ref()
-            .is_some_and(|out| out.data.grid(tiles.size()) == grid);
-    if !same || state.keys.len() != grid.count() as usize {
-        // A new operation, input, or grid: re-key and re-wire the tiles.
-        state.keys = tiles.keys(node, grid, &state.keys);
-        match footprint {
-            Some([fx, fy]) => {
-                let (fx, fy) = (i64::from(fx), i64::from(fy));
-                for t in 0..grid.count() {
-                    let r = grid.rect(t);
-                    let inputs: Vec<InternId> = grid
-                        .overlapping(
-                            i64::from(r.x0) - fx,
-                            i64::from(r.x1) + fx,
-                            i64::from(r.y0) - fy,
-                            i64::from(r.y1) + fy,
-                        )
-                        .into_iter()
-                        .map(|i| tiles.key(value.tile_space, i))
-                        .collect();
-                    tiles.depend(state.keys[t as usize], inputs);
-                }
-            }
-            None => tiles.depend_whole(&state.keys, value.tile_space, grid),
-        }
-    }
-    let marked = tiles.take_marked(&state.keys);
-    let dirty: Dirty = if !same {
-        None
-    } else if footprint.is_none() {
-        // Global: any changed input tile recomputes the whole raster, so
-        // pending tiles cannot occur. The marks, not `value.changed`, say
-        // whether anything changed since this node last ran: a failed run
-        // can keep a changed output from it.
-        if marked.is_empty() {
-            Some(Vec::new())
-        } else {
-            None
-        }
-    } else {
-        Some(marked)
+    let space = value.tile_space;
+    let reads = match footprint {
+        Some(_) => Reads::Tiles {
+            space,
+            inputs: &around,
+        },
+        None => Reads::WholeRaster { space, grid },
     };
-    let dirty = tiles.schedule(&mut state.pending, dirty, grid.count());
-    #[cfg(test)]
-    tiles.injected_failure(node)?;
-    let previous_output = state.output.clone();
-    let previous_scalar = match previous_output.as_ref().map(|v| &v.data) {
-        Some(RasterData::Scalar(r)) if same => Some(r),
-        _ => None,
-    };
-    let (data, recomputed) = match params {
-        RasterParams::Blur(op) => {
-            let (r, t) = run_op(&op, raster, grid, &dirty, previous_scalar)?;
-            (RasterData::Scalar(r), t)
-        }
-        RasterParams::HeightToNormal(op) => {
-            let previous = match previous_output.as_ref().map(|v| &v.data) {
-                Some(RasterData::Vector3(r)) if same => Some(r),
-                _ => None,
-            };
-            let (r, t) = run_op(&op, raster, grid, &dirty, previous)?;
-            (RasterData::Vector3(r), t)
-        }
-        RasterParams::AmbientOcclusion(op) => {
-            let (r, t) = run_op(&op, raster, grid, &dirty, previous_scalar)?;
-            (RasterData::Scalar(r), t)
-        }
-        RasterParams::DistanceTransform(op) => {
-            let (r, t) = run_op(&op, raster, grid, &dirty, previous_scalar)?;
-            (RasterData::Scalar(r), t)
-        }
-        RasterParams::Morphology(op) => {
-            let (r, t) = run_op(&op, raster, grid, &dirty, previous_scalar)?;
-            (RasterData::Scalar(r), t)
-        }
-    };
-    let changed = settle(tiles, node, state, &data, &recomputed, dirty.is_none());
-    let out = RasterValue {
-        data,
-        port,
+    let job = TileJob {
+        layout: Layout::Raster {
+            params,
+            input: space,
+            shape: value.data.shape(),
+        },
+        grid,
+        reads,
+        port: raster_output(params, value.port),
         fingerprint: raster_fingerprint(params, value.fingerprint),
-        changed,
-        tile_space: node,
     };
-    state.source = Some(source);
-    Ok(keep(tiles, node, state, out))
+    run_tiles(tiles, node, state, job, |work| {
+        let scalar = work.and_then(|(dirty, previous)| Some((dirty, previous.scalar()?)));
+        Ok(match params {
+            RasterParams::Blur(op) => RasterData::Scalar(apply(&op, raster, grid, scalar)?),
+            RasterParams::HeightToNormal(op) => {
+                let vector3 = work.and_then(|(dirty, previous)| Some((dirty, previous.vector3()?)));
+                RasterData::Vector3(apply(&op, raster, grid, vector3)?)
+            }
+            RasterParams::AmbientOcclusion(op) => {
+                RasterData::Scalar(apply(&op, raster, grid, scalar)?)
+            }
+            RasterParams::DistanceTransform(op) => {
+                RasterData::Scalar(apply(&op, raster, grid, scalar)?)
+            }
+            RasterParams::Morphology(op) => RasterData::Scalar(apply(&op, raster, grid, scalar)?),
+        })
+    })
 }
 
 /// The next mip level's size along one axis, as `dapple_encode` halves it.
@@ -1425,79 +1123,59 @@ fn run_mip(
     let (dw, dh) = (next_size(sw), next_size(sh));
     let source_grid = Grid::new(sw, sh, tiles.size(), edge);
     let grid = Grid::new(dw, dh, tiles.size(), edge);
-    let source = Source::Mip {
-        filter,
-        input: value.tile_space,
-        source: value.data.shape(),
+    // Each tile reads the level-above tiles its filter taps reach.
+    let taps = |t: u32| {
+        let r = grid.rect(t);
+        let (x0, x1) = source_span(filter, sw, r.x0, r.x1);
+        let (y0, y1) = source_span(filter, sh, r.y0, r.y1);
+        source_grid.overlapping(x0, x1, y0, y1)
     };
-    let same = state.source.as_ref() == Some(&source)
-        && state
-            .output
-            .as_ref()
-            .is_some_and(|out| out.data.grid(tiles.size()) == grid);
-    if !same || state.keys.len() != grid.count() as usize {
-        // A new filter, input, or size: re-key and re-wire the tiles to the
-        // level-above tiles their filter taps read.
-        state.keys = tiles.keys(node, grid, &state.keys);
-        for t in 0..grid.count() {
-            let r = grid.rect(t);
-            let (x0, x1) = source_span(filter, sw, r.x0, r.x1);
-            let (y0, y1) = source_span(filter, sh, r.y0, r.y1);
-            let inputs: Vec<InternId> = source_grid
-                .overlapping(x0, x1, y0, y1)
-                .into_iter()
-                .map(|i| tiles.key(value.tile_space, i))
-                .collect();
-            tiles.depend(state.keys[t as usize], inputs);
-        }
-    }
-    let marked = tiles.take_marked(&state.keys);
-    let dirty: Dirty = if same { Some(marked) } else { None };
-    let dirty = tiles.schedule(&mut state.pending, dirty, grid.count());
-    #[cfg(test)]
-    tiles.injected_failure(node)?;
-    let image = Image::new(sw, sh, 1, edge, raster.values().to_vec()).map_err(NodeError::Mip)?;
-    let previous = match state.output.as_ref().map(|v| &v.data) {
-        Some(RasterData::Scalar(r)) if same => Some(r),
-        _ => None,
-    };
-    let (next, recomputed) = match (&dirty, previous) {
-        (Some(dirty), Some(previous)) => {
-            let mut next =
-                Image::new(dw, dh, 1, edge, previous.values().to_vec()).map_err(NodeError::Mip)?;
-            for &t in dirty {
-                next_level_into(&image, filter, grid.rect(t), &mut next).map_err(NodeError::Mip)?;
-            }
-            (next, dirty.clone())
-        }
-        _ => (next_level(&image, filter), (0..grid.count()).collect()),
-    };
-    // The level covers the same region with fewer, larger texels.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "mip sizes are far below f32's exact integer range"
-    )]
-    let scale = Vec2::new(sw as f32 / dw as f32, sh as f32 / dh as f32);
-    let level = Raster::from_values(
-        dw,
-        dh,
-        raster.origin(),
-        raster.texel() * scale,
-        edge,
-        next.values().to_vec(),
-    )
-    .map_err(NodeError::Raster)?;
-    let data = RasterData::Scalar(level);
-    let changed = settle(tiles, node, state, &data, &recomputed, dirty.is_none());
-    let out = RasterValue {
-        data,
+    let job = TileJob {
+        layout: Layout::Mip {
+            filter,
+            input: value.tile_space,
+            source: value.data.shape(),
+        },
+        grid,
+        reads: Reads::Tiles {
+            space: value.tile_space,
+            inputs: &taps,
+        },
         port: value.port,
         fingerprint: mip_fingerprint(filter, value.fingerprint),
-        changed,
-        tile_space: node,
     };
-    state.source = Some(source);
-    Ok(keep(tiles, node, state, out))
+    run_tiles(tiles, node, state, job, |work| {
+        let image =
+            Image::new(sw, sh, 1, edge, raster.values().to_vec()).map_err(NodeError::Mip)?;
+        let next = match work.and_then(|(dirty, previous)| Some((dirty, previous.scalar()?))) {
+            Some((dirty, previous)) => {
+                let mut next = Image::new(dw, dh, 1, edge, previous.values().to_vec())
+                    .map_err(NodeError::Mip)?;
+                for &t in dirty {
+                    next_level_into(&image, filter, grid.rect(t), &mut next)
+                        .map_err(NodeError::Mip)?;
+                }
+                next
+            }
+            None => next_level(&image, filter),
+        };
+        // The level covers the same region with fewer, larger texels.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "mip sizes are far below f32's exact integer range"
+        )]
+        let scale = Vec2::new(sw as f32 / dw as f32, sh as f32 / dh as f32);
+        Raster::from_values(
+            dw,
+            dh,
+            raster.origin(),
+            raster.texel() * scale,
+            edge,
+            next.values().to_vec(),
+        )
+        .map(RasterData::Scalar)
+        .map_err(NodeError::Raster)
+    })
 }
 
 /// The type of a raster operation's output for an input of type `port`.
@@ -1532,54 +1210,6 @@ fn reduce_fingerprint(policy: ReductionPolicy, level: u32, input: u64) -> u64 {
     hash(0x7265_6475_6365, &[tag, word, u64::from(level), input]) // "reduce"
 }
 
-/// Runs a node whose raster is computed whole: reuses the previous output
-/// when `derivation` is unchanged and `stale` is false, and otherwise
-/// recomputes every tile, comparing bits so unchanged tiles stop
-/// propagating.
-fn run_whole(
-    tiles: &mut Tiles,
-    node: u32,
-    state: &mut TileState,
-    derivation: u64,
-    port: PortType,
-    stale: bool,
-    compute: impl FnOnce() -> Result<TypedRaster, NodeError>,
-) -> Result<GraphValue, NodeError> {
-    let source = Source::Whole { derivation };
-    if !stale
-        && state.source.as_ref() == Some(&source)
-        && let Some(previous) = &state.output
-    {
-        let grid = previous.data.grid(tiles.size());
-        tiles.report.tiles_reused += u64::from(grid.count());
-        let value = RasterValue {
-            changed: false,
-            ..RasterValue::clone(previous)
-        };
-        return Ok(keep(tiles, node, state, value));
-    }
-    #[cfg(test)]
-    tiles.injected_failure(node)?;
-    let raster = compute()?;
-    debug_assert_eq!(raster.port(), port, "a whole raster keeps its node's type");
-    let data = RasterData::Typed(raster);
-    let count = data.grid(tiles.size()).count();
-    // A whole computation spends its tiles from the run's budget, as a
-    // tiled node's does.
-    tiles.schedule(&mut state.pending, None, count);
-    let all: Vec<u32> = (0..count).collect();
-    let changed = settle(tiles, node, state, &data, &all, true);
-    let value = RasterValue {
-        data,
-        port,
-        fingerprint: derivation,
-        changed,
-        tile_space: node,
-    };
-    state.source = Some(source);
-    Ok(keep(tiles, node, state, value))
-}
-
 fn run_reduce(
     tiles: &mut Tiles,
     node: u32,
@@ -1594,15 +1224,30 @@ fn run_reduce(
             expected: "a mip level of at least 1",
         });
     }
-    let derivation = reduce_fingerprint(policy, level, value.fingerprint);
-    // A mark on the first tile says some input tile changed since this node
-    // last took its marks, even through outputs it never saw.
-    let first = [tiles.key(node, 0)];
-    tiles.depend_whole(&first, value.tile_space, value.data.grid(tiles.size()));
-    let stale = !tiles.take_marked(&first).is_empty();
-    run_whole(tiles, node, state, derivation, value.port, stale, || {
+    let (width, height, _, _, edge) = value.data.shape();
+    let fingerprint = reduce_fingerprint(policy, level, value.fingerprint);
+    let job = TileJob {
+        layout: Layout::Whole {
+            derivation: fingerprint,
+        },
+        grid: Grid::new(
+            level_size(width, level),
+            level_size(height, level),
+            tiles.size(),
+            edge,
+        ),
+        reads: Reads::WholeRaster {
+            space: value.tile_space,
+            grid: value.data.grid(tiles.size()),
+        },
+        port: value.port,
+        fingerprint,
+    };
+    run_tiles(tiles, node, state, job, |_| {
         let base = value.data.to_typed(value.port)?;
-        dapple_raster::typed::reduce(&base, policy, level).map_err(NodeError::Typed)
+        dapple_raster::typed::reduce(&base, policy, level)
+            .map(RasterData::Typed)
+            .map_err(NodeError::Typed)
     })
 }
 
@@ -1725,10 +1370,12 @@ fn run_sample(
                 .map_or(&[][..], |(_, _, keys)| keys.as_slice());
             let level_index = u8::try_from(level).unwrap_or(u8::MAX);
             let keys = tiles.level_keys(node, level_index, grid, previous);
-            for (t, &key) in keys.iter().enumerate() {
-                let input = tiles.key(space, u32::try_from(t).expect("tile counts fit u32"));
-                tiles.depend(key, [input]);
-            }
+            let mirror = |t: u32| vec![t];
+            let reads = Reads::Tiles {
+                space,
+                inputs: &mirror,
+            };
+            wire(tiles, &keys, &reads);
             state.levels.push((space, grid, keys));
         }
     }
@@ -1762,11 +1409,9 @@ fn run_sample(
     let previous = state.output;
     let fingerprint = program.fingerprint();
     let change = if same { change } else { Change::Everywhere };
-    // An output equal to the last is cut off, so consumers never see it.
-    let equal = previous == Some(fingerprint) && change == Change::Nowhere;
+    state.serial += u64::from(!repeats(previous, fingerprint, &change));
     state.output = Some(fingerprint);
     state.layout = Some(layout);
-    state.serial += u64::from(!equal);
     Ok(GraphValue::Field(Arc::new(FieldValue {
         program,
         previous,
@@ -1848,26 +1493,10 @@ impl Executor for DappleExecutor {
         outputs: &mut Vec<GraphValue>,
         _access: &mut NodeAccess<'_>,
     ) -> Result<(), NodeError> {
-        match self.run_node(node, inputs) {
-            Ok(value) => {
-                outputs.push(value);
-                Ok(())
-            }
-            Err(error) => {
-                // Raster and mip nodes take the tile marks that say what
-                // changed before they compute, and realize and normals nodes
-                // hand their pending tiles to a local list, so a failed run
-                // has already spent that state while the kept output still
-                // stands. Forget what the output was computed from, so the
-                // next run recomputes whole against it instead of trusting
-                // empty marks. A sample node fails before it spends
-                // anything, and forgetting its output would hide changes
-                // from its consumers (they read "no previous" as "nothing
-                // new" when its fingerprint stands).
-                node.tiles.source = None;
-                Err(error)
-            }
-        }
+        // A failed run leaves each node's state as the protocol in `changes`
+        // requires, so there is nothing to undo here.
+        outputs.push(self.run_node(node, inputs)?);
+        Ok(())
     }
 
     /// Early cutoff: an output equal to the node's previous one stops its
@@ -1893,7 +1522,11 @@ impl Executor for DappleExecutor {
                 // A sampled image keeps its fingerprint while its texels
                 // change (a budgeted upstream fills in more tiles), so the
                 // reported change must be empty as well.
-                a.program.fingerprint() == b.program.fingerprint() && b.change == Change::Nowhere
+                repeats(
+                    Some(a.program.fingerprint()),
+                    b.program.fingerprint(),
+                    &b.change,
+                )
             }
             (GraphValue::Raster(a), GraphValue::Raster(b)) => {
                 a.fingerprint == b.fingerprint

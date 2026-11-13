@@ -167,6 +167,7 @@ const GOLDEN: &[(&str, u32, &str, u64)] = &[
     ("dapple_library.steel", 1, "defaults", 0xa6dbeb0c926ba2c3),
     ("dapple_library.patina", 1, "defaults", 0x3eac5c0178494337),
     ("dapple_library.rust", 1, "defaults", 0xd0f98a46b30f81f1),
+    ("dapple_library.paint", 1, "defaults", 0x0e42c93bc55f180e),
     (
         "dapple_library.weathered_copper",
         1,
@@ -178,6 +179,12 @@ const GOLDEN: &[(&str, u32, &str, u64)] = &[
         1,
         "defaults",
         0x89d1d3d8ac613708,
+    ),
+    (
+        "dapple_library.painted_steel",
+        1,
+        "defaults",
+        0xc166a528d63361f9,
     ),
     (
         "dapple_library.packages.varnished_board",
@@ -250,6 +257,36 @@ const GOLDEN: &[(&str, u32, &str, u64)] = &[
         1,
         "preset:pitted",
         0x7ff172e6f0bf74a5,
+    ),
+    (
+        "dapple_library.packages.painted_steel",
+        1,
+        "defaults",
+        0xc166a528d63361f9,
+    ),
+    (
+        "dapple_library.packages.painted_steel",
+        1,
+        "preset:new",
+        0x8b047104c5f9eda0,
+    ),
+    (
+        "dapple_library.packages.painted_steel",
+        1,
+        "preset:chipped",
+        0xd5167beba3e5a438,
+    ),
+    (
+        "dapple_library.packages.painted_steel",
+        1,
+        "preset:weeping",
+        0x9209a40ad21351a3,
+    ),
+    (
+        "dapple_library.packages.painted_steel",
+        1,
+        "preset:derelict",
+        0x459b16e017612111,
     ),
 ];
 

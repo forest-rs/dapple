@@ -26,7 +26,7 @@
 //!   reflectance ([`modules::calibration`]).
 //! - [`modules`] also holds metals: copper cladding and riveted steel
 //!   plate, calibrated to tabulated F0, that tarnish and grow verdigris,
-//!   or rust.
+//!   rust, or take paint that chips and rusts beneath.
 //! - [`packages`]: those modules offered to portable packages
 //!   (`dapple_package`), and the varnished board and the weathered metals
 //!   written as packages with presets.

@@ -1,0 +1,127 @@
+{
+  "format": "dapple.package",
+  "version": 1,
+  "interface": {
+    "module": { "name": "dapple_library.packages.painted_steel", "version": 1 },
+    "doc": "painted riveted steel, as a package: steel under primer and topcoat, chipped, rusting where the chips bare the metal",
+    "params": [
+      {
+        "name": "paint",
+        "doc": "the topcoat's color",
+        "type": { "color": { "default": [0.035, 0.085, 0.11] } }
+      },
+      {
+        "name": "gloss",
+        "doc": "how glossy the topcoat is",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.5 } }
+      },
+      {
+        "name": "chipping",
+        "doc": "share of the surface that lost its topcoat",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.03 } }
+      },
+      {
+        "name": "fade",
+        "doc": "how far the topcoat has chalked",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.3 } }
+      },
+      {
+        "name": "age",
+        "doc": "how far the bared steel has rusted",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.4 } }
+      },
+      {
+        "name": "wetness",
+        "doc": "how much water's paths decide where",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.6 } }
+      }
+    ],
+    "outputs": [
+      {
+        "name": "material",
+        "doc": "the plate",
+        "type": "material",
+        "semantics": {
+          "channels": ["base_color", "base_metalness", "specular_roughness", "coat_weight", "height"],
+          "tiling": "both"
+        }
+      }
+    ]
+  },
+  "requires": {
+    "capabilities": [
+      { "name": "dapple.graph", "version": 1 },
+      { "name": "dapple.semantics", "version": 1 }
+    ],
+    "modules": [
+      { "name": "dapple_library.steel", "version": 1 },
+      { "name": "dapple_library.paint", "version": 1 },
+      { "name": "dapple_library.rust", "version": 1 }
+    ]
+  },
+  "presets": [
+    {
+      "name": "new",
+      "doc": "freshly painted, glossy, a few knocks on the rivets",
+      "values": {
+        "gloss": { "scalar": 0.85 },
+        "chipping": { "scalar": 0.004 },
+        "fade": { "scalar": 0.0 },
+        "age": { "scalar": 0.0 }
+      }
+    },
+    {
+      "name": "chipped",
+      "doc": "a few seasons: chipped at the rivets and laps, the chips rusting",
+      "values": { "chipping": { "scalar": 0.035 }, "age": { "scalar": 0.3 } }
+    },
+    {
+      "name": "weeping",
+      "doc": "neglected: chalky paint, rust creeping under it and running down in streaks",
+      "values": {
+        "gloss": { "scalar": 0.3 },
+        "chipping": { "scalar": 0.08 },
+        "fade": { "scalar": 0.6 },
+        "age": { "scalar": 0.6 },
+        "wetness": { "scalar": 0.85 }
+      }
+    },
+    {
+      "name": "derelict",
+      "doc": "abandoned: paint in islands on a deep, pitted rust",
+      "values": {
+        "gloss": { "scalar": 0.15 },
+        "chipping": { "scalar": 0.6 },
+        "fade": { "scalar": 0.85 },
+        "age": { "scalar": 0.95 },
+        "wetness": { "scalar": 0.8 }
+      }
+    }
+  ],
+  "body": {
+    "steps": [
+      {
+        "name": "steel",
+        "module": { "name": "dapple_library.steel", "version": 1 }
+      },
+      {
+        "name": "paint",
+        "module": { "name": "dapple_library.paint", "version": 1 },
+        "params": {
+          "color": { "param": "paint" },
+          "gloss": { "param": "gloss" },
+          "chipping": { "param": "chipping" },
+          "fade": { "param": "fade" }
+        },
+        "inputs": { "base": { "output": { "step": "steel", "output": "material" } } }
+      },
+      {
+        "name": "rust",
+        "module": { "name": "dapple_library.rust", "version": 1 },
+        "params": { "age": { "param": "age" }, "wetness": { "param": "wetness" } },
+        "inputs": { "base": { "output": { "step": "paint", "output": "material" } } }
+      }
+    ],
+    "outputs": { "material": { "step": "rust", "output": "material" } }
+  }
+}

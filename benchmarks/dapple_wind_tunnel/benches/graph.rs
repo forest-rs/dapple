@@ -20,6 +20,12 @@
 //! - `budgeted_converge`: the same edit, run repeatedly until the budget
 //!   leaves nothing pending.
 //!
+//! - `field_chain_fresh`: a first run of a chain of 8, 32 or 128 dependent
+//!   field nodes with no realization, so what is timed is each node building
+//!   its program from its upstream programs.
+//! - `field_chain_edit`: reseed the head of that chain and run again, so every
+//!   node downstream rebuilds its program once.
+//!
 //! Each edit benchmark alternates between two values so that every
 //! iteration is a real edit, and times the edit and the run together.
 
@@ -216,6 +222,64 @@ fn bench_graph(c: &mut Criterion) {
     group.finish();
 }
 
+/// Chain lengths for the field chain benchmarks.
+const CHAINS: [usize; 3] = [8, 32, 128];
+
+/// A noise node and `len - 1` remaps after it, each with its own parameters,
+/// returning the graph and the head.
+fn field_chain(len: usize) -> (MaterialGraph, NodeId) {
+    let mut g = MaterialGraph::with_tile_size(TILE);
+    let head = g.field("head", noise(period(), 1), &[]).expect("head");
+    let mut last = head;
+    for i in 1..len {
+        last = g
+            .field(
+                &format!("remap{i}"),
+                Op::Remap {
+                    input: operand(0),
+                    from: [0.0, 1.0 + i as f32],
+                    to: [0.0, 1.0],
+                },
+                &[last],
+            )
+            .expect("remap");
+    }
+    (g, head)
+}
+
+fn bench_field_chain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("graph");
+    group.sample_size(10);
+    for len in CHAINS {
+        group.bench_with_input(
+            BenchmarkId::new("field_chain_fresh", len),
+            &len,
+            |b, &len| {
+                b.iter_batched(
+                    || field_chain(len).0,
+                    |mut g| g.run().expect("runs"),
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("field_chain_edit", len),
+            &len,
+            |b, &len| {
+                let (mut g, head) = field_chain(len);
+                g.run().expect("first run");
+                let mut seed = 1;
+                b.iter(|| {
+                    seed = 3 - seed;
+                    g.set_field_op(head, noise(period(), seed)).expect("edit");
+                    g.run().expect("runs")
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 /// A settled recipe with a four-tile budget and the disk moved, before the
 /// run that pays for the edit.
 fn budgeted_edit(size: u32) -> Recipe {
@@ -227,5 +291,5 @@ fn budgeted_edit(size: u32) -> Recipe {
     r
 }
 
-criterion_group!(benches, bench_graph);
+criterion_group!(benches, bench_graph, bench_field_chain);
 criterion_main!(benches);

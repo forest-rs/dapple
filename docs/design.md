@@ -665,6 +665,7 @@ starts.
 | `dapple_library` | Ready-made materials (oak bark, solid oak, brick, parquet, gravel, glazed brick) as field programs, shared modules, and the varnished-board package | yes |
 | `dapple_elements` | Keyed element sets: bindings, instances, element programs | yes |
 | `dapple_lab` | Headless material laboratory: reports, measurements, fitting | yes |
+| `dapple_export` | Self-describing exports: one account of every parameter, the glTF material and a viewable glTF document, the versioned manifest; directory writing behind `std` | yes |
 | `dapple_compress` | Block compression and Zstandard supercompression of encoded textures, through `ctt` | std |
 | `tools/dapple_bake` | Bakes the recipes a TOML manifest lists | std |
 | `examples/*` | Material gallery (plane, sphere and draped-cloth previews through lightweald and Blender), wood/stone/brick/bark studies | std |
@@ -680,7 +681,8 @@ leaf-only `dapple` facade crate.
 - `execution_graph` and `invalidation` (forest-rs);
 - `imaging` and `kurbo`, in `dapple_imaging` only;
 - `ctt`, `png` and similar, only in `dapple_encode`'s std features;
-- `serde` and `serde_json` (alloc only), in `dapple_package` for the package format.
+- `serde` and `serde_json` (alloc only), in `dapple_package` for the package format
+  and `dapple_export` for the manifest and glTF.
 
 No image-processing framework dependency: the raster ops are ours, because
 determinism and footprints are the point.

@@ -384,6 +384,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dapple_export"
+version = "0.0.1"
+dependencies = [
+ "dapple_encode",
+ "dapple_field",
+ "dapple_lab",
+ "dapple_material",
+ "libm",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dapple_field"
 version = "0.0.1"
 dependencies = [

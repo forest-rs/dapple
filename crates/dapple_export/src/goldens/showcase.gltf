@@ -1,0 +1,291 @@
+{
+  "accessors": [
+    {
+      "bufferView": 0,
+      "byteOffset": 0,
+      "componentType": 5126,
+      "count": 4,
+      "max": [
+        0.5,
+        0.25,
+        0.0
+      ],
+      "min": [
+        -0.5,
+        -0.25,
+        0.0
+      ],
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 0,
+      "byteOffset": 48,
+      "componentType": 5126,
+      "count": 4,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 0,
+      "byteOffset": 96,
+      "componentType": 5126,
+      "count": 4,
+      "type": "VEC4"
+    },
+    {
+      "bufferView": 0,
+      "byteOffset": 160,
+      "componentType": 5126,
+      "count": 4,
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 1,
+      "byteOffset": 0,
+      "componentType": 5123,
+      "count": 6,
+      "type": "SCALAR"
+    }
+  ],
+  "asset": {
+    "generator": "dapple_export",
+    "version": "2.0"
+  },
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteLength": 192,
+      "byteOffset": 0,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 12,
+      "byteOffset": 192,
+      "target": 34963
+    }
+  ],
+  "buffers": [
+    {
+      "byteLength": 204,
+      "uri": "data:application/octet-stream;base64,AAAAvwAAgL4AAAAAAAAAPwAAgL4AAAAAAAAAPwAAgD4AAAAAAAAAvwAAgD4AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AACAPwAAAAAAAAAAAACAvwAAgD8AAAAAAAAAAAAAgL8AAIA/AAAAAAAAAAAAAIC/AACAPwAAAAAAAAAAAACAvwAAAAAAAAAAAACAPwAAAAAAAIA/AACAPwAAAAAAAIA/AAABAAIAAAACAAMA"
+    }
+  ],
+  "extensionsUsed": [
+    "KHR_materials_anisotropy",
+    "KHR_materials_clearcoat",
+    "KHR_materials_diffuse_transmission",
+    "KHR_materials_emissive_strength",
+    "KHR_materials_ior",
+    "KHR_materials_sheen",
+    "KHR_materials_specular",
+    "KHR_materials_transmission"
+  ],
+  "images": [
+    {
+      "name": "base_color",
+      "uri": "base_color.png"
+    },
+    {
+      "name": "normal",
+      "uri": "normal.png"
+    },
+    {
+      "name": "orm",
+      "uri": "orm.png"
+    },
+    {
+      "name": "anisotropy",
+      "uri": "anisotropy.png"
+    },
+    {
+      "name": "specular",
+      "uri": "specular.png"
+    },
+    {
+      "name": "clearcoat",
+      "uri": "clearcoat.png"
+    },
+    {
+      "name": "clearcoat_normal",
+      "uri": "clearcoat_normal.png"
+    },
+    {
+      "name": "emissive",
+      "uri": "emissive.png"
+    }
+  ],
+  "materials": [
+    {
+      "emissiveFactor": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "emissiveTexture": {
+        "index": 7
+      },
+      "extensions": {
+        "KHR_materials_anisotropy": {
+          "anisotropyStrength": 1.0,
+          "anisotropyTexture": {
+            "index": 3
+          }
+        },
+        "KHR_materials_clearcoat": {
+          "clearcoatFactor": 1.0,
+          "clearcoatNormalTexture": {
+            "index": 6
+          },
+          "clearcoatRoughnessFactor": 1.0,
+          "clearcoatRoughnessTexture": {
+            "index": 5
+          },
+          "clearcoatTexture": {
+            "index": 5
+          }
+        },
+        "KHR_materials_diffuse_transmission": {
+          "diffuseTransmissionColorFactor": [
+            0.9,
+            0.5,
+            0.4
+          ],
+          "diffuseTransmissionFactor": 0.3
+        },
+        "KHR_materials_emissive_strength": {
+          "emissiveStrength": 40.0
+        },
+        "KHR_materials_ior": {
+          "ior": 1.4
+        },
+        "KHR_materials_sheen": {
+          "sheenColorFactor": [
+            0.2,
+            0.3,
+            0.1
+          ],
+          "sheenRoughnessFactor": 0.5
+        },
+        "KHR_materials_specular": {
+          "specularColorFactor": [
+            1.5,
+            1.5,
+            1.5
+          ],
+          "specularColorTexture": {
+            "index": 4
+          },
+          "specularFactor": 1.0,
+          "specularTexture": {
+            "index": 4
+          }
+        },
+        "KHR_materials_transmission": {
+          "transmissionFactor": 0.1
+        }
+      },
+      "name": "showcase",
+      "normalTexture": {
+        "index": 1
+      },
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "baseColorTexture": {
+          "index": 0
+        },
+        "metallicFactor": 1.0,
+        "metallicRoughnessTexture": {
+          "index": 2
+        },
+        "roughnessFactor": 1.0
+      }
+    }
+  ],
+  "meshes": [
+    {
+      "name": "showcase",
+      "primitives": [
+        {
+          "attributes": {
+            "NORMAL": 1,
+            "POSITION": 0,
+            "TANGENT": 2,
+            "TEXCOORD_0": 3
+          },
+          "indices": 4,
+          "material": 0
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "mesh": 0,
+      "name": "showcase"
+    }
+  ],
+  "samplers": [
+    {
+      "magFilter": 9729,
+      "minFilter": 9987,
+      "wrapS": 10497,
+      "wrapT": 10497
+    }
+  ],
+  "scene": 0,
+  "scenes": [
+    {
+      "name": "showcase",
+      "nodes": [
+        0
+      ]
+    }
+  ],
+  "textures": [
+    {
+      "name": "base_color",
+      "sampler": 0,
+      "source": 0
+    },
+    {
+      "name": "normal",
+      "sampler": 0,
+      "source": 1
+    },
+    {
+      "name": "orm",
+      "sampler": 0,
+      "source": 2
+    },
+    {
+      "name": "anisotropy",
+      "sampler": 0,
+      "source": 3
+    },
+    {
+      "name": "specular",
+      "sampler": 0,
+      "source": 4
+    },
+    {
+      "name": "clearcoat",
+      "sampler": 0,
+      "source": 5
+    },
+    {
+      "name": "clearcoat_normal",
+      "sampler": 0,
+      "source": 6
+    },
+    {
+      "name": "emissive",
+      "sampler": 0,
+      "source": 7
+    }
+  ]
+}

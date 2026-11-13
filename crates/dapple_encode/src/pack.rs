@@ -5,6 +5,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use dapple_raster::Edge;
 
@@ -176,6 +177,28 @@ pub struct PackReport {
     pub unsupported: Vec<&'static str>,
 }
 
+/// Where a [`Bundle`] holds one parameter: which channels of which texture,
+/// and what their values stand for.
+///
+/// A parameter value is `range[0] + (range[1] - range[0]) * t`, where `t`
+/// is the channel's texel as a `[0, 1]` fraction of full scale after the
+/// format's transfer function (sRGB channels are decoded first). When two
+/// placements cover the same channels, the channels hold the product of
+/// their values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Placement {
+    /// The parameter, by its [`MaterialMaps`] field name, for example
+    /// `"coat_weight"` or `"normal"`.
+    pub name: &'static str,
+    /// The [`EncodedTexture::name`] of the texture that holds it.
+    pub texture: &'static str,
+    /// The texel channels it occupies, as many as the parameter has.
+    pub channels: Range<usize>,
+    /// The values texel 0 and full scale stand for: `[0, 1]` for most
+    /// parameters, `[-1, 1]` for unit vectors.
+    pub range: [f32; 2],
+}
+
 /// Textures for one profile.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Bundle {
@@ -186,6 +209,15 @@ pub struct Bundle {
     /// `transmission`, then the coat: `clearcoat` (glTF) (raw: one per
     /// parameter, in [`MaterialMaps`] field order).
     pub textures: Vec<EncodedTexture>,
+    /// Where each parameter given to [`pack()`] went, in texture order.
+    ///
+    /// Only parameters given as maps, or derived from them (roughness
+    /// widened by normal variance), are placed. A texture's other channels
+    /// hold the specification's default for what the layout puts there,
+    /// such as occlusion 1 in an `orm` texture packed for its roughness, or
+    /// padding (alpha 1), so a consumer that samples a texture for one
+    /// channel reads correct values in the others with a factor of 1.
+    pub placements: Vec<Placement>,
     /// Measurements.
     pub report: PackReport,
 }
@@ -195,6 +227,31 @@ impl Bundle {
     #[must_use]
     pub fn texture(&self, name: &str) -> Option<&EncodedTexture> {
         self.textures.iter().find(|t| t.name == name)
+    }
+
+    /// Where the parameter named `name` (a [`MaterialMaps`] field name) is
+    /// held, when a texture holds it.
+    #[must_use]
+    pub fn placement(&self, name: &str) -> Option<&Placement> {
+        self.placements.iter().find(|p| p.name == name)
+    }
+}
+
+const UNIT: [f32; 2] = [0.0, 1.0];
+const SIGNED: [f32; 2] = [-1.0, 1.0];
+
+fn place(
+    placements: &mut Vec<Placement>,
+    texture: &'static str,
+    layout: &[(&'static str, Range<usize>, [f32; 2])],
+) {
+    for (name, channels, range) in layout {
+        placements.push(Placement {
+            name,
+            texture,
+            channels: channels.clone(),
+            range: *range,
+        });
     }
 }
 
@@ -365,6 +422,7 @@ pub fn pack(
         return Ok(Bundle {
             profile,
             textures: Vec::new(),
+            placements: Vec::new(),
             report: PackReport::default(),
         });
     };
@@ -468,6 +526,7 @@ pub fn pack(
     };
 
     let mut textures = Vec::new();
+    let mut placements = Vec::new();
     if let Some(color) = &color {
         let format = if profile == Profile::Raw {
             PixelFormat::Rgba8Unorm
@@ -497,7 +556,14 @@ pub fn pack(
             },
             size,
         ));
+        if maps.base_color.is_some() {
+            place(&mut placements, "base_color", &[("base_color", 0..3, UNIT)]);
+        }
+        if profile != Profile::Raw && maps.opacity.is_some() {
+            place(&mut placements, "base_color", &[("opacity", 3..4, UNIT)]);
+        }
         if profile == Profile::Raw && maps.opacity.is_some() {
+            place(&mut placements, "opacity", &[("opacity", 0..1, UNIT)]);
             textures.push(encode(
                 "opacity",
                 PixelFormat::R8Unorm,
@@ -533,6 +599,12 @@ pub fn pack(
             },
             size,
         ));
+        let channels = if format == PixelFormat::Rg8Unorm {
+            0..2
+        } else {
+            0..3
+        };
+        place(&mut placements, name, &[("normal", channels, SIGNED)]);
     }
     match profile {
         Profile::Lightweald | Profile::Gltf => {
@@ -560,6 +632,19 @@ pub fn pack(
                     },
                     size,
                 ));
+                for (name, chain, channel) in [
+                    ("occlusion", &occlusion, 0),
+                    ("specular_roughness", &roughness, 1),
+                    ("base_metalness", &metalness, 2),
+                ] {
+                    if chain.is_some() {
+                        place(
+                            &mut placements,
+                            "orm",
+                            &[(name, channel..channel + 1, UNIT)],
+                        );
+                    }
+                }
             }
         }
         Profile::Raw => {
@@ -577,6 +662,7 @@ pub fn pack(
                         |level, i, out| out.push(quantize_unorm8(value(chain, level, i, 0.0))),
                         size,
                     ));
+                    place(&mut placements, name, &[(name, 0..1, UNIT)]);
                 }
             }
         }
@@ -592,25 +678,45 @@ pub fn pack(
         };
         let unit = |v: f32| v * 0.5 + 0.5;
         match profile {
-            Profile::Lightweald | Profile::Gltf => textures.push(encode(
-                "anisotropy",
-                PixelFormat::Rgba8Unorm,
-                level_count,
-                edge,
-                |level, i, out| {
-                    let (c, s, coherence) = axis(level, i);
-                    let strength =
-                        value(&strength, level, i, settings.specular_roughness_anisotropy);
-                    // +Y toward the image top, as for normals. An axis and its
-                    // opposite are one direction, so the sign of the pair is free.
-                    out.push(quantize_unorm8(unit(c)));
-                    out.push(quantize_unorm8(unit(-s)));
-                    out.push(quantize_unorm8(strength * coherence));
-                    out.push(255);
-                },
-                size,
-            )),
+            Profile::Lightweald | Profile::Gltf => {
+                place(
+                    &mut placements,
+                    "anisotropy",
+                    &[
+                        ("anisotropy_direction", 0..2, SIGNED),
+                        ("specular_roughness_anisotropy", 2..3, UNIT),
+                    ],
+                );
+                textures.push(encode(
+                    "anisotropy",
+                    PixelFormat::Rgba8Unorm,
+                    level_count,
+                    edge,
+                    |level, i, out| {
+                        let (c, s, coherence) = axis(level, i);
+                        let strength =
+                            value(&strength, level, i, settings.specular_roughness_anisotropy);
+                        // +Y toward the image top, as for normals. An axis and its
+                        // opposite are one direction, so the sign of the pair is free.
+                        out.push(quantize_unorm8(unit(c)));
+                        out.push(quantize_unorm8(unit(-s)));
+                        out.push(quantize_unorm8(strength * coherence));
+                        out.push(255);
+                    },
+                    size,
+                ));
+            }
             Profile::Raw => {
+                place(
+                    &mut placements,
+                    "anisotropy_direction",
+                    &[("anisotropy_direction", 0..2, SIGNED)],
+                );
+                place(
+                    &mut placements,
+                    "specular_roughness_anisotropy",
+                    &[("specular_roughness_anisotropy", 0..1, UNIT)],
+                );
                 textures.push(encode(
                     "anisotropy_direction",
                     PixelFormat::Rg8Unorm,
@@ -673,6 +779,20 @@ pub fn pack(
                 },
                 settings.filter,
             );
+            if maps.subsurface_color.is_some() {
+                place(
+                    &mut placements,
+                    "diffuse_transmission",
+                    &[("subsurface_color", 0..3, UNIT)],
+                );
+            }
+            if maps.subsurface_weight.is_some() {
+                place(
+                    &mut placements,
+                    "diffuse_transmission",
+                    &[("subsurface_weight", 3..4, UNIT)],
+                );
+            }
             textures.push(encode(
                 "diffuse_transmission",
                 PixelFormat::Rgba8Srgb,
@@ -703,8 +823,18 @@ pub fn pack(
                     |level, i, out| out.push(quantize_unorm8(value(&weight, level, i, 0.0))),
                     size,
                 ));
+                place(
+                    &mut placements,
+                    "subsurface_weight",
+                    &[("subsurface_weight", 0..1, UNIT)],
+                );
             }
             if let Some(color) = &maps.subsurface_color {
+                place(
+                    &mut placements,
+                    "subsurface_color",
+                    &[("subsurface_color", 0..3, UNIT)],
+                );
                 let chain = data_mips(color, settings.filter);
                 textures.push(encode(
                     "subsurface_color",
@@ -725,12 +855,18 @@ pub fn pack(
     }
     if let Some(transmission) = &maps.transmission_weight {
         let chain = Some(data_mips(transmission, settings.filter));
+        let name = if profile == Profile::Raw {
+            "transmission_weight"
+        } else {
+            "transmission"
+        };
+        place(
+            &mut placements,
+            name,
+            &[("transmission_weight", 0..1, UNIT)],
+        );
         textures.push(encode(
-            if profile == Profile::Raw {
-                "transmission_weight"
-            } else {
-                "transmission"
-            },
+            name,
             PixelFormat::R8Unorm,
             level_count,
             edge,
@@ -766,6 +902,18 @@ pub fn pack(
         }
         Profile::Gltf => {
             if coat {
+                for (name, chain, channel) in [
+                    ("coat_weight", &coat_weight, 0),
+                    ("coat_roughness", &coat_roughness, 1),
+                ] {
+                    if chain.is_some() {
+                        place(
+                            &mut placements,
+                            "clearcoat",
+                            &[(name, channel..channel + 1, UNIT)],
+                        );
+                    }
+                }
                 textures.push(encode(
                     "clearcoat",
                     PixelFormat::Rgba8Unorm,
@@ -808,9 +956,11 @@ pub fn pack(
                         |level, i, out| out.push(quantize_unorm8(value(chain, level, i, 0.0))),
                         size,
                     ));
+                    place(&mut placements, name, &[(name, 0..1, UNIT)]);
                 }
             }
             if let Some(color) = &maps.coat_color {
+                place(&mut placements, "coat_color", &[("coat_color", 0..3, UNIT)]);
                 let chain = data_mips(color, settings.filter);
                 textures.push(encode(
                     "coat_color",
@@ -839,6 +989,7 @@ pub fn pack(
     Ok(Bundle {
         profile,
         textures,
+        placements,
         report,
     })
 }
@@ -946,6 +1097,27 @@ mod tests {
         assert_eq!(normal.format, PixelFormat::Rgba8Unorm);
         assert_eq!(normal.levels[0][2], quantize_unorm8(s * 0.5 + 0.5));
 
+        let placed = |bundle: &Bundle| {
+            bundle
+                .placements
+                .iter()
+                .map(|p| (p.name, p.texture, p.channels.clone()))
+                .collect::<Vec<_>>()
+        };
+        // Roughness is placed though no map was given: normal variance
+        // widens it. Occlusion was not given, so it is not placed.
+        assert_eq!(
+            placed(&lw),
+            [
+                ("base_color", "base_color", 0..3),
+                ("normal", "normal", 0..2),
+                ("specular_roughness", "orm", 1..2),
+                ("base_metalness", "orm", 2..3),
+            ]
+        );
+        assert_eq!(lw.placement("normal").unwrap().range, [-1.0, 1.0]);
+        assert_eq!(gltf.placement("normal").unwrap().channels, 0..3);
+
         let raw = pack(&maps, Profile::Raw, &PackSettings::default()).unwrap();
         let names: Vec<_> = raw.textures.iter().map(|t| t.name).collect();
         assert_eq!(
@@ -957,6 +1129,9 @@ mod tests {
                 "base_metalness"
             ]
         );
+        for p in &raw.placements {
+            assert_eq!(p.name, p.texture, "raw: one texture per parameter");
+        }
         assert_eq!(
             raw.texture("normal").unwrap().levels[0][1],
             quantize_unorm8(s * 0.5 + 0.5)
@@ -1155,6 +1330,11 @@ mod tests {
         assert_eq!(transmission.format, PixelFormat::R8Unorm);
         assert_eq!(transmission.levels[0][0], quantize_unorm8(0.25));
         assert!(gltf.report.unsupported.is_empty());
+        let weight = gltf.placement("subsurface_weight").unwrap();
+        assert_eq!(
+            (weight.texture, weight.channels.clone()),
+            ("diffuse_transmission", 3..4)
+        );
 
         let lightweald = pack(&maps, Profile::Lightweald, &settings).unwrap();
         let names: Vec<_> = lightweald.textures.iter().map(|t| t.name).collect();
@@ -1215,6 +1395,8 @@ mod tests {
             "roughness in G"
         );
         assert_eq!(gltf.report.unsupported, ["coat_color"], "no tint in glTF");
+        assert_eq!(gltf.placement("coat_roughness").unwrap().channels, 1..2);
+        assert!(gltf.placement("coat_color").is_none());
         let lightweald = pack(&maps, Profile::Lightweald, &settings).unwrap();
         assert!(lightweald.textures.is_empty(), "no coat slot");
         assert_eq!(lightweald.report.unsupported.len(), 3);

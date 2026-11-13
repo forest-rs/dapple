@@ -2375,4 +2375,31 @@ mod tests {
         let le: Vec<u8> = samples.chunks(2).flat_map(|b| [b[1], b[0]]).collect();
         assert_eq!(le, normal.levels[0]);
     }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn png_files_carry_no_color_space_chunk() {
+        let maps = MaterialMaps {
+            base_color: Some(flat(3, &[0.5, 0.25, 0.0]).into()),
+            ..MaterialMaps::default()
+        };
+        let bundle = pack(&maps, Profile::Gltf, &PackSettings::default()).unwrap();
+        let color = bundle.texture("base_color").unwrap();
+        assert!(color.format.is_srgb());
+        let bytes = crate::png::write(color).unwrap();
+        // glTF 2.0, 3.8.3.2: color-space chunks should not be present.
+        for chunk in [b"sRGB", b"gAMA", b"iCCP", b"cHRM"] {
+            assert!(
+                !bytes.windows(4).any(|w| w == chunk),
+                "{} chunk written",
+                core::str::from_utf8(chunk).unwrap()
+            );
+        }
+        let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+            .read_info()
+            .unwrap();
+        let mut samples = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut samples).unwrap();
+        assert_eq!(samples, color.levels[0], "the samples are the texels");
+    }
 }

@@ -7,9 +7,13 @@
 //! [`crate::ktx2::write`] to keep the mip chain. One-channel textures become
 //! grayscale PNG files. PNG has no two-channel color type, so two-channel textures
 //! are written as RGB with blue 0. 16-bit textures become 16-bit grayscale
-//! or RGB; PNG has no float samples, so float textures are refused. sRGB textures
-//! carry an `sRGB` chunk; linear ones carry none, and consumers such as glTF
-//! read normal and metallic-roughness PNG files as linear data regardless.
+//! or RGB; PNG has no float samples, so float textures are refused.
+//!
+//! Files carry no color-space chunk (`sRGB`, `gAMA`, `iCCP`), sRGB textures
+//! included: glTF 2.0 (section 3.8.3.2, PNG support) says such chunks should
+//! not be present and that loaders should ignore them, since the material
+//! slot that reads an image decides its transfer function. Whoever reads a
+//! texture learns its encoding from [`EncodedTexture::format`] instead.
 
 use std::vec::Vec;
 
@@ -81,9 +85,6 @@ pub fn write(texture: &EncodedTexture) -> Result<Vec<u8>, PngError> {
         let mut encoder = png::Encoder::new(&mut out, texture.width, texture.height);
         encoder.set_color(color);
         encoder.set_depth(depth);
-        if texture.format.is_srgb() {
-            encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
-        }
         let mut writer = encoder.write_header()?;
         writer.write_image_data(&data)?;
     }

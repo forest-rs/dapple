@@ -23,11 +23,18 @@ level and `next_level_into` recomputes a rect of it bit for bit, with
 `source_span` naming the source texels a rect reads, for incremental callers
 such as `dapple_graph`'s mip nodes.
 
-`pack` turns OpenPBR maps into 8-bit textures for a profile:
+`pack` turns OpenPBR parameters, each a map or a constant, into textures and
+constants for a profile:
 - `Lightweald`: the `lightweald_material` slots, with a two-channel normal map
   and an occlusion/roughness/metalness texture;
-- `Gltf`: glTF 2.0 textures;
-- `Raw`: one texture per parameter.
+- `Gltf`: glTF 2.0 textures, with the layouts its material extensions read
+  (anisotropy, specular, diffuse transmission, transmission, clearcoat,
+  sheen) and its factors for constants;
+- `Raw`: one texture per parameter map, and every constant.
+
+The bundle says which channels of which texture hold each parameter
+(`Placement`), which parameters are constants, and which the profile could
+not carry at all, so nothing is dropped silently. Normals can be 16-bit RGB.
 
 `encode_data` writes any chain, such as height or identifiers, in 8-bit,
 16-bit or float formats. `ktx2::write` writes a texture with its whole mip

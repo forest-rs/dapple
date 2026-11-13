@@ -1966,3 +1966,39 @@ fn whole_recomputes_mark_only_the_tiles_that_changed() {
         "{report:?}"
     );
 }
+
+#[test]
+fn whole_computations_count_against_tile_budgets() {
+    let mut g = MaterialGraph::with_tile_size(16);
+    let disk = g.field("disk", disk_op(0.2), &[]).unwrap();
+    let map = g.realize("map", disk, 64, 64).unwrap();
+    let reduced = g
+        .reduce("reduced", map, ReductionPolicy::Average, 1)
+        .unwrap();
+    let sampled = g
+        .sample("sampled", &[reduced], SamplePolicy::Linear)
+        .unwrap();
+    g.realize("again", sampled, 64, 64).unwrap();
+    g.run().unwrap();
+
+    // The reduction recomputes its 4 tiles whole, which spends the budget,
+    // so the realization behind it waits for the next run.
+    g.set_tile_budget(Some(4));
+    g.set_reduction(
+        reduced,
+        ReductionPolicy::ThresholdCoverage { cutoff: 0.5 },
+        1,
+    )
+    .unwrap();
+    g.run().unwrap();
+    let report = g.tile_report();
+    assert_eq!(report.tiles_recomputed, 4, "{report:?}");
+    assert!(report.pending_tiles > 0, "{report:?}");
+    for runs in 0.. {
+        g.run().unwrap();
+        if g.tile_report().pending_tiles == 0 {
+            break;
+        }
+        assert!(runs < 100, "budgeted runs must converge");
+    }
+}

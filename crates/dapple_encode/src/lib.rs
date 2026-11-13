@@ -88,7 +88,7 @@ pub use mips::{
 };
 pub use pack::{
     Approximation, Bundle, Constant, EncodedTexture, Input, MaterialMaps, PackReport, PackSettings,
-    Placement, Profile, TextureKind, encode_data, pack,
+    Placement, Profile, TextureKind, encode_data, gltf_anisotropy_strength, pack,
 };
 pub use quantize::{PixelFormat, linear_to_srgb, quantize_unorm8, quantize_unorm16};
 

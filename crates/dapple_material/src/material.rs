@@ -678,7 +678,12 @@ impl Material {
     }
 
     /// A hash of the grid, the tiling promise and every bound channel's
-    /// values.
+    /// values: the material's content identity.
+    ///
+    /// Maps keep their digests ([`dapple_raster::Raster::digest`]), and a
+    /// material shares its maps' texels with the materials it was cloned
+    /// from or made of, so each map is hashed once per content; the rest is
+    /// a few words per bound channel.
     #[must_use]
     pub fn digest(&self) -> u64 {
         let g = &self.grid;

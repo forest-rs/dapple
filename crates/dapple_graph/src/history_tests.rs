@@ -6,7 +6,8 @@
 //! A history starts from one graph holding every node kind and applies
 //! random actions: local edits (a moved disk) and global ones (a new noise
 //! seed, a new resolution), edits that change what sample nodes read, edits
-//! the graph must refuse, tile budgets, and failures, both an invalid
+//! and removals the graph must refuse, removing nodes and adding them back,
+//! tile budgets, and failures, both an invalid
 //! parameter and a failure injected where a node's computation can fail,
 //! each followed later by recovery. After every run that settles without
 //! error, every node's output must equal, bit for bit, the output of a graph
@@ -228,9 +229,27 @@ enum Action {
     Fail(&'static str),
     /// Stop injecting failures.
     Heal,
+    /// Remove a node nothing reads.
+    Remove(&'static str),
+    /// Add a removed node back, with the parameters it had.
+    Restore(&'static str),
+    /// Try to remove a node something reads, which the graph refuses.
+    RefuseRemove(&'static str),
     /// Run until no tiles are pending, then check against a fresh graph.
     Settle,
 }
+
+/// Nodes nothing reads, which can be removed and added back.
+const LEAVES: [&str; 8] = [
+    "relief",
+    "coarse",
+    "again",
+    "warp.normals",
+    "normals",
+    "blend.map",
+    "mask.red",
+    "id.again",
+];
 
 /// A valid operation for `soft`.
 fn soft_params(rng: &mut Rng) -> Params {
@@ -399,9 +418,10 @@ fn history(seed: u64, steps: usize) -> Vec<Action> {
     // Settles left before a failure, injected or a broken `soft`, is fixed.
     let mut heal_in = None;
     let mut fix_in = None;
+    let mut removed = alloc::collections::BTreeSet::new();
     for _ in 0..steps {
         for _ in 0..=rng.below(3) {
-            actions.push(match rng.below(20) {
+            actions.push(match rng.below(22) {
                 0..=13 => random_edit(&mut rng),
                 14 => refused_edit(&mut rng),
                 15 | 16 => {
@@ -411,6 +431,18 @@ fn history(seed: u64, steps: usize) -> Vec<Action> {
                     heal_in.get_or_insert(rng.below(3));
                     Action::Fail(rng.pick(&LABELS))
                 }
+                19 => {
+                    let leaf = rng.pick(&LEAVES);
+                    if removed.remove(leaf) {
+                        Action::Restore(leaf)
+                    } else {
+                        removed.insert(leaf);
+                        Action::Remove(leaf)
+                    }
+                }
+                20 => Action::RefuseRemove(
+                    rng.pick(&["noise", "map", "soft", "mip1", "sampled", "id.map"]),
+                ),
                 _ => {
                     fix_in.get_or_insert(rng.below(3));
                     Action::Edit("soft", Params::Raster(blur(-1.0)))
@@ -502,6 +534,38 @@ fn assign(step: &mut Step, params: &Params) {
     }
 }
 
+/// Adds `node` to `graph`, its inputs named as in `ids`.
+fn add(
+    graph: &mut MaterialGraph,
+    ids: &BTreeMap<String, NodeId>,
+    node: &RecipeNode,
+) -> Result<NodeId, MaterialError> {
+    let label = node.label.as_str();
+    let all = |inputs: &[String]| -> Vec<NodeId> { inputs.iter().map(|i| ids[i]).collect() };
+    match &node.step {
+        Step::Field { op, inputs } => graph.field(label, op.clone(), &all(inputs)),
+        Step::Realize {
+            input,
+            width,
+            height,
+        } => graph.realize(label, ids[input], *width, *height),
+        Step::Raster { input, params } => graph.raster(label, *params, ids[input]),
+        Step::Mip { input, filter } => graph.mip(label, ids[input], *filter),
+        Step::Reduce {
+            input,
+            policy,
+            level,
+        } => graph.reduce(label, ids[input], *policy, *level),
+        Step::Sample { inputs, policy } => graph.sample(label, &all(inputs), *policy),
+        Step::Normals {
+            input,
+            width,
+            height,
+            scale,
+        } => graph.normals(label, ids[input], (*width, *height), *scale),
+    }
+}
+
 /// A raster's grid and exact texel bits.
 fn raster_bits(data: &RasterData) -> Vec<u32> {
     let (width, height, origin, texel, edge) = data.shape();
@@ -582,6 +646,8 @@ struct Replay {
     graph: MaterialGraph,
     ids: BTreeMap<String, NodeId>,
     recipe: Recipe,
+    /// Removed nodes, by label.
+    removed: BTreeMap<String, RecipeNode>,
     /// Settles that compared against a fresh graph.
     checked: usize,
 }
@@ -595,6 +661,7 @@ impl Replay {
             graph,
             ids,
             recipe,
+            removed: BTreeMap::new(),
             checked: 0,
         }
     }
@@ -605,9 +672,7 @@ impl Replay {
 
     /// The tile space of `label`'s node, which keys injected failures.
     fn key(&self, label: &str) -> u32 {
-        let node = self.node(label);
-        let index = self.graph.order.iter().position(|&n| n == node).unwrap();
-        u32::try_from(index).unwrap()
+        self.graph.entries[&self.node(label)].space
     }
 
     fn failing(&mut self) -> &mut alloc::collections::BTreeSet<u32> {
@@ -615,6 +680,20 @@ impl Replay {
     }
 
     fn apply(&mut self, action: &Action) -> Result<(), String> {
+        // Actions on removed nodes do nothing, so that any part of a history
+        // is a history.
+        match action {
+            Action::Edit(label, _)
+            | Action::Refuse(label, _)
+            | Action::Fail(label)
+            | Action::Remove(label)
+                if !self.ids.contains_key(*label) =>
+            {
+                return Ok(());
+            }
+            Action::Restore(label) if !self.removed.contains_key(*label) => return Ok(()),
+            _ => {}
+        }
         match action {
             Action::Edit(label, params) => {
                 let node = self.node(label);
@@ -638,6 +717,31 @@ impl Replay {
                 self.failing().insert(key);
             }
             Action::Heal => self.failing().clear(),
+            Action::Remove(label) => {
+                let node = self.ids.remove(*label).unwrap();
+                self.graph
+                    .remove_node(node)
+                    .map_err(|e| format!("removal refused: {e}"))?;
+                let index = self.recipe.nodes.iter().position(|n| n.label == *label);
+                let removed = self.recipe.nodes.remove(index.unwrap());
+                self.removed.insert(removed.label.clone(), removed);
+            }
+            Action::Restore(label) => {
+                let node = self.removed.remove(*label).unwrap();
+                let id = add(&mut self.graph, &self.ids, &node)
+                    .map_err(|e| format!("adding back refused: {e}"))?;
+                self.ids.insert(node.label.clone(), id);
+                self.recipe.nodes.push(node);
+            }
+            Action::RefuseRemove(label) => {
+                match self.graph.remove_node(self.node(label)) {
+                    Err(MaterialError::InUse { .. }) => {}
+                    other => return Err(format!("expected a refused removal, found {other:?}")),
+                }
+                if self.graph.recipe() != self.recipe {
+                    return Err("a refused removal changed the graph".into());
+                }
+            }
             Action::Settle => self.settle()?,
         }
         Ok(())

@@ -25,7 +25,7 @@ make any node's inputs invalid.
 Each node's parameters are one of its inputs, so editing them re-runs exactly
 that node and its dependents; a node whose output does not change cuts its
 dependents off. Realize, raster, normals and mip nodes recompute only the
-tiles an edit reaches. Values on edges are reference-counted programs and
-rasters with fingerprints.
+tiles an edit reaches. A node nothing reads can be removed. Values on edges
+are reference-counted programs and rasters with fingerprints.
 
 `#![no_std]` with `alloc`.

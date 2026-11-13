@@ -33,8 +33,9 @@
 //! an input of that node, named `<label>.params`. Editing them with
 //! [`MaterialGraph::set_field_op`] or its siblings rebinds and invalidates only
 //! that input, so the next [`MaterialGraph::run`] re-runs exactly the edited
-//! node and its dependents. `execution_graph` schedules, records dependencies
-//! and reports.
+//! node and its dependents. [`MaterialGraph::remove_node`] removes a node
+//! nothing reads. `execution_graph` schedules, records dependencies and
+//! reports.
 //!
 //! Every raster carries its semantic type ([`RasterValue::port`]): a mask
 //! stays a mask, a normal a normal, an identifier an identifier. Types are
@@ -153,7 +154,6 @@ use execution_graph::{
     ExecutionGraph, Executor, GraphError, NodeAccess, NodeId, NodeOutcome, RunSummary,
 };
 use glam::Vec2;
-use invalidation::intern::InternId;
 
 mod changes;
 mod recipe;
@@ -166,7 +166,7 @@ pub use recipe::{
     NodeFingerprint, RECIPE_VERSION, Recipe, RecipeError, RecipeNode, RecipeOutput, Step,
 };
 pub use tiles::{DEFAULT_TILE_SIZE, TileReport};
-use tiles::{Grid, Tiles};
+use tiles::{Grid, TileId, Tiles};
 
 /// The placeholder for a field node's `index`-th upstream input, for use as an
 /// operand of the node's [`Op`].
@@ -432,7 +432,7 @@ struct FieldState {
 struct SampleState {
     /// Per sampled raster: its tile space, its grid, and this node's keys
     /// mirroring its tiles one to one.
-    levels: Vec<(u32, Grid, Vec<InternId>)>,
+    levels: Vec<(u32, Grid, Vec<TileId>)>,
     /// The previous program's fingerprint.
     output: Option<Fingerprint>,
     serial: u64,
@@ -566,6 +566,14 @@ pub enum MaterialError {
         /// Why it refuses its inputs.
         error: NodeError,
     },
+    /// A node cannot be removed while another node reads it; remove the
+    /// readers first. The graph is unchanged.
+    InUse {
+        /// The label of the node that was to be removed.
+        label: String,
+        /// The label of a node that reads it.
+        reader: String,
+    },
     /// The graph rejected a call or a node failed.
     Graph(GraphError<NodeError>),
 }
@@ -582,6 +590,7 @@ impl fmt::Display for MaterialError {
             Self::DuplicateLabel(label) => write!(f, "label {label:?} is already used"),
             Self::UnknownNode => f.write_str("unknown node, or a node of another kind"),
             Self::Refused { label, error } => write!(f, "node {label:?}: {error}"),
+            Self::InUse { label, reader } => write!(f, "node {label:?} is read by {reader:?}"),
             Self::Graph(error) => write!(f, "{error:?}"),
         }
     }
@@ -1561,6 +1570,8 @@ struct Entry {
     upstream: Vec<NodeId>,
     /// The output's type, derived when the node was added or last edited.
     port: PortType,
+    /// The node's tile space.
+    space: u32,
 }
 
 /// An incremental material graph; see the [crate docs](crate).
@@ -1569,6 +1580,9 @@ pub struct MaterialGraph {
     graph: ExecutionGraph<DappleExecutor>,
     entries: BTreeMap<NodeId, Entry>,
     order: Vec<NodeId>,
+    /// The tile space of the next node added. Tile spaces name a node's
+    /// tiles and its pending work, so none is ever given out twice.
+    next_space: u32,
 }
 
 impl Default for MaterialGraph {
@@ -1592,6 +1606,7 @@ impl MaterialGraph {
             graph: ExecutionGraph::new(DappleExecutor::new(tile_size)),
             entries: BTreeMap::new(),
             order: Vec::new(),
+            next_space: 0,
         }
     }
 
@@ -1618,9 +1633,11 @@ impl MaterialGraph {
         let params_name = Self::params_name(label);
         let mut inputs: Vec<Box<str>> = vec![params_name.clone().into()];
         inputs.extend((0..upstream.len()).map(|i| Box::from(format!("{label}.in{i}"))));
+        let space = self.next_space;
+        self.next_space = space.checked_add(1).expect("fewer than 2^32 nodes added");
         let body = DappleNode {
             kind,
-            key: u32::try_from(self.entries.len()).expect("fewer than 2^32 nodes"),
+            key: space,
             field: FieldState::default(),
             tiles: TileState::default(),
             sample: SampleState::default(),
@@ -1644,6 +1661,7 @@ impl MaterialGraph {
                 params,
                 upstream: upstream.to_vec(),
                 port,
+                space,
             },
         );
         self.order.push(node);
@@ -1880,6 +1898,32 @@ impl MaterialGraph {
         self.graph
             .set_input_value(node, name.clone(), GraphValue::Params(Arc::new(params)))?;
         self.graph.invalidate_input(name);
+        Ok(())
+    }
+
+    /// Removes `node`, which no other node may read, and releases its tiles
+    /// and state. Its label is free again.
+    ///
+    /// # Errors
+    ///
+    /// [`MaterialError::UnknownNode`] for a node not in this graph, or
+    /// [`MaterialError::InUse`] while another node reads it.
+    pub fn remove_node(&mut self, node: NodeId) -> Result<(), MaterialError> {
+        let entry = self.entries.get(&node).ok_or(MaterialError::UnknownNode)?;
+        if let Some(reader) = self
+            .order
+            .iter()
+            .find(|id| self.entries[id].upstream.contains(&node))
+        {
+            return Err(MaterialError::InUse {
+                label: entry.label.clone(),
+                reader: self.entries[reader].label.clone(),
+            });
+        }
+        self.graph.remove_node(node)?;
+        let entry = self.entries.remove(&node).expect("checked above");
+        self.order.retain(|&id| id != node);
+        self.graph.executor_mut().tiles.remove_node(entry.space);
         Ok(())
     }
 

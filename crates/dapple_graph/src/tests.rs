@@ -2071,3 +2071,72 @@ fn budgeted_nodes_resume_through_their_pending_tiles() {
     fresh.graph.run().unwrap();
     assert_eq!(digests(&s), digests(&fresh));
 }
+
+#[test]
+fn removed_nodes_leave_the_graph_and_their_labels() {
+    let mut s = stamped(0.2, 1);
+    s.graph.run().unwrap();
+    let before = s.graph.recipe();
+    // The map has readers, so it stays.
+    assert!(matches!(
+        s.graph.remove_node(s.map),
+        Err(MaterialError::InUse { label, reader }) if label == "map" && reader == "soft"
+    ));
+    assert_eq!(s.graph.recipe(), before);
+
+    // The normals have none.
+    s.graph.remove_node(s.normals).unwrap();
+    assert!(s.graph.value(s.normals).is_none());
+    assert!(s.graph.port(s.normals).is_none());
+    assert!(matches!(
+        s.graph.remove_node(s.normals),
+        Err(MaterialError::UnknownNode)
+    ));
+    assert!(
+        s.graph
+            .recipe()
+            .nodes
+            .iter()
+            .all(|node| node.label != "normals")
+    );
+    // Nothing else re-runs.
+    assert_eq!(s.graph.run().unwrap().executed_nodes, 0);
+
+    // The label is free again. The new node gets a tile space of its own,
+    // not the distance transform's, although the graph is back to as many
+    // nodes as when that was added, so an edit reaches exactly the tiles it
+    // should in both.
+    let add = |g: &mut MaterialGraph, map| {
+        g.raster(
+            "normals",
+            RasterParams::Blur(GaussianBlur { sigma: 0.03 }),
+            map,
+        )
+        .unwrap()
+    };
+    let extra = add(&mut s.graph, s.map);
+    s.graph.run().unwrap();
+    s.graph.set_field_op(s.disk, disk_op(0.25)).unwrap();
+    s.graph.run().unwrap();
+
+    let mut fresh = stamped(0.25, 1);
+    fresh.graph.remove_node(fresh.normals).unwrap();
+    let fresh_extra = add(&mut fresh.graph, fresh.map);
+    fresh.graph.run().unwrap();
+    for (ours, theirs) in [
+        (s.soft, fresh.soft),
+        (s.distance, fresh.distance),
+        (extra, fresh_extra),
+    ] {
+        assert_eq!(digest(&s.graph, ours), digest(&fresh.graph, theirs));
+    }
+}
+
+/// The digest of a raster node's texels, whatever their layout.
+fn digest(g: &MaterialGraph, node: NodeId) -> u64 {
+    match &g.raster_value(node).unwrap().data {
+        RasterData::Scalar(r) => r.digest(),
+        RasterData::Vector3(r) => r.digest(),
+        RasterData::Typed(r) => r.digest(),
+    }
+}

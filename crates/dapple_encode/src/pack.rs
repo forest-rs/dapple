@@ -749,16 +749,25 @@ fn encode(
 /// - `specular`: sRGB RGB `specular_color` and linear A `specular_weight`,
 ///   which `KHR_materials_specular`'s `specularColorTexture` and
 ///   `specularTexture` read. A weight above 1 is stored as a fraction of
-///   its largest value, which the placement's range states (glTF's
-///   `specularFactor`).
+///   its largest value, which the placement's range states. glTF's
+///   `specularFactor` is at most 1, but its `specularColorFactor` may
+///   exceed 1 and scales the reflectance at normal incidence alone, which
+///   is what OpenPBR's weight above 1 raises; a writer states the scale
+///   there. A map's texels then keep their reflectance at normal
+///   incidence but reach only their share of the scale at grazing angles,
+///   which is reported approximated.
 /// - `sheen`: sRGB RGB `fuzz_color` times `fuzz_weight` (the extension has
 ///   no weight) and linear A `fuzz_roughness`, which
 ///   `KHR_materials_sheen`'s `sheenColorTexture` and
-///   `sheenRoughnessTexture` read.
+///   `sheenRoughnessTexture` read. glTF layers its clearcoat over the
+///   sheen where OpenPBR puts the fuzz on top of the coat, so fuzz on a
+///   coated material is reported approximated.
 /// - `emissive`: sRGB RGB `emission_color` times `emission_luminance`
 ///   divided by the largest luminance, whose value the luminance's
-///   placement range states; converting nits to a glTF emissive strength is
-///   the consumer's choice.
+///   placement range states. glTF's emissive value 1 is a luminance of
+///   1 cd/m² (glTF 2.0, 3.9.3), the unit of `emission_luminance`, so that
+///   range's upper bound is `KHR_materials_emissive_strength`'s
+///   `emissiveStrength`.
 /// - `specular_ior` has no texture in `KHR_materials_ior`: a constant is a
 ///   factor, a map is reported unsupported.
 ///
@@ -1596,9 +1605,37 @@ pub fn gltf_anisotropy_strength(roughness: f32, anisotropy: f32) -> f32 {
 const GLTF_ANISOTROPY: &str = "glTF widens the lobe along the anisotropy direction but keeps \
      specular_roughness across it, where OpenPBR narrows it; the strength matches the width along it";
 
+/// Why glTF's specular factor only approximates a weight map above 1.
+const GLTF_SPECULAR_WEIGHT: &str = "glTF's specularFactor is at most 1: a weight map above 1 is \
+     scaled into range and its scale moved into specularColorFactor, which keeps each texel's \
+     reflectance at normal incidence but lowers it toward grazing angles";
+/// Why glTF's sheen only approximates fuzz over a coat.
+const GLTF_SHEEN_UNDER_COAT: &str = "glTF layers its clearcoat over the sheen, where OpenPBR puts \
+     the fuzz on top of the coat";
+
 /// What glTF carries for `maps` only approximately, in field order.
 fn gltf_approximations(maps: &MaterialMaps) -> Vec<Approximation> {
     let mut out = Vec::new();
+    if map(&maps.specular_weight).is_some_and(|w| max_value(w) > 1.0) {
+        out.push(Approximation {
+            name: "specular_weight",
+            why: GLTF_SPECULAR_WEIGHT,
+        });
+    }
+    if active(&maps.fuzz_weight) && active(&maps.coat_weight) {
+        for (name, given) in [
+            ("fuzz_weight", true),
+            ("fuzz_color", maps.fuzz_color.is_some()),
+            ("fuzz_roughness", maps.fuzz_roughness.is_some()),
+        ] {
+            if given {
+                out.push(Approximation {
+                    name,
+                    why: GLTF_SHEEN_UNDER_COAT,
+                });
+            }
+        }
+    }
     if active(&maps.specular_roughness_anisotropy) {
         out.push(Approximation {
             name: "specular_roughness_anisotropy",
@@ -2106,6 +2143,45 @@ mod tests {
             lightweald.constant("specular_roughness_anisotropy"),
             Some([0.5].as_slice())
         );
+    }
+
+    #[test]
+    fn gltf_reports_strong_specular_maps_and_fuzz_under_a_coat() {
+        let approximated = |maps: &MaterialMaps| {
+            pack(maps, Profile::Gltf, &PackSettings::default())
+                .unwrap()
+                .report
+                .approximated
+                .iter()
+                .map(|a| a.name)
+                .collect::<Vec<_>>()
+        };
+        let strong = MaterialMaps {
+            specular_weight: Some(alternating(0.5, 1.5).into()),
+            fuzz_weight: Some(1.0.into()),
+            fuzz_roughness: Some(0.3.into()),
+            coat_weight: Some(alternating(0.0, 1.0).into()),
+            ..MaterialMaps::default()
+        };
+        assert_eq!(
+            approximated(&strong),
+            ["specular_weight", "fuzz_weight", "fuzz_roughness"]
+        );
+        // A weight map within [0, 1], a constant weight above 1 (the
+        // writer's color factor carries it exactly), and fuzz without a
+        // coat are what glTF models.
+        let plain = MaterialMaps {
+            specular_weight: Some(alternating(0.5, 1.0).into()),
+            coat_weight: Some(0.0.into()),
+            ..strong.clone()
+        };
+        assert!(approximated(&plain).is_empty());
+        let constant = MaterialMaps {
+            specular_weight: Some(1.5.into()),
+            fuzz_weight: None,
+            ..strong
+        };
+        assert!(approximated(&constant).is_empty());
     }
 
     #[test]

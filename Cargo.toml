@@ -20,6 +20,7 @@ members = [
     "examples/material_fit",
     "examples/material_lab",
     "examples/timber_bake",
+    "examples/varnished_board",
     "tools/dapple_bake",
 ]
 

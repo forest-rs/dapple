@@ -50,6 +50,9 @@
 //!   them, until those dependents rewire (see [`Tiles::keys`]).
 //! - A node computed whole wires one tile to every input tile, and any mark
 //!   recomputes it.
+//! - Tile spaces are never reused. Only a node nothing reads can be removed,
+//!   so its tiles leave the tracker with no dependent wired to them, and
+//!   their ids go to later tiles.
 //!
 //! # One run of a tile node
 //!
@@ -98,9 +101,8 @@ use dapple_field::raster::Region;
 use dapple_raster::{Raster, Realization, TexelRect};
 use execution_graph::{HostOpId, ResourceKey};
 use glam::Vec2;
-use invalidation::intern::InternId;
 
-use crate::tiles::{Grid, Tiles};
+use crate::tiles::{Grid, TileId, Tiles};
 use crate::{FieldValue, GraphValue, NodeError, RasterData, RasterParams, RasterValue, Shape};
 
 /// The version of `field` a consumer remembers: its fingerprint and serial.
@@ -188,7 +190,7 @@ pub(crate) struct TileState {
     consumed: Option<(Fingerprint, u64)>,
     /// The previous output, shared with the graph's output value.
     output: Option<Arc<RasterValue>>,
-    keys: Vec<InternId>,
+    keys: Vec<TileId>,
     /// Tiles still to recompute against `layout`, left by a tile budget.
     pending: Vec<u32>,
 }
@@ -320,13 +322,13 @@ pub(crate) fn run_tiles(
 
 /// Wires `keys`, a node's tiles in order, to the input tiles `reads` says
 /// they read.
-pub(crate) fn wire(tiles: &mut Tiles, keys: &[InternId], reads: &Reads<'_>) {
+pub(crate) fn wire(tiles: &mut Tiles, keys: &[TileId], reads: &Reads<'_>) {
     match *reads {
         Reads::Field { .. } | Reads::WholeField => {}
         Reads::Tiles { space, inputs } => {
             for (t, &key) in keys.iter().enumerate() {
                 let t = u32::try_from(t).expect("tile counts fit u32");
-                let read: Vec<InternId> =
+                let read: Vec<TileId> =
                     inputs(t).into_iter().map(|i| tiles.key(space, i)).collect();
                 tiles.depend(key, read);
             }
@@ -478,7 +480,7 @@ fn settle(
     report.tiles_changed += changed.len() as u64;
     report.texels_recomputed += recomputed.iter().map(|&t| grid.rect(t).area()).sum::<u64>();
     report.whole_recomputes += u64::from(whole);
-    let keys: Vec<InternId> = changed.iter().map(|&t| state.keys[t as usize]).collect();
+    let keys: Vec<TileId> = changed.iter().map(|&t| state.keys[t as usize]).collect();
     tiles.mark_dependents(keys);
     !changed.is_empty()
 }

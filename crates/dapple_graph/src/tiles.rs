@@ -4,7 +4,7 @@
 //! Tile-level invalidation inside realizations.
 //!
 //! Every realize and raster node splits its raster into square tiles. Tile
-//! keys `(node, level, tile)` are interned into an
+//! keys `(node, level, tile)` get dense ids ([`TileId`]) in an
 //! [`InvalidationTracker`], whose edges run from each raster-node tile to the
 //! input tiles its kernel footprint reads. A node that rewrites tiles compares
 //! each recomputed tile with its previous bits and marks the direct
@@ -12,10 +12,10 @@
 //! recomputes only tiles whose inputs changed, and a change that leaves a
 //! tile's bits alone stops there.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use dapple_raster::{Edge, TexelRect};
-use invalidation::intern::{InternId, Interner};
 use invalidation::{Channel, InvalidationTracker};
 
 /// The single invalidation channel: tile content.
@@ -25,11 +25,71 @@ const TILES: Channel = Channel::new(0);
 pub const DEFAULT_TILE_SIZE: u32 = 32;
 
 /// One tile of one node's raster at one mip level.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 struct TileKey {
     node: u32,
     level: u8,
     tile: u32,
+}
+
+/// A tile's dense id in the tracker.
+pub(crate) type TileId = u32;
+
+/// Dense ids for tile keys. A removed node's ids are reused, so the tracker
+/// stays as large as the graph's live tiles, not every tile it ever had.
+#[derive(Debug, Default)]
+struct TileIds {
+    ids: BTreeMap<TileKey, TileId>,
+    keys: Vec<Option<TileKey>>,
+    free: Vec<TileId>,
+}
+
+impl TileIds {
+    fn id(&mut self, key: TileKey) -> TileId {
+        if let Some(&id) = self.ids.get(&key) {
+            return id;
+        }
+        let id = self.free.pop().unwrap_or_else(|| {
+            self.keys.push(None);
+            TileId::try_from(self.keys.len() - 1).expect("fewer than 2^32 tiles")
+        });
+        self.keys[id as usize] = Some(key);
+        self.ids.insert(key, id);
+        id
+    }
+
+    fn key(&self, id: TileId) -> Option<TileKey> {
+        self.keys.get(id as usize).copied().flatten()
+    }
+
+    /// Forgets every tile of `node`, returning their ids, which the caller
+    /// must clear before [`Self::reuse`] gives them out again.
+    fn forget(&mut self, node: u32) -> Vec<TileId> {
+        let first = TileKey {
+            node,
+            level: 0,
+            tile: 0,
+        };
+        let last = TileKey {
+            node,
+            level: u8::MAX,
+            tile: u32::MAX,
+        };
+        let forgotten: Vec<(TileKey, TileId)> = self
+            .ids
+            .range(first..=last)
+            .map(|(&key, &id)| (key, id))
+            .collect();
+        for (key, id) in &forgotten {
+            self.ids.remove(key);
+            self.keys[*id as usize] = None;
+        }
+        forgotten.into_iter().map(|(_, id)| id).collect()
+    }
+
+    fn reuse(&mut self, ids: impl IntoIterator<Item = TileId>) {
+        self.free.extend(ids);
+    }
 }
 
 /// Tile work done by one [`MaterialGraph::run`](crate::MaterialGraph::run).
@@ -152,8 +212,8 @@ impl Grid {
 #[derive(Debug, Default)]
 pub(crate) struct Tiles {
     size: u32,
-    interner: Interner<TileKey>,
-    tracker: InvalidationTracker<InternId>,
+    ids: TileIds,
+    tracker: InvalidationTracker<TileId>,
     pub(crate) report: TileReport,
     /// Tiles each run may recompute.
     pub(crate) budget: Option<u64>,
@@ -237,7 +297,7 @@ impl Tiles {
     /// edges dependents wired to them: a dependent that does not run while
     /// the grid shrinks and grows back (a run failed in between) still sees
     /// the grid it was wired for, and must still be wired to all of it.
-    pub(crate) fn keys(&mut self, node: u32, grid: Grid, previous: &[InternId]) -> Vec<InternId> {
+    pub(crate) fn keys(&mut self, node: u32, grid: Grid, previous: &[TileId]) -> Vec<TileId> {
         self.level_keys(node, 0, grid, previous)
     }
 
@@ -248,17 +308,17 @@ impl Tiles {
         node: u32,
         level: u8,
         grid: Grid,
-        previous: &[InternId],
-    ) -> Vec<InternId> {
-        let keys: Vec<InternId> = (0..grid.count())
-            .map(|tile| self.interner.intern(TileKey { node, level, tile }))
+        previous: &[TileId],
+    ) -> Vec<TileId> {
+        let keys: Vec<TileId> = (0..grid.count())
+            .map(|tile| self.ids.id(TileKey { node, level, tile }))
             .collect();
         // Tile keys are interned by index, so the keys a smaller grid no
         // longer uses are exactly those past its count.
         for &key in previous {
             if self
-                .interner
-                .get(key)
+                .ids
+                .key(key)
                 .is_some_and(|k| k.node == node && k.level == level && k.tile >= grid.count())
             {
                 self.depend(key, []);
@@ -268,8 +328,8 @@ impl Tiles {
     }
 
     /// The key of tile `tile` of `node`.
-    pub(crate) fn key(&mut self, node: u32, tile: u32) -> InternId {
-        self.interner.intern(TileKey {
+    pub(crate) fn key(&mut self, node: u32, tile: u32) -> TileId {
+        self.ids.id(TileKey {
             node,
             level: 0,
             tile,
@@ -277,14 +337,14 @@ impl Tiles {
     }
 
     /// Makes tile `key` depend on exactly `inputs`.
-    pub(crate) fn depend(&mut self, key: InternId, inputs: impl IntoIterator<Item = InternId>) {
+    pub(crate) fn depend(&mut self, key: TileId, inputs: impl IntoIterator<Item = TileId>) {
         self.tracker
             .replace_dependencies(key, TILES, inputs)
             .expect("tile edges point upstream, so they cannot form a cycle");
     }
 
     /// Removes every input edge of `keys`.
-    pub(crate) fn detach(&mut self, keys: &[InternId]) {
+    pub(crate) fn detach(&mut self, keys: &[TileId]) {
         for &key in keys {
             self.depend(key, []);
         }
@@ -293,18 +353,18 @@ impl Tiles {
     /// Makes the first of `keys` depend on every tile of the raster in tile
     /// space `input` on `grid`, and the others on nothing: a node computed
     /// whole learns from one mark that some tile it reads changed.
-    pub(crate) fn depend_whole(&mut self, keys: &[InternId], input: u32, grid: Grid) {
+    pub(crate) fn depend_whole(&mut self, keys: &[TileId], input: u32, grid: Grid) {
         let Some((&first, rest)) = keys.split_first() else {
             return;
         };
-        let inputs: Vec<InternId> = (0..grid.count()).map(|t| self.key(input, t)).collect();
+        let inputs: Vec<TileId> = (0..grid.count()).map(|t| self.key(input, t)).collect();
         self.depend(first, inputs);
         self.detach(rest);
     }
 
     /// Takes the tiles of `keys` that upstream changes marked, in tile order.
-    pub(crate) fn take_marked(&mut self, keys: &[InternId]) -> Vec<u32> {
-        let marked: Vec<InternId> = self
+    pub(crate) fn take_marked(&mut self, keys: &[TileId]) -> Vec<u32> {
+        let marked: Vec<TileId> = self
             .tracker
             .drain(TILES)
             .within_keys(keys)
@@ -313,16 +373,26 @@ impl Tiles {
             .collect();
         let mut tiles: Vec<u32> = marked
             .iter()
-            .filter_map(|id| self.interner.get(*id).map(|key| key.tile))
+            .filter_map(|&id| self.ids.key(id).map(|key| key.tile))
             .collect();
         tiles.sort_unstable();
         tiles
     }
 
+    /// Removes every tile of `node` from the tracker, with their edges and
+    /// marks, for a node that left the graph.
+    pub(crate) fn remove_node(&mut self, node: u32) {
+        let ids = self.ids.forget(node);
+        for &id in &ids {
+            self.tracker.remove_key(id);
+        }
+        self.ids.reuse(ids);
+    }
+
     /// Marks the direct dependents of `changed`, without propagating
     /// further: each dependent marks its own dependents only if its bits
     /// change.
-    pub(crate) fn mark_dependents(&mut self, changed: impl IntoIterator<Item = InternId>) {
+    pub(crate) fn mark_dependents(&mut self, changed: impl IntoIterator<Item = TileId>) {
         let mut dependents = Vec::new();
         for key in changed {
             dependents.extend(self.tracker.graph().dependents(key, TILES));
@@ -350,6 +420,29 @@ mod tests {
                 y1: 40
             }
         );
+    }
+
+    #[test]
+    fn removed_nodes_give_their_tile_ids_back() {
+        let grid = Grid::new(64, 64, 16, Edge::Wrap);
+        let mut tiles = Tiles::new(16);
+        let a = tiles.keys(0, grid, &[]);
+        let b = tiles.keys(1, grid, &[]);
+        tiles.depend(b[0], [a[0], a[1]]);
+        tiles.mark_dependents([a[0]]);
+        tiles.remove_node(1);
+        // A new node reuses the removed node's ids, cleared of its edges
+        // and marks.
+        let c = tiles.keys(2, grid, &[]);
+        let mut reused = c.clone();
+        reused.sort_unstable();
+        let mut removed = b.clone();
+        removed.sort_unstable();
+        assert_eq!(reused, removed);
+        assert_eq!(tiles.ids.keys.len(), 32);
+        assert!(tiles.take_marked(&c).is_empty());
+        tiles.mark_dependents([a[1]]);
+        assert!(tiles.take_marked(&c).is_empty());
     }
 
     #[test]

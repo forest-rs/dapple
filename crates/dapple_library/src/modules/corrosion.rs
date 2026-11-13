@@ -376,7 +376,8 @@ impl Module for Patina {
             let (q, g, f) = (wet.score.values()[i], grain.values()[i], fine.values()[i]);
             let run = smoothstep(-0.2, 0.7, wet.runs.values()[i]) * wet.trails.values()[i];
             let patch = 0.6 * patches.values()[i] + 0.4 * stain.values()[i];
-            let pale = (smoothstep(-0.3, 0.45, patch) * (1.0 - 0.6 * q) + 0.12 * g).clamp(0.0, 1.0);
+            let pale = (smoothstep(-0.3, 0.45, patch) * (1.0 - 0.6 * q) + 0.25 * g + 0.12 * f)
+                .clamp(0.0, 1.0);
             let c = verdigris
                 .lerp(bloom, pale)
                 .lerp(deep, (0.7 * q + 0.5 * run).min(0.85));
@@ -604,21 +605,27 @@ impl Module for Rust {
             let c = (haze * f).max(d);
             cover.push(c);
             let through = if c > 0.0 { d / c } else { 0.0 };
-            let pit = if pit_cells.values()[i] < pit_density {
-                let p = (1.0 - pit_distance.values()[i] / 0.45).max(0.0);
+            // Pits cluster where it is wettest and in patches, and each is
+            // its own size: the cell's value scales its radius.
+            let q = wet.score.values()[i];
+            let clustered = pit_density * smoothstep(-0.3, 0.5, mottle.values()[i] + 0.8 * q - 0.3);
+            let v = pit_cells.values()[i];
+            let pit = if v < clustered {
+                let radius = 0.18 + 0.32 * v / clustered.max(1e-3);
+                let p = (1.0 - pit_distance.values()[i] / radius).max(0.0);
                 p * p
             } else {
                 0.0
             };
-            // Not every plate edge has cracked open.
-            let cracked = (1.0 - smoothstep(0.0, 0.06, crack.values()[i]))
-                * smoothstep(-0.2, 0.4, broad.values()[i] + mottle.values()[i]);
-            let lifted = smoothstep(0.55, 1.0, plate.values()[i]);
+            // Only some plate edges have cracked open, in patches.
+            let cracked = (1.0 - smoothstep(0.0, 0.035, crack.values()[i]))
+                * smoothstep(0.25, 0.7, broad.values()[i] + mottle.values()[i]);
+            let lifted = smoothstep(0.7, 1.0, plate.values()[i])
+                * smoothstep(0.0, 0.5, broad.values()[i] + 0.5);
             let lump = (0.5 + 0.6 * lumps.values()[i]).clamp(0.0, 1.0);
             // Deep rust ranges from orange through brown to dark scale:
             // darker where it stays wet, in pits and cracks; brighter on
             // lifted plates and in fresh blooms.
-            let q = wet.score.values()[i];
             let t = (0.36
                 + 0.4 * broad.values()[i]
                 + 0.35 * mottle.values()[i]
@@ -636,7 +643,7 @@ impl Module for Rust {
             let film = orange * (1.15 + 0.15 * speckle.values()[i]);
             colors.push(film.lerp(crust, through).min(Vec3::ONE));
             rough.push(0.62 + (0.9 + 0.06 * cracked - 0.62) * through);
-            let build = scale * (0.4 + age) * (0.5 * lump + 0.6 * lifted - 0.4 * cracked);
+            let build = scale * (0.4 + age) * (0.6 * lump + 0.4 * lifted - 0.25 * cracked);
             relief.push(d * (build - pitting * pit));
         }
         let rust = product(base, &colors, &rough, RUST)?;

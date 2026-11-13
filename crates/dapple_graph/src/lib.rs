@@ -1493,11 +1493,15 @@ impl Executor for DappleExecutor {
         node: &mut DappleNode,
         inputs: &[GraphValue],
         outputs: &mut Vec<GraphValue>,
-        _access: &mut NodeAccess<'_, GraphValue>,
+        access: &mut NodeAccess<'_, GraphValue>,
     ) -> Result<NodeOutcome, NodeError> {
         // A failed run leaves each node's state as the protocol in `changes`
         // requires, so there is nothing to undo here.
         outputs.push(self.run_node(node, inputs)?);
+        if node.tiles.has_pending() {
+            // The output still depends on the tiles a budget left.
+            access.read_host_state(changes::PENDING_TILES, u64::from(node.key));
+        }
         Ok(NodeOutcome::Complete)
     }
 
@@ -1936,14 +1940,12 @@ impl MaterialGraph {
     pub fn run(&mut self) -> Result<RunSummary, MaterialError> {
         self.graph.executor_mut().tiles.begin_run();
         let result = self.graph.run_all();
-        // Nodes a tile budget left unfinished run again next time, including
-        // when a later node failed: the next run clears this list.
+        // A node a tile budget left unfinished read its pending tiles, which
+        // the next run's budget works off: invalidate them so it runs again,
+        // including when a later node failed (the next run clears this list).
         let pending = core::mem::take(&mut self.graph.executor_mut().tiles.pending_nodes);
-        for key in pending {
-            let node = self.order[key as usize];
-            self.graph
-                .invalidate_input(Self::params_name(&self.entries[&node].label));
-        }
+        self.graph
+            .invalidate_many(pending.into_iter().map(changes::pending_tiles));
         Ok(result?)
     }
 
@@ -1952,7 +1954,8 @@ impl MaterialGraph {
     ///
     /// Tiles past the budget stay pending in their node, which runs again
     /// on the next run, so repeated runs converge to exactly the unbudgeted
-    /// result. Until then those nodes' rasters mix recomputed and stale
+    /// result. Such a node's last run records a read of its pending tiles,
+    /// as executor host state, which the run that left them invalidates. Until then those nodes' rasters mix recomputed and stale
     /// tiles; [`TileReport::pending_tiles`] counts what is left. A node with
     /// no reusable output (a first run, a new grid or operation, a global
     /// operation, or an unbounded change) still computes whole, as do

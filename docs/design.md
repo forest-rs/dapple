@@ -734,8 +734,25 @@ unbounded changes and warps, pending tiles), `run` returns the executor's
 `RunSummary` (including cut-off nodes), `run_count` gives per-node run
 counts, and `execution_graph` exposes the underlying graph, but dapple
 itself has no DOT dump yet.
-Packing reports its own `PackReport`. Timings, bytes live, value ranges and
-NaN/Inf counts are not recorded yet.
+Packing reports its own `PackReport`. Bytes live, value ranges and NaN/Inf
+counts are not recorded yet.
+
+Time is measured by [`footfall`](https://crates.io/crates/footfall), which the
+core crates cannot do themselves: they are `no_std` and have no clock.
+`dapple_graph` depends on `footfall` with no features and emits a
+`dapple_graph.run` scope per run, a `dapple_graph.node` scope per node
+execution (kind and key as arguments) and, once per run, one counter per
+`TileReport` field; nothing is emitted per tile or per texel, and the crate
+docs list every name. With no backend installed an emission is a level check
+and no clock is read. A host captures by installing a backend before it runs
+the graph, such as `footfall::runtime::Runtime::builder().install_global()`,
+and reading `Runtime::snapshot` or writing a `.ffcap` with
+`footfall::session::capture::CaptureRecorder`; `dapple_bake --profile
+<path>` does exactly that for a bake and adds scopes per material and per
+packing and encoding step, for `footfall analyze` to read. Nothing reads a
+footfall value back, so a capture cannot change a raster, a fingerprint or a
+`TileReport`: the report stays the deterministic record, and timings are
+observations only (an integration test holds the two bit for bit).
 
 **Debug views** (intended; none is built):
 - realize any intermediate port as an image;

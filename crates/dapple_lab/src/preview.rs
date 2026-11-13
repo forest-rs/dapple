@@ -242,3 +242,143 @@ pub fn contact_sheet(pictures: &[Picture], columns: u32, gap: u32) -> Picture {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use dapple_field::PortType;
+    use dapple_material::{Aux, Channel, Grid, param_port};
+    use glam::Vec2;
+
+    use super::*;
+    use crate::material::unit_tile;
+
+    /// A tile whose base color runs red with domain `x` and green with
+    /// domain `y`, over a bumpy height, so every preview has something to
+    /// show and orientation can be told.
+    fn material(grid: Grid) -> Material {
+        let mut m = Material::new(grid);
+        let color: Vec<Value> = (0..grid.len())
+            .map(|i| {
+                let c = grid.center(i);
+                Value::Vector3(Vec3::new(c.x, c.y, 0.25))
+            })
+            .collect();
+        m.set_param(
+            Param::BaseColor,
+            Channel::Map(grid.typed(param_port(Param::BaseColor), color).unwrap()),
+        )
+        .unwrap();
+        let height: Vec<Value> = (0..grid.len())
+            .map(|i| {
+                let c: Vec2 = grid.center(i);
+                Value::Scalar(0.02 * libm::sinf(core::f32::consts::TAU * 2.0 * c.x))
+            })
+            .collect();
+        m.set_aux(
+            Aux::Height,
+            Channel::Map(grid.typed(PortType::Scalar, height).unwrap()),
+        )
+        .unwrap();
+        m
+    }
+
+    #[test]
+    fn base_color_has_the_grids_size_and_domain_y_up() {
+        let m = material(unit_tile(16));
+        let p = base_color(&m);
+        assert_eq!((p.width, p.height), (16, 16));
+        assert_eq!(p.pixels.len(), 256);
+        // The top row is the largest domain y; the left column the smallest x.
+        let (top, bottom) = (p.at(0, 0), p.at(0, 15));
+        assert!(top[1] > bottom[1], "{top:?} over {bottom:?}");
+        assert!(p.at(15, 8)[0] > p.at(0, 8)[0]);
+        assert_eq!(p.at(3, 4)[2], 0.25);
+    }
+
+    #[test]
+    fn tiling_repeats_the_picture() {
+        let p = base_color(&material(unit_tile(8)));
+        let t = tiled(&p, 3, 2);
+        assert_eq!((t.width, t.height), (24, 16));
+        assert_eq!(t.at(8 + 3, 8 + 5), p.at(3, 5));
+        assert_eq!(t.at(23, 15), p.at(7, 7));
+    }
+
+    #[test]
+    fn raking_light_is_deterministic_and_shows_relief() {
+        let m = material(unit_tile(32));
+        let a = raking(&m, 2.4, 0.3).expect("renders");
+        assert_eq!((a.width, a.height), (32, 32));
+        assert_eq!(a, raking(&m, 2.4, 0.3).unwrap(), "deterministic");
+        assert!(
+            a.pixels
+                .iter()
+                .flatten()
+                .all(|c| c.is_finite() && *c >= 0.0)
+        );
+        // Under a low light a gray ground shows its bumps; flat, it shows
+        // none.
+        let spread = |mut m: Material, flatten: bool| {
+            m.set_param(
+                Param::BaseColor,
+                Channel::Constant(Value::Vector3(Vec3::splat(0.5))),
+            )
+            .unwrap();
+            if flatten {
+                m.set_aux(Aux::Height, Channel::Constant(Value::Scalar(0.0)))
+                    .unwrap();
+            }
+            let p = raking(&m, 2.4, 0.3).unwrap();
+            let (lo, hi) = p
+                .pixels
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(l, h), c| (l.min(c[0]), h.max(c[0])));
+            hi - lo
+        };
+        assert!(spread(m.clone(), false) > 0.05, "relief varies the shade");
+        assert!(spread(m.clone(), true) < 1e-6, "a flat ground is uniform");
+        // Another light makes another picture.
+        assert_ne!(a, raking(&m, 0.4, 0.3).unwrap());
+    }
+
+    #[test]
+    fn mips_put_each_level_beside_the_last_at_full_size() {
+        let m = material(unit_tile(16));
+        let p = mips(&m, 3).expect("renders");
+        assert_eq!((p.width, p.height), (48, 16));
+        assert_eq!(p, mips(&m, 3).unwrap(), "deterministic");
+        // Level 0 is the base color; the coarser levels are blockier.
+        let base = base_color(&m);
+        for y in 0..16 {
+            for x in 0..16 {
+                assert_eq!(p.at(x, y), base.at(x, y));
+            }
+        }
+        assert_eq!(p.at(16, 0), p.at(17, 0), "level 1 repeats texels in pairs");
+        // Zero levels still shows the base.
+        assert_eq!(mips(&m, 0).unwrap().width, 16);
+    }
+
+    #[test]
+    fn contact_sheets_lay_out_on_a_grid_with_gaps() {
+        let a = Picture::filled(4, 2, [1.0; 3]);
+        let b = Picture::filled(2, 3, [0.5; 3]);
+        let sheet = contact_sheet(&[a.clone(), b.clone(), a.clone()], 2, 1);
+        // Two columns of the widest (4), two rows of the tallest (3).
+        assert_eq!((sheet.width, sheet.height), (2 * 4 + 3, 2 * 3 + 3));
+        assert_eq!(sheet.at(1, 1), [1.0; 3], "the first picture");
+        assert_eq!(sheet.at(1 + 5, 1), [0.5; 3], "the second, a gap over");
+        assert_eq!(sheet.at(0, 0), [0.02; 3], "the ground shows in the gap");
+        let empty = contact_sheet(&[], 3, 2);
+        assert_eq!((empty.width, empty.height), (11, 5));
+    }
+
+    #[test]
+    fn pictures_encode_as_srgb_bytes() {
+        let p = Picture::filled(2, 1, [0.0, 1.0, 2.0]);
+        // Out-of-range values clamp; linear 0 and 1 map to 0 and 255.
+        assert_eq!(p.srgb8(), [0, 255, 255, 0, 255, 255]);
+        let mid = Picture::filled(1, 1, [0.5; 3]).srgb8();
+        assert!((185..=190).contains(&mid[0]), "{}", mid[0]);
+    }
+}

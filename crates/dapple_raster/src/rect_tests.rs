@@ -81,6 +81,9 @@ where
     Op::Output: DigestValue,
 {
     let whole = op.apply(input).unwrap();
+    // The stale raster's digest is kept, and must not outlive its texels in
+    // the copies rewritten below.
+    let stale_digest = stale.digest();
     // Recomputing every tile from stale values reproduces the whole pass.
     let mut pieces = stale.clone();
     for rect in tiles(input.width(), input.height()) {
@@ -96,6 +99,12 @@ where
     };
     let mut one = stale.clone();
     op.apply_into(input, rect, &mut one).unwrap();
+    assert_ne!(
+        one.digest(),
+        stale_digest,
+        "a rewritten tile changes the digest"
+    );
+    assert_eq!(stale.digest(), stale_digest, "and only the copy's");
     assert!(one.rect_bits_eq(&whole, rect));
     assert!(one.rect_bits_eq(
         &stale,
@@ -160,4 +169,62 @@ fn analytic_normals_agree_with_the_stencil() {
         "largest normal disagreement 1 - cos = {worst}"
     );
     assert!(crate::realize_normals(&height, realization, f32::NAN).is_err());
+}
+
+/// A digest computed once is kept, by clones too, and every way of changing
+/// texels drops it: each digest equals that of a raster built fresh from
+/// the same values.
+#[test]
+fn kept_digests_follow_every_mutation() {
+    let realization = realizations()[0];
+    let field = fbm(torus());
+    let whole = realize(&field, realization).unwrap();
+    let fresh = |values: &[f32]| {
+        Raster::from_values(
+            40,
+            20,
+            whole.origin(),
+            whole.texel(),
+            whole.edge(),
+            values.to_vec(),
+        )
+        .unwrap()
+        .digest()
+    };
+    let expected = whole.digest();
+    assert_eq!(fresh(whole.values()), expected);
+
+    let mut flat = whole.clone();
+    assert_eq!(flat.digest(), expected, "a clone keeps the digest");
+    flat.map_rect(TexelRect::full(40, 20), |_, _| 0.25);
+    assert_eq!(flat.digest(), fresh(&[0.25; 800]));
+    assert_eq!(whole.digest(), expected, "the original keeps its own");
+
+    let mut realized = flat.clone();
+    for rect in tiles(40, 20) {
+        let _ = realized.digest();
+        realize_into(&field, realization, rect, &mut realized).unwrap();
+    }
+    assert_eq!(realized.digest(), expected);
+
+    let mut copied = flat.clone();
+    copied.copy_rect(&whole, TexelRect::full(40, 20)).unwrap();
+    assert_eq!(copied.digest(), expected);
+
+    let rolled = whole.rolled(3, 1);
+    assert_eq!(rolled.digest(), fresh(rolled.values()));
+    assert_ne!(rolled.digest(), expected);
+
+    let normals = crate::realize_normals(&field, realization, 0.3).unwrap();
+    let mut normals_into = normals.map_texels(|_, _| [0.0_f32, 0.0, 1.0]);
+    let _ = normals_into.digest();
+    crate::realize_normals_into(
+        &field,
+        realization,
+        0.3,
+        TexelRect::full(40, 20),
+        &mut normals_into,
+    )
+    .unwrap();
+    assert_eq!(normals_into.digest(), normals.digest());
 }

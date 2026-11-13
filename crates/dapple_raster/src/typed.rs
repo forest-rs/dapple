@@ -269,7 +269,8 @@ impl TypedRaster {
         Self::new(port, storage)
     }
 
-    /// A hash of the type and every texel's bits.
+    /// A hash of the type and every texel's bits: one pass over the texels
+    /// the first time, then the kept [`Raster::digest`].
     #[must_use]
     pub fn digest(&self) -> u64 {
         let texels = match &self.storage {

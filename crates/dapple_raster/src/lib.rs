@@ -223,7 +223,11 @@ impl TexelRect {
 /// Texel `(x, y)` covers `origin + texel * [x, x + 1) × [y, y + 1)`; its value
 /// stands for that square, and its center is at `origin + texel * (x + ½, y + ½)`.
 /// Row `y` increases with the domain's y axis.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// A raster keeps its [`digest`](Raster::digest) once computed, until its
+/// texels change, so content identity costs one pass over the texels per
+/// content rather than per question. Equality and `Debug` ignore it.
+#[derive(Clone)]
 pub struct Raster<T = f32> {
     width: u32,
     height: u32,
@@ -231,6 +235,89 @@ pub struct Raster<T = f32> {
     texel: Vec2,
     edge: Edge,
     values: Vec<T>,
+    digest: DigestCell,
+}
+
+impl<T: PartialEq> PartialEq for Raster<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && self.origin == other.origin
+            && self.texel == other.texel
+            && self.edge == other.edge
+            && self.values == other.values
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for Raster<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Raster")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("origin", &self.origin)
+            .field("texel", &self.texel)
+            .field("edge", &self.edge)
+            .field("values", &self.values)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A digest kept beside the texels it was computed from: empty until
+/// asked for, emptied by every mutation. Zero stands for empty; a digest
+/// that happens to be zero is simply computed again.
+///
+/// An atomic, so a raster stays `Sync` and a digest computed through a
+/// shared reference is kept; two threads racing to fill it store the same
+/// value. Targets without 64-bit atomics keep nothing and recompute.
+#[cfg(target_has_atomic = "64")]
+struct DigestCell(core::sync::atomic::AtomicU64);
+
+#[cfg(target_has_atomic = "64")]
+impl DigestCell {
+    const fn empty() -> Self {
+        Self(core::sync::atomic::AtomicU64::new(0))
+    }
+
+    fn get(&self) -> Option<u64> {
+        let digest = self.0.load(core::sync::atomic::Ordering::Relaxed);
+        (digest != 0).then_some(digest)
+    }
+
+    fn set(&self, digest: u64) {
+        self.0.store(digest, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn clear(&mut self) {
+        *self.0.get_mut() = 0;
+    }
+}
+
+#[cfg(target_has_atomic = "64")]
+impl Clone for DigestCell {
+    fn clone(&self) -> Self {
+        Self(core::sync::atomic::AtomicU64::new(
+            self.0.load(core::sync::atomic::Ordering::Relaxed),
+        ))
+    }
+}
+
+#[cfg(not(target_has_atomic = "64"))]
+#[derive(Clone)]
+struct DigestCell;
+
+#[cfg(not(target_has_atomic = "64"))]
+impl DigestCell {
+    const fn empty() -> Self {
+        Self
+    }
+
+    fn get(&self) -> Option<u64> {
+        None
+    }
+
+    fn set(&self, _digest: u64) {}
+
+    fn clear(&mut self) {}
 }
 
 impl<T: Copy> Raster<T> {
@@ -260,6 +347,7 @@ impl<T: Copy> Raster<T> {
             texel,
             edge,
             values,
+            digest: DigestCell::empty(),
         })
     }
 
@@ -339,12 +427,20 @@ impl<T: Copy> Raster<T> {
         Ok(())
     }
 
+    /// The texels, to change: every mutation goes through here, so the
+    /// kept digest is dropped with the texels it described.
+    fn values_mut(&mut self) -> &mut [T] {
+        self.digest.clear();
+        &mut self.values
+    }
+
     /// Recomputes the texels of `rect` by `f`, leaving the rest.
     pub(crate) fn map_rect(&mut self, rect: TexelRect, mut f: impl FnMut(i64, i64) -> T) {
         let w = self.width as usize;
+        let values = self.values_mut();
         for y in rect.y0..rect.y1 {
             for x in rect.x0..rect.x1 {
-                self.values[y as usize * w + x as usize] = f(i64::from(x), i64::from(y));
+                values[y as usize * w + x as usize] = f(i64::from(x), i64::from(y));
             }
         }
     }
@@ -382,6 +478,7 @@ impl<T: Copy> Raster<T> {
             texel: self.texel,
             edge: self.edge,
             values,
+            digest: DigestCell::empty(),
         }
     }
 
@@ -391,11 +488,13 @@ impl<T: Copy> Raster<T> {
     pub fn rolled(&self, dx: i64, dy: i64) -> Self {
         let wrap = Self {
             edge: Edge::Wrap,
+            digest: DigestCell::empty(),
             ..self.clone()
         };
-        let mut out = wrap.map_texels(|x, y| wrap.at(x - dx, y - dy));
-        out.edge = self.edge;
-        out
+        Self {
+            edge: self.edge,
+            ..wrap.map_texels(|x, y| wrap.at(x - dx, y - dy))
+        }
     }
 }
 
@@ -450,10 +549,21 @@ impl<T: DigestValue> Raster<T> {
         })
     }
 
-    /// A 64-bit digest of the grid, edge policy and exact value bits, for
-    /// golden tests.
+    /// A 64-bit digest of the grid, edge policy and exact value bits: the
+    /// raster's content identity, and what golden tests compare.
+    ///
+    /// Computed on first use and kept until the texels change.
     #[must_use]
     pub fn digest(&self) -> u64 {
+        if let Some(digest) = self.digest.get() {
+            return digest;
+        }
+        let digest = self.compute_digest();
+        self.digest.set(digest);
+        digest
+    }
+
+    fn compute_digest(&self) -> u64 {
         let mut h = hash(
             0x7261_7374_6572, // "raster"
             &[
@@ -650,6 +760,7 @@ pub fn realize_into(
     let w = realization.width as usize;
     let span = (rect.x1 - rect.x0) as usize;
     let mut points = Vec::with_capacity(span);
+    let values = output.values_mut();
     for y in rect.y0..rect.y1 {
         points.clear();
         for x in rect.x0..rect.x1 {
@@ -657,7 +768,7 @@ pub fn realize_into(
             points.push(realization.region.origin + center * texel);
         }
         let start = y as usize * w + rect.x0 as usize;
-        field.eval_batch(&points, footprint, &mut output.values[start..start + span]);
+        field.eval_batch(&points, footprint, &mut values[start..start + span]);
     }
     Ok(())
 }

@@ -491,6 +491,7 @@ dependencies = [
  "dapple_material",
  "dapple_raster",
  "execution_graph",
+ "footfall",
  "glam",
 ]
 

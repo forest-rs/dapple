@@ -111,6 +111,18 @@ iteration is a real edit, and times the edit and the run together.
 - `graph/field_chain_edit/<length>`: reseed the chain's head and run again,
   rebuilding every node downstream.
 
+## `graph_footfall`
+
+The cost of capturing: `graph/fresh_run_captured`,
+`graph/edit_local_disk_captured` and `graph/clean_run_captured`, the same
+cases and recipe as their namesakes in `graph`, with a `footfall` runtime
+installed. It is a bench target of its own because the global backend is
+installed once per process and never removed. Compare each with its namesake
+from the same sitting: the `graph` cases alone show what the instrumentation
+costs with no backend installed (against a build before it, for
+`graph/clean_run`, whose few nanoseconds make it the only case where that is
+visible), and the `_captured` cases what capturing adds.
+
 ## `material`
 
 The material layer on two real library modules: `varnished_board` (oak, a

@@ -5,29 +5,30 @@
 
 use alloc::vec::Vec;
 
-use dapple_encode::{Image, MaterialMaps};
+use dapple_encode::{Image, Input, MaterialMaps};
 use dapple_raster::{HeightToNormal, RasterOp};
 use openpbr::Param;
 
-use crate::material::{Aux, ChannelId, Material, MaterialError, param_default};
+use crate::material::{Aux, Channel, ChannelId, Material, MaterialError, param_default};
 
 /// What [`maps`] could not carry.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Lowering {
     /// Parameters that differ from the specification's defaults (as a
-    /// constant or a map) but have no map in [`MaterialMaps`]; their values
-    /// are lost unless the consumer sets them another way.
+    /// constant or a map) but have no field in [`MaterialMaps`]; their
+    /// values are lost unless the consumer sets them another way.
     pub dropped: Vec<Param>,
     /// Whether the normal map was derived from [`Aux::Height`] because no
     /// `geometry_normal` was bound.
     pub normal_from_height: bool,
 }
 
-/// The material's maps for `dapple_encode::pack`: every channel
-/// [`MaterialMaps`] has a field for, as an image on the material's grid
-/// (constants that differ from the specification's defaults included),
-/// with the normal map derived from the height when no `geometry_normal`
-/// is bound. [`Aux::Height`] stays with the material: consumers that
+/// The material's maps for `dapple_encode::pack`: every bound channel
+/// [`MaterialMaps`] has a field for, maps as images on the material's grid
+/// and constants as [`Input::Constant`], with the normal map derived from
+/// the height when no `geometry_normal` is bound. A constant normal other
+/// than the unperturbed `+Z` is expanded into a map, since normals have no
+/// constant form. [`Aux::Height`] stays with the material: consumers that
 /// displace read it directly.
 ///
 /// The walk follows the `openpbr` parameter enumeration ([`Param::ALL`]):
@@ -40,7 +41,7 @@ pub struct Lowering {
 /// Never for a valid material.
 pub fn maps(material: &Material) -> Result<(MaterialMaps, Lowering), MaterialError> {
     let mut maps = MaterialMaps {
-        occlusion: image(material, ChannelId::Aux(Aux::Occlusion))?,
+        occlusion: input(material, ChannelId::Aux(Aux::Occlusion))?,
         ..MaterialMaps::default()
     };
     let mut lowering = Lowering::default();
@@ -75,20 +76,44 @@ fn lower_param(
     let m = material;
     let c = ChannelId::Param(param);
     match param {
-        Param::BaseColor => maps.base_color = image(m, c)?,
-        Param::BaseMetalness => maps.base_metalness = image(m, c)?,
-        Param::SpecularRoughness => maps.specular_roughness = image(m, c)?,
-        Param::TransmissionWeight => maps.transmission_weight = image(m, c)?,
-        Param::SubsurfaceWeight => maps.subsurface_weight = image(m, c)?,
-        Param::SubsurfaceColor => maps.subsurface_color = image(m, c)?,
-        Param::CoatWeight => maps.coat_weight = image(m, c)?,
-        Param::CoatColor => maps.coat_color = image(m, c)?,
-        Param::CoatRoughness => maps.coat_roughness = image(m, c)?,
-        Param::GeometryOpacity => maps.opacity = image(m, c)?,
-        Param::GeometryNormal => maps.normal = image(m, c)?,
+        Param::BaseColor => maps.base_color = input(m, c)?,
+        Param::BaseMetalness => maps.base_metalness = input(m, c)?,
+        Param::SpecularRoughness => maps.specular_roughness = input(m, c)?,
+        Param::TransmissionWeight => maps.transmission_weight = input(m, c)?,
+        Param::SubsurfaceWeight => maps.subsurface_weight = input(m, c)?,
+        Param::SubsurfaceColor => maps.subsurface_color = input(m, c)?,
+        Param::CoatWeight => maps.coat_weight = input(m, c)?,
+        Param::CoatColor => maps.coat_color = input(m, c)?,
+        Param::CoatRoughness => maps.coat_roughness = input(m, c)?,
+        Param::GeometryOpacity => maps.opacity = input(m, c)?,
+        Param::GeometryNormal => maps.normal = normal(m, c)?,
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+/// Channel `c` as an input of `N` components, or `None` when it is unbound.
+fn input<const N: usize>(
+    material: &Material,
+    c: ChannelId,
+) -> Result<Option<Input<N>>, MaterialError> {
+    debug_assert_eq!(c.port().components(), N, "{c} has {N} components");
+    Ok(match material.channel(c) {
+        None => None,
+        Some(Channel::Constant(v)) => Some(Input::Constant(core::array::from_fn(|k| {
+            v.component(k).unwrap_or(0.0)
+        }))),
+        Some(Channel::Map(_)) => image(material, c)?.map(Input::Map),
+    })
+}
+
+/// Normal channel `c` as a map, or `None` when it is unbound or the
+/// unperturbed normal.
+fn normal(material: &Material, c: ChannelId) -> Result<Option<Image>, MaterialError> {
+    match material.channel(c) {
+        Some(ch) if ch.constant() == Some(c.default_value()) => Ok(None),
+        _ => image(material, c),
+    }
 }
 
 /// Channel `c` as an image on the material's grid with as many channels as
@@ -119,7 +144,7 @@ mod tests {
     use glam::{Vec2, Vec3};
 
     use super::*;
-    use crate::{Channel, Grid};
+    use crate::Grid;
 
     const N: u32 = 4;
 
@@ -150,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_and_constants_become_images_on_the_grid() {
+    fn maps_become_images_on_the_grid_and_constants_stay_constant() {
         #[expect(clippy::cast_precision_loss, reason = "small test indices")]
         let ramp = |i: usize| i as f32 / 16.0;
         let mut m = Material::new(grid());
@@ -171,15 +196,15 @@ mod tests {
         let (maps, lowering) = maps(&m).unwrap();
 
         let color = maps.base_color.unwrap();
+        let color = color.map().unwrap();
         assert_eq!((color.width(), color.height(), color.channels()), (N, N, 3));
         assert_eq!(color.edge(), Edge::Wrap);
         assert_eq!(color.texel(1, 2), [ramp(9), 0.5, 0.25], "row-major");
-        // A constant is expanded to a full image.
-        let roughness = maps.specular_roughness.unwrap();
-        assert_eq!(roughness.channels(), 1);
-        assert!(roughness.values().iter().all(|&r| r == 0.6));
-        assert_eq!(maps.coat_weight.unwrap().texel(3, 3), [ramp(15)]);
-        assert!(maps.occlusion.unwrap().values().iter().all(|&o| o == 0.75));
+        // A constant stays a constant.
+        assert_eq!(maps.specular_roughness, Some(Input::Constant([0.6])));
+        let coat = maps.coat_weight.unwrap();
+        assert_eq!(coat.map().unwrap().texel(3, 3), [ramp(15)]);
+        assert_eq!(maps.occlusion, Some(Input::Constant([0.75])));
         // Unbound parameters have no image, and nothing else was bound.
         assert!(maps.base_metalness.is_none());
         assert!(maps.coat_color.is_none());
@@ -214,6 +239,18 @@ mod tests {
         let (bound, lowering) = maps(&m).unwrap();
         assert!(!lowering.normal_from_height);
         assert_eq!(bound.normal.unwrap().texel(0, 0), tilted.to_array());
+
+        // A constant normal has no constant form: flat is no map at all, and
+        // anything else is expanded.
+        let mut flat = Material::new(grid());
+        let constant = |v: Vec3| Channel::Constant(Value::Vector3(v));
+        flat.set_param(Param::GeometryNormal, constant(Vec3::Z))
+            .unwrap();
+        assert_eq!(maps(&flat).unwrap().0.normal, None);
+        flat.set_param(Param::GeometryNormal, constant(tilted))
+            .unwrap();
+        let expanded = maps(&flat).unwrap().0.normal.unwrap();
+        assert!(expanded.values().chunks(3).all(|n| n == tilted.to_array()));
     }
 
     #[test]

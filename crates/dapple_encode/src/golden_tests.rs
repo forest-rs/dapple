@@ -43,12 +43,12 @@ fn material() -> MaterialMaps {
     }
     let image = |c, v| Image::new(n, n, c, Edge::Wrap, v).unwrap();
     MaterialMaps {
-        base_color: Some(image(3, color)),
-        opacity: Some(image(1, opacity)),
+        base_color: Some(image(3, color).into()),
+        opacity: Some(image(1, opacity).into()),
         normal: Some(image(3, normal)),
-        specular_roughness: Some(image(1, rough)),
+        specular_roughness: Some(image(1, rough).into()),
         base_metalness: None,
-        occlusion: Some(image(1, occlusion)),
+        occlusion: Some(image(1, occlusion).into()),
         anisotropy_direction: None,
         specular_roughness_anisotropy: None,
         subsurface_weight: None,

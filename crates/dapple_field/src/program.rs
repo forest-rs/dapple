@@ -50,6 +50,7 @@
 //! # Ok::<(), Box<dyn core::error::Error>>(())
 //! ```
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -1373,13 +1374,30 @@ struct Node {
 #[derive(Clone, Debug, Default)]
 pub struct ProgramBuilder {
     nodes: Vec<Node>,
+    /// The first node of each fingerprint, so [`Self::import`] finds a
+    /// duplicate without scanning. `add` does not deduplicate, so several
+    /// nodes may share a fingerprint; the earliest is the one imports reuse.
+    /// Built by the first import and kept current after, so builders that
+    /// never import do not pay for it.
+    first_with: Option<BTreeMap<Fingerprint, NodeId>>,
 }
 
 impl ProgramBuilder {
     /// An empty builder.
     #[must_use]
     pub const fn new() -> Self {
-        Self { nodes: Vec::new() }
+        Self {
+            nodes: Vec::new(),
+            first_with: None,
+        }
+    }
+
+    /// A builder holding `nodes`, which must be valid in order.
+    const fn from_nodes(nodes: Vec<Node>) -> Self {
+        Self {
+            nodes,
+            first_with: None,
+        }
     }
 
     /// Validates `op` and appends it, returning its node.
@@ -1392,6 +1410,9 @@ impl ProgramBuilder {
         let kernel = self.kernel(&op)?;
         let fingerprint = self.fingerprint(&op);
         let id = NodeId(u32::try_from(self.nodes.len()).expect("fewer than 2^32 nodes"));
+        if let Some(first_with) = &mut self.first_with {
+            first_with.entry(fingerprint).or_insert(id);
+        }
         self.nodes.push(Node {
             op,
             space,
@@ -1407,7 +1428,8 @@ impl ProgramBuilder {
     ///
     /// A node whose fingerprint equals one already in the builder is not
     /// copied again: shared subgraphs of several imported programs become one
-    /// subgraph, which the flat plan then evaluates once.
+    /// subgraph, which the flat plan then evaluates once. Equality is by
+    /// fingerprint alone; a 128-bit collision is not checked for.
     pub fn import(&mut self, program: &FieldProgram) -> Result<NodeId, ProgramError> {
         // Nodes the output depends on; operands always precede their users.
         let mut needed = alloc::vec![false; program.nodes.len()];
@@ -1419,17 +1441,25 @@ impl ProgramBuilder {
                 }
             }
         }
+        if self.first_with.is_none() {
+            let mut first_with = BTreeMap::new();
+            for (index, node) in self.nodes.iter().enumerate() {
+                let id = NodeId(u32::try_from(index).expect("fewer than 2^32 nodes"));
+                first_with.entry(node.fingerprint).or_insert(id);
+            }
+            self.first_with = Some(first_with);
+        }
         let mut mapped = alloc::vec![None::<NodeId>; program.nodes.len()];
         for (index, node) in program.nodes.iter().enumerate() {
             if !needed[index] {
                 continue;
             }
             let existing = self
-                .nodes
-                .iter()
-                .position(|n| n.fingerprint == node.fingerprint);
+                .first_with
+                .as_ref()
+                .and_then(|first_with| first_with.get(&node.fingerprint));
             let id = match existing {
-                Some(existing) => NodeId(u32::try_from(existing).expect("fewer than 2^32 nodes")),
+                Some(&existing) => existing,
                 None => self
                     .add(node.op.map_inputs(|input| {
                         mapped[input.0 as usize].expect("operands come first")
@@ -2619,9 +2649,7 @@ impl ValueProgram {
         if found.is_scalar() && index == 0 {
             return Ok(self.program.clone());
         }
-        let mut builder = ProgramBuilder {
-            nodes: self.program.nodes.clone(),
-        };
+        let mut builder = ProgramBuilder::from_nodes(self.program.nodes.clone());
         let component = builder.add(Op::Component {
             input: output,
             index,

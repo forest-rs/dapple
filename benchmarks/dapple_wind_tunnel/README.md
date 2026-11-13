@@ -105,6 +105,11 @@ iteration is a real edit, and times the edit and the run together.
   budget of four tiles, the work a caller with a frame budget pays per run.
 - `graph/budgeted_converge/<size>`: the same edit, run until the budget leaves
   nothing pending.
+- `graph/field_chain_fresh/<length>`: a first run of a chain of 8, 32 or 128
+  dependent field nodes with no realization; each node imports its upstream
+  program, so this measures program building in the graph.
+- `graph/field_chain_edit/<length>`: reseed the chain's head and run again,
+  rebuilding every node downstream.
 
 ## `material`
 

@@ -696,7 +696,13 @@ fn encode(
 /// packs the axis in RG and the strength in B. Each level's strength is scaled
 /// by how much the axes it averages agree, so regions whose axes disagree
 /// fade toward isotropic instead of flickering. A strength map without a
-/// direction uses the `+X` axis, the default.
+/// direction uses the `+X` axis, the default. Lightweald's B is OpenPBR's
+/// `specular_roughness_anisotropy`; glTF's is its own strength, which
+/// [`gltf_anisotropy_strength`] converts to from the texel's roughness and
+/// anisotropy, so glTF writes the texture whenever either is a map (or
+/// normals widen the roughness) and anisotropy is given. glTF cannot narrow
+/// the lobe across the axis as OpenPBR does, so it reports anisotropy in
+/// [`PackReport::approximated`].
 ///
 /// Opacity mips preserve coverage at `settings.alpha_cutoff`. Normal mips
 /// widen roughness by their variance, so the roughness channel is written
@@ -1023,7 +1029,12 @@ fn textures(
             }
         }
     }
-    if direction.is_some() || strength.is_some() {
+    let gltf = profile == Profile::Gltf;
+    // glTF's strength depends on the roughness too: a roughness map makes a
+    // constant anisotropy vary.
+    let gltf_strength_varies =
+        gltf && roughness.is_some() && active(&maps.specular_roughness_anisotropy);
+    if direction.is_some() || strength.is_some() || gltf_strength_varies {
         // The axis θ from the averaged doubled-angle vector, and how much the
         // texels it averages agree (1 for one axis, 0 when they cancel).
         let axis = |level: usize, i: usize| {
@@ -1045,12 +1056,16 @@ fn textures(
                     edge,
                     |level, i, out| {
                         let (c, s, coherence) = axis(level, i);
-                        let strength = value(&strength, level, i, strength_fill);
+                        let mut strength = value(&strength, level, i, strength_fill) * coherence;
+                        if gltf {
+                            let roughness = value(&roughness, level, i, rough_fill);
+                            strength = gltf_anisotropy_strength(roughness, strength);
+                        }
                         // +Y toward the image top, as for normals. An axis and its
                         // opposite are one direction, so the sign of the pair is free.
                         out.push(quantize_unorm8(unit(c)));
                         out.push(quantize_unorm8(unit(-s)));
-                        out.push(quantize_unorm8(strength * coherence));
+                        out.push(quantize_unorm8(strength));
                         out.push(255);
                     },
                     size,
@@ -1555,9 +1570,41 @@ const THIN_SUBSURFACE: &str = "glTF's diffuse transmission is thin-walled: on a 
 const THIN_TRANSMISSION: &str = "glTF's transmission without KHR_materials_volume is thin-walled: on a material \
      that is not, the volume's refraction is lost";
 
+/// glTF's `anisotropyStrength` for OpenPBR's `specular_roughness` and
+/// `specular_roughness_anisotropy`.
+///
+/// OpenPBR stretches the GGX lobe to `α_t = r²·√(2 / (1 + (1 − a)²))` along
+/// the tangent and narrows it to `α_b = (1 − a)·α_t` across it, keeping
+/// `α_t² + α_b² = 2r⁴`. `KHR_materials_anisotropy` keeps `α_b = r²` and
+/// widens `α_t = mix(r², 1, s²)`. This is the strength `s` at which glTF's
+/// `α_t` equals OpenPBR's, so highlights stretch as far; glTF has no way to
+/// narrow them across the axis. Inputs are clamped to `[0, 1]`; at
+/// roughness 1, glTF's `α_t` is 1 whatever the strength, and this returns 0.
+#[must_use]
+pub fn gltf_anisotropy_strength(roughness: f32, anisotropy: f32) -> f32 {
+    let r = roughness.clamp(0.0, 1.0);
+    let a = anisotropy.clamp(0.0, 1.0);
+    let alpha = r * r;
+    if alpha >= 1.0 {
+        return 0.0;
+    }
+    let along = alpha * libm::sqrtf(2.0 / (1.0 + (1.0 - a) * (1.0 - a)));
+    libm::sqrtf(((along - alpha) / (1.0 - alpha)).clamp(0.0, 1.0))
+}
+
+/// Why glTF's anisotropy only approximates OpenPBR's.
+const GLTF_ANISOTROPY: &str = "glTF widens the lobe along the anisotropy direction but keeps \
+     specular_roughness across it, where OpenPBR narrows it; the strength matches the width along it";
+
 /// What glTF carries for `maps` only approximately, in field order.
 fn gltf_approximations(maps: &MaterialMaps) -> Vec<Approximation> {
     let mut out = Vec::new();
+    if active(&maps.specular_roughness_anisotropy) {
+        out.push(Approximation {
+            name: "specular_roughness_anisotropy",
+            why: GLTF_ANISOTROPY,
+        });
+    }
     if !maps.thin_walled {
         if active(&maps.subsurface_weight) {
             out.push(Approximation {
@@ -1961,14 +2008,21 @@ mod tests {
         let bundle = pack(&maps, Profile::Gltf, &PackSettings::default()).unwrap();
         let aniso = bundle.texture("anisotropy").unwrap();
         let unit = |v: f32| quantize_unorm8(v * 0.5 + 0.5);
+        // glTF's B is its own strength for the default roughness, 0.3.
         assert_eq!(
             &aniso.levels[0][..4],
             [
                 unit(libm::cosf(theta)),
                 unit(-libm::sinf(theta)),
-                quantize_unorm8(0.8),
+                quantize_unorm8(gltf_anisotropy_strength(0.3, 0.8)),
                 255
             ]
+        );
+        let lightweald = pack(&maps, Profile::Lightweald, &PackSettings::default()).unwrap();
+        assert_eq!(
+            lightweald.texture("anisotropy").unwrap().levels[0][2],
+            quantize_unorm8(0.8),
+            "Lightweald's B is OpenPBR's anisotropy"
         );
 
         // Perpendicular axes in every 2×2 block cancel: no anisotropy left.
@@ -1998,6 +2052,59 @@ mod tests {
             strength.levels[1].iter().all(|&b| b == 0),
             "{:?}",
             strength.levels[1]
+        );
+    }
+
+    #[test]
+    fn gltf_anisotropy_matches_the_lobe_along_its_axis() {
+        // glTF's α along the axis, mix(r², 1, s²), equals OpenPBR's,
+        // r²·√(2 / (1 + (1 − a)²)).
+        for r in [0.1_f32, 0.3, 0.5, 0.8] {
+            for a in [0.0_f32, 0.25, 0.5, 0.9, 1.0] {
+                let s = gltf_anisotropy_strength(r, a);
+                let alpha = r * r;
+                let gltf = alpha + (1.0 - alpha) * s * s;
+                let openpbr = alpha * libm::sqrtf(2.0 / (1.0 + (1.0 - a) * (1.0 - a)));
+                assert!((gltf - openpbr).abs() < 1e-5, "r {r}, a {a}");
+            }
+        }
+        assert_eq!(gltf_anisotropy_strength(0.5, 0.0), 0.0, "isotropic");
+        assert_eq!(gltf_anisotropy_strength(1.0, 0.7), 0.0, "already 1");
+
+        // A constant anisotropy over a roughness map varies: glTF gets a
+        // texture, and the anisotropy is placed in it and approximated.
+        let maps = MaterialMaps {
+            specular_roughness: Some(alternating(0.2, 0.6).into()),
+            specular_roughness_anisotropy: Some(0.5.into()),
+            ..MaterialMaps::default()
+        };
+        let settings = PackSettings {
+            fold_normal_variance: false,
+            ..PackSettings::default()
+        };
+        let gltf = pack(&maps, Profile::Gltf, &settings).unwrap();
+        let b: Vec<u8> = gltf.texture("anisotropy").unwrap().levels[0][..8]
+            .chunks(4)
+            .map(|t| t[2])
+            .collect();
+        assert_eq!(
+            b,
+            [
+                quantize_unorm8(gltf_anisotropy_strength(0.2, 0.5)),
+                quantize_unorm8(gltf_anisotropy_strength(0.6, 0.5))
+            ]
+        );
+        assert!(gltf.placement("specular_roughness_anisotropy").is_some());
+        assert_eq!(
+            gltf.report.approximated[0].name,
+            "specular_roughness_anisotropy"
+        );
+        // Lightweald's B does not depend on roughness: it stays a constant.
+        let lightweald = pack(&maps, Profile::Lightweald, &settings).unwrap();
+        assert!(lightweald.texture("anisotropy").is_none());
+        assert_eq!(
+            lightweald.constant("specular_roughness_anisotropy"),
+            Some([0.5].as_slice())
         );
     }
 

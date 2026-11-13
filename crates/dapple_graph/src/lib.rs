@@ -149,7 +149,9 @@ use dapple_raster::{
     MorphologyOp, Raster, RasterError, RasterOp, Realization, TexelRect, realize, realize_into,
     realize_normals, realize_normals_into,
 };
-use execution_graph::{ExecutionGraph, Executor, GraphError, NodeAccess, NodeId, RunSummary};
+use execution_graph::{
+    ExecutionGraph, Executor, GraphError, NodeAccess, NodeId, NodeOutcome, RunSummary,
+};
 use glam::Vec2;
 use invalidation::intern::InternId;
 
@@ -1491,12 +1493,12 @@ impl Executor for DappleExecutor {
         node: &mut DappleNode,
         inputs: &[GraphValue],
         outputs: &mut Vec<GraphValue>,
-        _access: &mut NodeAccess<'_>,
-    ) -> Result<(), NodeError> {
+        _access: &mut NodeAccess<'_, GraphValue>,
+    ) -> Result<NodeOutcome, NodeError> {
         // A failed run leaves each node's state as the protocol in `changes`
         // requires, so there is nothing to undo here.
         outputs.push(self.run_node(node, inputs)?);
-        Ok(())
+        Ok(NodeOutcome::Complete)
     }
 
     /// Early cutoff: an output equal to the node's previous one stops its

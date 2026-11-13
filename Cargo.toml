@@ -99,10 +99,7 @@ dapple_library = { path = "crates/dapple_library" }
 dapple_material = { path = "crates/dapple_material" }
 dapple_package = { path = "crates/dapple_package" }
 dapple_raster = { path = "crates/dapple_raster" }
-# Pinned to forest-rs/execution main at the merge of #99 (scoped drains under
-# early cutoff, on top of #97 and #98), which no crates.io release contains
-# yet.
-execution_graph = { default-features = false, git = "https://github.com/forest-rs/execution", rev = "ce961177dc05a7d0742b88c46c33cb5b49a8fdc1" }
+execution_graph = { default-features = false, version = "0.1.0" }
 # Pinned to one forest-rs/exedra main commit (after the merge of #98, with the
 # keyed hash contract, tangents, attribute streams and layer propagation);
 # no crates.io release contains them yet. Keep every exedra crate on the same

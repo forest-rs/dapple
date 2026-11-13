@@ -28,7 +28,4 @@ dependents off. Realize, raster, normals and mip nodes recompute only the
 tiles an edit reaches. Values on edges are reference-counted programs and
 rasters with fingerprints.
 
-`execution_graph` is a git dependency pinned to the `forest-rs/execution`
-commit that added early cutoff, until a release contains it.
-
 `#![no_std]` with `alloc`.

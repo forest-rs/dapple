@@ -322,18 +322,61 @@ impl Plan {
 #[derive(Clone, Debug)]
 pub struct Evaluator<'a> {
     program: &'a FieldProgram,
-    registers: Vec<Value>,
-    gradients: Vec<Vec3>,
-    points: Vec<(Vec3, Footprint)>,
+    registers: Slots<Value, INLINE_REGISTERS>,
+    gradients: Slots<Vec3, INLINE_REGISTERS>,
+    points: Slots<(Vec3, Footprint), INLINE_CONTEXTS>,
+}
+
+/// Registers an [`Evaluator`] holds without allocating.
+const INLINE_REGISTERS: usize = 16;
+/// Contexts an [`Evaluator`] holds without allocating.
+const INLINE_CONTEXTS: usize = 4;
+
+/// Fixed-size scratch storage: inline when the plan fits in `N` slots, on
+/// the heap otherwise, so evaluating a small program once does not allocate.
+#[derive(Clone, Debug)]
+enum Slots<T, const N: usize> {
+    Inline([T; N]),
+    Heap(Vec<T>),
+}
+
+impl<T: Copy, const N: usize> Slots<T, N> {
+    fn filled(value: T, len: usize) -> Self {
+        if len <= N {
+            Self::Inline([value; N])
+        } else {
+            Self::Heap(alloc::vec![value; len])
+        }
+    }
+}
+
+impl<T, const N: usize> core::ops::Deref for Slots<T, N> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        match self {
+            Self::Inline(slots) => slots,
+            Self::Heap(slots) => slots,
+        }
+    }
+}
+
+impl<T, const N: usize> core::ops::DerefMut for Slots<T, N> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        match self {
+            Self::Inline(slots) => slots,
+            Self::Heap(slots) => slots,
+        }
+    }
 }
 
 impl<'a> Evaluator<'a> {
     pub(super) fn new(program: &'a FieldProgram) -> Self {
         Self {
             program,
-            registers: alloc::vec![Value::Scalar(0.0); program.plan.registers],
-            gradients: alloc::vec![Vec3::ZERO; program.plan.registers],
-            points: alloc::vec![(Vec3::ZERO, Footprint::POINT); program.plan.contexts],
+            registers: Slots::filled(Value::Scalar(0.0), program.plan.registers),
+            gradients: Slots::filled(Vec3::ZERO, program.plan.registers),
+            points: Slots::filled((Vec3::ZERO, Footprint::POINT), program.plan.contexts),
         }
     }
 

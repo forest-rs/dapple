@@ -48,3 +48,19 @@ all of its cost is per-call setup, which isolates what a per-call evaluator
 costs; `small` is a fractal with an abs and a remap; `small_color` mixes two
 colors by a fractal; `bark_height` and `bark_color` are the library's oak
 bark, cellular plates under warps, a realistically deep program.
+
+## `build`
+
+Building programs, over chains of 256, 1024 and 4096 dependent nodes whose
+parameters all differ. Time per node should stay flat as the chain grows;
+`build/<name>/<length>` reports elements, so compare per-node throughput
+across lengths.
+
+- `add_chain`: `ProgramBuilder::add` once per node.
+- `finish_chain`: `ProgramBuilder::finish`, which derives the evaluation
+  plan.
+- `import_into_empty`: `ProgramBuilder::import` of a finished chain into an
+  empty builder, comparing each node's fingerprint with those already
+  imported.
+- `import_again`: the same import into a builder that already holds every
+  node, so each is found and none copied.

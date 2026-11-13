@@ -22,6 +22,10 @@ criterion.workspace = true
 bench = false
 
 [[bench]]
+name = "build"
+harness = false
+
+[[bench]]
 name = "field"
 harness = false
 

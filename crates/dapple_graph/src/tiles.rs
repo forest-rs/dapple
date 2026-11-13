@@ -214,8 +214,11 @@ impl Tiles {
 
     /// Interned keys for every tile of `node` on `grid`, in tile order.
     ///
-    /// `previous` are the node's keys on its previous grid; keys no longer
-    /// used leave the tracker.
+    /// `previous` are the node's keys on its previous grid. Keys no longer
+    /// used lose their own input edges but stay in the tracker, with the
+    /// edges dependents wired to them: a dependent that does not run while
+    /// the grid shrinks and grows back (a run failed in between) still sees
+    /// the grid it was wired for, and must still be wired to all of it.
     pub(crate) fn keys(&mut self, node: u32, grid: Grid, previous: &[InternId]) -> Vec<InternId> {
         self.level_keys(node, 0, grid, previous)
     }
@@ -240,7 +243,7 @@ impl Tiles {
                 .get(key)
                 .is_some_and(|k| k.node == node && k.level == level && k.tile >= grid.count())
             {
-                self.tracker.remove_key(key);
+                self.depend(key, []);
             }
         }
         keys

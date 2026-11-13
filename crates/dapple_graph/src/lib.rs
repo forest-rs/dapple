@@ -87,6 +87,34 @@
 //! Tile-wise results equal whole recomputation bit for bit.
 //! [`MaterialGraph::tile_report`] counts the work of the last run.
 //!
+//! ## Observability
+//!
+//! A run reports to [`footfall`], and to nothing else: with no backend
+//! installed an emission costs a level check, and a host that installs one
+//! (such as `footfall::runtime`) can see where time went. The descriptors
+//! below are a contract for tooling; all are emitted under the root context.
+//! Nothing is read back, so a capture never changes a result: the
+//! deterministic [`TileReport`] remains the record of the work.
+//!
+//! Scopes:
+//!
+//! - `dapple_graph.run`: one [`MaterialGraph::run`], including the
+//!   invalidation of nodes a tile budget left pending.
+//! - `dapple_graph.node`: one node execution, with the arguments `kind`
+//!   (`field`, `realize`, `raster`, `normals`, `mip`, `reduce` or `sample`)
+//!   and `key` (the node's tile space: a number assigned when the node is
+//!   added, never reused, which also keys its tiles).
+//!   Nested in `dapple_graph.run`; a node that fails still closes its scope.
+//!
+//! Counters (counts), each added once at the end of a run from that run's
+//! [`TileReport`], including a run that fails, and named for its field:
+//! `dapple_graph.tiles_recomputed`, `dapple_graph.tiles_reused`,
+//! `dapple_graph.tiles_changed`, `dapple_graph.texels_recomputed`,
+//! `dapple_graph.whole_recomputes`, `dapple_graph.unbounded_changes`,
+//! `dapple_graph.unbounded_warps` and `dapple_graph.pending_tiles`.
+//!
+//! Nothing is emitted per tile, texel or sample.
+//!
 //! ## Early cutoff
 //!
 //! A node that re-runs and produces the same value as before (the same
@@ -156,6 +184,7 @@ use execution_graph::{
 use glam::Vec2;
 
 mod changes;
+mod observe;
 mod recipe;
 mod tiles;
 
@@ -635,6 +664,7 @@ impl DappleExecutor {
             return Err(NodeError::WrongValue { expected: "params" });
         };
         let upstream = &inputs[1..];
+        let _scope = observe::node(node.kind, node.key);
         // Field and sample nodes fail before they change any state.
         #[cfg(test)]
         if node.kind.outputs_field() {
@@ -1982,8 +2012,10 @@ impl MaterialGraph {
     /// node whose output did not change are cut off
     /// ([`RunSummary::cut_off_nodes`]); see the [crate docs](crate).
     pub fn run(&mut self) -> Result<RunSummary, MaterialError> {
+        let _scope = observe::run();
         self.graph.executor_mut().tiles.begin_run();
         let result = self.graph.run_all();
+        observe::report(&self.graph.executor().tile_report());
         // A node a tile budget left unfinished read its pending tiles, which
         // the next run's budget works off: invalidate them so it runs again,
         // including when a later node failed (the next run clears this list).

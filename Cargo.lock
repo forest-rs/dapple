@@ -400,6 +400,7 @@ dependencies = [
  "dapple_field",
  "dapple_raster",
  "execution_graph",
+ "footfall",
  "glam",
  "invalidation",
  "libm",
@@ -712,6 +713,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b38ad915f6dadd993ced50848a8291a543bd41ca62bc10740d5e64e2ab4cfd7"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "footfall"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec16960b0dbe379826f738ab4dc5215360445017c52c1f74a20204c2abd51331"
+dependencies = [
+ "footfall_core",
+ "footfall_runtime",
+]
+
+[[package]]
+name = "footfall_core"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81209ef1cee55968ced92e5489f78516eee23524b0e2c17661da52dcd5321338"
+
+[[package]]
+name = "footfall_runtime"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf31ac21426cc0e5ceffe0cc81388c1233ad17497728a9584ba1f84c0ceca1f8"
+dependencies = [
+ "footfall_core",
+ "hashbrown",
 ]
 
 [[package]]

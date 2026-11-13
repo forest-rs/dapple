@@ -262,12 +262,23 @@ impl Tiles {
             .expect("tile edges point upstream, so they cannot form a cycle");
     }
 
-    /// Removes every input edge of `keys`, for a node whose tiles all depend
-    /// on its whole input.
+    /// Removes every input edge of `keys`.
     pub(crate) fn detach(&mut self, keys: &[InternId]) {
         for &key in keys {
             self.depend(key, []);
         }
+    }
+
+    /// Makes the first of `keys` depend on every tile of the raster in tile
+    /// space `input` on `grid`, and the others on nothing: a node computed
+    /// whole learns from one mark that some tile it reads changed.
+    pub(crate) fn depend_whole(&mut self, keys: &[InternId], input: u32, grid: Grid) {
+        let Some((&first, rest)) = keys.split_first() else {
+            return;
+        };
+        let inputs: Vec<InternId> = (0..grid.count()).map(|t| self.key(input, t)).collect();
+        self.depend(first, inputs);
+        self.detach(rest);
     }
 
     /// Takes the tiles of `keys` that upstream changes marked, in tile order.

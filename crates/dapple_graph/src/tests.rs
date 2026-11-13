@@ -1838,3 +1838,55 @@ fn mip_nodes_rewire_when_the_source_gains_a_column() {
     };
     assert_eq!(bits(&g, mip), bits(&fresh, fresh_mip));
 }
+
+#[test]
+fn global_nodes_see_changes_a_failed_run_kept_from_them() {
+    let build = |x: f32| {
+        let mut g = MaterialGraph::with_tile_size(16);
+        let disk = g.field("disk", disk_op(x), &[]).unwrap();
+        let map = g.realize("map", disk, 64, 64).unwrap();
+        // The blur runs before the distance transform and the reduction, so
+        // when it fails they do not see the map's changed output.
+        let soft = g
+            .raster(
+                "soft",
+                RasterParams::Blur(GaussianBlur { sigma: 0.01 }),
+                map,
+            )
+            .unwrap();
+        let distance = g
+            .raster(
+                "distance",
+                RasterParams::DistanceTransform(DistanceTransform { threshold: 0.5 }),
+                map,
+            )
+            .unwrap();
+        let reduced = g
+            .reduce("reduced", map, ReductionPolicy::Average, 1)
+            .unwrap();
+        (g, disk, map, soft, [distance, reduced])
+    };
+    let (mut g, disk, map, soft, global) = build(0.2);
+    g.run().unwrap();
+    g.set_field_op(disk, disk_op(0.6)).unwrap();
+    g.set_raster_params(soft, RasterParams::Blur(GaussianBlur { sigma: -1.0 }))
+        .unwrap();
+    assert!(g.run().is_err());
+    // The map runs again with nothing new, so its output reports no change,
+    // but the global nodes have not seen the one that did.
+    g.set_resolution(map, 64, 64).unwrap();
+    g.set_raster_params(soft, RasterParams::Blur(GaussianBlur { sigma: 0.01 }))
+        .unwrap();
+    g.run().unwrap();
+
+    let (mut fresh, _, _, _, fresh_global) = build(0.6);
+    fresh.run().unwrap();
+    let digest = |g: &MaterialGraph, node| match &g.raster_value(node).unwrap().data {
+        RasterData::Scalar(r) => r.digest(),
+        RasterData::Vector3(r) => r.digest(),
+        RasterData::Typed(r) => r.digest(),
+    };
+    for (node, fresh_node) in global.into_iter().zip(fresh_global) {
+        assert_eq!(digest(&g, node), digest(&fresh, fresh_node));
+    }
+}

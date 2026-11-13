@@ -6,8 +6,9 @@
 The 80 × 20 cm faces share geometry, UVs and lighting. Domain +x follows
 the long edge; image rows start at domain y = -0.1. Flipping UV v makes
 the glTF normal maps' tangent frame match this image convention.
-Principled approximates OpenPBR; independent coat tint and normals are
-preserved. The dark backing is a display mount, not synthesized end grain.
+Principled approximates OpenPBR; independent coat tint (the raw profile's
+linear `coat_color.png`) and coat normals are preserved. The dark backing
+is a display mount, not synthesized end grain.
 """
 
 import os
@@ -71,7 +72,8 @@ def package_material(variant):
         return node.outputs["Color"]
 
     links.new(texture("base_color", True), bsdf.inputs["Base Color"])
-    links.new(texture("coat_color", True), bsdf.inputs["Coat Tint"])
+    # The raw profile stores the tint linearly.
+    links.new(texture("coat_color"), bsdf.inputs["Coat Tint"])
     orm = nodes.new("ShaderNodeSeparateColor")
     links.new(texture("orm"), orm.inputs["Color"])
     links.new(orm.outputs["Green"], bsdf.inputs["Roughness"])
@@ -80,7 +82,7 @@ def package_material(variant):
     links.new(texture("clearcoat"), coat.inputs["Color"])
     links.new(coat.outputs["Red"], bsdf.inputs["Coat Weight"])
     links.new(coat.outputs["Green"], bsdf.inputs["Coat Roughness"])
-    for name, socket in [("normal", "Normal"), ("coat_normal", "Coat Normal")]:
+    for name, socket in [("normal", "Normal"), ("clearcoat_normal", "Coat Normal")]:
         normal = nodes.new("ShaderNodeNormalMap")
         normal.uv_map = "UVMap"
         links.new(texture(name), normal.inputs["Color"])

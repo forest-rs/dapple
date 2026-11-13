@@ -4,16 +4,14 @@
 //! Bakes the actual varnished-board JSON package, at its defaults and with
 //! its `dark_and_worn` preset. See the example README for rendering commands.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use dapple_encode::{
-    Edge, Filter, Image, Input, PackSettings, PixelFormat, Profile, data_mips, encode_data, pack,
-    quantize_unorm16,
-};
+use dapple_encode::{Edge, PackSettings, Profile, pack};
 use dapple_library::packages::{VARNISHED_BOARD, registry};
 use dapple_material::module::{Bind, Context};
 use dapple_material::resource::NoResources;
-use dapple_material::{ChannelId, Grid, Material, Param, lower};
+use dapple_material::{Grid, Material, lower};
 use dapple_package::Package;
 use glam::Vec2;
 
@@ -62,61 +60,44 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Packs the material for the glTF profile and writes it as PNG files, with
+/// the raw profile's textures for whatever glTF reports it cannot carry.
 fn write_maps(dir: &Path, material: &Material) -> Result<()> {
     let (maps, lowering) = lower::maps(material)?;
-    let bundle = pack(&maps, Profile::Gltf, &PackSettings::default())?;
-    for texture in &bundle.textures {
+    // The coat ripple is below one 8-bit normal step. Keep 16-bit normals
+    // so packing does not turn it into sign-only noise.
+    let settings = PackSettings {
+        sixteen_bit_normals: true,
+        ..PackSettings::default()
+    };
+    let gltf = pack(&maps, Profile::Gltf, &settings)?;
+    let raw = pack(&maps, Profile::Raw, &settings)?;
+    let mut textures: Vec<_> = gltf.textures.iter().collect();
+    let mut notes = String::new();
+    for name in &gltf.report.unsupported {
+        match raw.texture(name) {
+            Some(texture) => {
+                textures.push(texture);
+                writeln!(notes, "{name} is carried by the raw profile's {name}.png.")?;
+            }
+            None => writeln!(notes, "{name} is the constant {:?}.", raw.constant(name))?,
+        }
+    }
+    for texture in textures {
         std::fs::write(
             dir.join(format!("{}.png", texture.name)),
             dapple_encode::png::write(texture)?,
         )?;
     }
-    // glTF has no coat tint or independent coat normal. Carry both in
-    // sidecar maps, using the same color and normal conventions as above.
-    let grid = material.grid();
-    let tint = match maps.coat_color.as_ref().ok_or("missing coat tint")? {
-        Input::Map(tint) => tint
-            .values()
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .flat_map(|c| [c[0], c[1], c[2], 1.0])
-            .collect(),
-        Input::Constant(c) => [c[0], c[1], c[2], 1.0].repeat(grid.len()),
-    };
-    let tint = Image::new(grid.width, grid.height, 4, grid.edge, tint)?;
-    let tint = encode_data(
-        "coat_color",
-        &data_mips(&tint, Filter::Box),
-        PixelFormat::Rgba8Srgb,
-    )?;
-    std::fs::write(
-        dir.join("coat_color.png"),
-        dapple_encode::png::write(&tint)?,
-    )?;
-    // The coat ripple is below one 8-bit normal step. Keep 16-bit
-    // precision so packing does not turn it into sign-only noise.
-    let normals: Vec<u8> = (0..grid.len())
-        .flat_map(|i| {
-            let value = material.value(ChannelId::Param(Param::GeometryCoatNormal), i);
-            [
-                value.component(0).unwrap_or(0.0),
-                -value.component(1).unwrap_or(0.0),
-                value.component(2).unwrap_or(1.0),
-            ]
-        })
-        .flat_map(|v| quantize_unorm16(v * 0.5 + 0.5).to_be_bytes())
-        .collect();
-    let file = std::io::BufWriter::new(std::fs::File::create(dir.join("coat_normal.png"))?);
-    let mut encoder = png::Encoder::new(file, grid.width, grid.height);
-    encoder.set_color(png::ColorType::Rgb);
-    encoder.set_depth(png::BitDepth::Sixteen);
-    encoder.write_header()?.write_image_data(&normals)?;
+    if let Some(height) = raw.placement("height") {
+        let [lo, hi] = height.range;
+        std::fs::write(dir.join("height.txt"), format!("{lo} {hi}\n"))?;
+    }
     std::fs::write(
         dir.join("lowering.txt"),
         format!(
-            "{lowering:#?}\nPacking: {:#?}\nCoatColor and GeometryCoatNormal are carried by sidecar PNG files.\nBlender uses IOR 1.5 for both base and coat; CoatDarkening has no exact Principled equivalent.\n",
-            bundle.report
+            "{lowering:#?}\nglTF constants: {:#?}\nPacking: {:#?}\n{notes}Blender uses IOR 1.5 for both base and coat; CoatDarkening has no exact Principled equivalent.\n",
+            gltf.constants, gltf.report
         ),
     )?;
     Ok(())

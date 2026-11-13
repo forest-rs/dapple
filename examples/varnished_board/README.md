@@ -19,9 +19,12 @@ grain, UVs and lighting. Maps are 1536 × 384 with clamped edges. The grey
 backings are display mounts; only their top faces show the package material.
 
 The renderer approximates OpenPBR with Blender's Principled BSDF. It uses
-the glTF base, roughness, metalness, normal and clearcoat maps, plus sidecar
-coat tint and independent 16-bit coat normal maps to preserve the varnish's
-tint and orange peel. Normals carry the surface relief; geometry is not displaced.
+the glTF profile's base color, `orm`, normal, clearcoat and clearcoat normal
+maps, packed with 16-bit normals (`PackSettings::sixteen_bit_normals`) to
+preserve the varnish's orange peel, plus the raw profile's `coat_color.png`
+(linear coat tint), which glTF cannot carry. The raw profile's 16-bit
+`height.png`, over the range `height.txt` gives in meters, is written too but
+not rendered: normals carry the surface relief; geometry is not displaced.
 Base and coat IOR are 1.5. OpenPBR's coat darkening has no exact Principled
 equivalent; the bake records lowering losses explicitly.
 

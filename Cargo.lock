@@ -1117,6 +1117,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
 
 [[package]]
+name = "varnished_board"
+version = "0.0.0"
+dependencies = [
+ "dapple_encode",
+ "dapple_lab",
+ "dapple_library",
+ "dapple_material",
+ "dapple_package",
+ "glam",
+ "png",
+]
+
+[[package]]
 name = "vello_common"
 version = "0.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

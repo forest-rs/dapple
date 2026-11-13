@@ -14,3 +14,5 @@ graph is inspectable, fingerprinted and evaluable like any other.
   mortar, stone, oak, finishes (glaze, varnish, oil) and weathering (grime,
   streaks, efflorescence), and assets composed of them: a glazed brick
   wall, a stone sill over brickwork, a varnished board and a threshold.
+- metals: copper cladding and riveted steel plate, calibrated to tabulated
+  F0.

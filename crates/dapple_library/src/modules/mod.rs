@@ -22,9 +22,12 @@
 //! | [`ByExample`] | A material tiled from a host-supplied exemplar by histogram-preserving blending. |
 //! | [`Beech`], [`Birch`], [`ScotsPine`], [`Spruce`] | Bark that follows the stem's girth and height on the trunk. |
 //! | [`AshlarLimestone`], [`RubbleWall`], [`FlintWall`], [`RomanBrick`], [`Marble`], [`TerracottaTile`] | Masonry on a unit layout, the host's or their own ([`crate::masonry`]). |
+//! | [`Copper`] | Copper cladding: standing seams and cross laps, brushed or rolled. |
+//! | [`Steel`] | Riveted mild-steel plate, ground or under mill scale. |
 //!
 //! The bark and masonry modules' colors are calibrated against measured
-//! reflectance: see [`calibration`].
+//! reflectance, and the metals' F0 against tabulated reflectance checked
+//! from optical constants: see [`calibration`].
 //!
 //! Assets compose them without copying their graphs:
 //! [`GlazedBrickWall`] (ceramic body, glaze finish, mortar, weathering),
@@ -55,6 +58,7 @@ pub mod calibration;
 mod ceramic;
 mod finish;
 mod masonry;
+mod metal;
 mod mortar;
 mod stone;
 mod wear;
@@ -66,6 +70,7 @@ pub use bark::{Beech, Birch, ScotsPine, Spruce};
 pub use ceramic::CeramicBody;
 pub use finish::Finish;
 pub use masonry::{AshlarLimestone, FlintWall, Marble, RomanBrick, RubbleWall, TerracottaTile};
+pub use metal::{Copper, Steel};
 pub use mortar::Mortar;
 pub use stone::Stone;
 pub use wear::{ByExample, EdgeWear, Moss};

@@ -828,3 +828,81 @@ mod coverage {
         );
     }
 }
+
+mod metals {
+    use dapple_field::Value;
+    use dapple_material::module::{Bind, Context, Module};
+    use dapple_material::resource::NoResources;
+    use dapple_material::{ChannelId, Material, Param, Tiling};
+    use glam::Vec3;
+
+    use crate::modules::calibration::{METALS, OXIDES, fresnel_f0};
+    use crate::modules::{Copper, Steel};
+
+    fn build(module: &dyn Module, n: u32, bind: Bind) -> Material {
+        let mut cx = Context::new(super::glazed::tile(n), &NoResources);
+        cx.instantiate(module, "m", bind)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .take_material("material")
+            .unwrap()
+    }
+
+    /// The metals' F0 is the tabulated one and passes the gate computed
+    /// from optical constants; the authored oxides pass theirs; and the
+    /// bare metals are metals, without diffuse, and tile.
+    #[test]
+    fn bare_metals_match_tabulated_f0_and_tile() {
+        assert!(
+            (fresnel_f0(1.5, 0.0) - 0.04).abs() < 1e-6,
+            "a dielectric's F0"
+        );
+        let bare = Bind::new().scalar("brushing", 0.0);
+        let metals: [(&dyn Module, Bind); 2] = [
+            (&Copper, bare.clone()),
+            (&Steel, bare.scalar("mill_scale", 0.0)),
+        ];
+        for ((module, bind), reference) in metals.into_iter().zip(METALS) {
+            assert_eq!(module.interface().id.name, reference.module);
+            assert!(reference.holds(reference.f0), "{}", reference.module);
+            let m = build(module, 64, bind);
+            assert_eq!(m.tiling(), Tiling::BOTH, "{}", reference.module);
+            assert_eq!(
+                m.constant(ChannelId::Param(Param::BaseMetalness)),
+                Some(Value::Scalar(1.0))
+            );
+            let mut f0 = Vec3::ZERO;
+            for i in 0..m.grid().len() {
+                if let Value::Vector3(c) = m.value(ChannelId::Param(Param::BaseColor), i) {
+                    f0 += c;
+                }
+            }
+            let f0 = f0 / m.grid().len() as f32;
+            let miss = (f0 - reference.f0).abs().max_element();
+            assert!(
+                miss < 0.02,
+                "{}: {f0} vs {}",
+                reference.module,
+                reference.f0
+            );
+        }
+        for oxide in OXIDES {
+            assert!(oxide.plausible.holds(oxide.color), "{}", oxide.name);
+        }
+    }
+
+    /// A brushed finish is anisotropic about `+y`, across its grooves.
+    #[test]
+    fn brushing_roughens_across_the_grooves() {
+        let m = build(&Copper, 64, Bind::new().scalar("brushing", 0.5));
+        assert_eq!(
+            m.constant(ChannelId::Param(Param::GeometryTangent)),
+            Some(Value::Vector3(Vec3::Y))
+        );
+        assert_eq!(
+            m.constant(ChannelId::Param(Param::SpecularRoughnessAnisotropy)),
+            Some(Value::Scalar(0.4))
+        );
+        let rolled = build(&Copper, 64, Bind::new().scalar("brushing", 0.0));
+        assert!(rolled.param(Param::SpecularRoughnessAnisotropy).is_none());
+    }
+}

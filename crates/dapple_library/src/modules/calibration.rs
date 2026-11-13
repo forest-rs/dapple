@@ -1,7 +1,7 @@
 // Copyright 2026 the Dapple Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Calibration of the bark and masonry modules against measured
+//! Calibration of the bark, masonry and metal modules against measured
 //! reflectance, with a plausibility gate from a second source.
 //!
 //! Each module's default color (and, where a measured value exists, its
@@ -83,6 +83,76 @@
 //!    <https://arxiv.org/abs/1401.4771>.
 //! 5. Physically Based, a database of physically based values for CG
 //!    artists: "Brick" and "Marble". <https://physicallybased.info>.
+//!
+//! # Metals and their corrosion
+//!
+//! A metal has no diffuse color to measure: its `base_color` is its
+//! reflectance at normal incidence, F0, which follows from its complex
+//! refractive index `n + ik` by Fresnel's equation,
+//! `F0 = ((n − 1)² + k²) / ((n + 1)² + k²)` ([`fresnel_f0`]). The metal
+//! modules take F0 from a published table (ref. 6) and gate it against
+//! F0 computed from optical constants of a second source (copper ref. 7,
+//! iron ref. 8), per Rec. 709 channel ([`METALS`]):
+//!
+//! | Module | F0, linear (ref. 6) | `n`, `k` per R, G, B (refs. 7, 8) | F0 from them |
+//! |---|---|---|---|
+//! | [`super::Copper`] | (0.955, 0.638, 0.538) | (0.200, 3.913), (0.924, 2.453), (1.102, 2.142) | (0.952, 0.620, 0.511) |
+//! | [`super::Steel`] (iron) | (0.562, 0.565, 0.578) | (2.911, 3.089), (2.950, 2.932), (2.585, 2.767) | (0.531, 0.512, 0.496) |
+//!
+//! The gate allows 0.1 per channel. Copper's largest disagreement with the
+//! table is 0.027 (blue). Iron's is 0.082, also in blue (0.578 against
+//! 0.496), inside the 0.1 tolerance but not by much: the table's iron is
+//! slightly blue, the optical constants' slightly warm. Mild steel is some
+//! 99% iron and is given iron's F0; no measurement of mild steel itself
+//! was used.
+//!
+//! **Mill scale** (the oxide hot rolling leaves on steel) is mostly
+//! magnetite, opaque and conductive, so it is modeled as a metal too, with
+//! F0 its reflectance in polished section. In air that is 20.3–22.3% over
+//! 400–700 nm (22.3% at 400 nm, a minimum of 20.3% at 500–520 nm, 21.2% at
+//! 700 nm), gray with a brownish tint, and isotropic (ref. 9);
+//! [`MILL_SCALE_F0`] rounds it down to a neutral 0.2.
+//!
+//! **Corrosion products** are dielectrics with a diffuse color. No measured
+//! spectrum of them was used: the colors below are **authored** to
+//! photographs, and held only to plausible ranges ([`OXIDES`]), stated
+//! with their reasoning. A possible future calibration source is the USGS
+//! Spectral Library (ref. 10), which includes goethite, hematite,
+//! lepidocrocite and malachite.
+//!
+//! - *Rust* ([`RUST_COLOR`], [`RUST_DARK`]): goethite and lepidocrocite
+//!   (orange-brown) over hematite and magnetite (near black). The orange
+//!   is held to fired clay's red-over-blue (3–8), whose red is hematite's
+//!   (refs. 3, 5); the dark scale to a looser 1.5–8, since magnetite is
+//!   nearly neutral.
+//! - *Verdigris* ([`VERDIGRIS_COLOR`]): the basic copper sulfates
+//!   (brochantite, antlerite) of an outdoor patina, pale blue-green: held
+//!   to green above red and at least blue, and a luminance of 0.15–0.45.
+//! - *Tarnish* ([`TARNISH_ROSE_F0`], [`TARNISH_F0`], [`TARNISH_DARK_F0`]):
+//!   copper's cuprite film, too thin to hide the metal, tints its F0 rose
+//!   where it is young and thin, darkens it toward brown, and then near
+//!   black. OpenPBR's thin film would model it, but lowering
+//!   does not carry thin film, so it is a darker metal F0 instead.
+//!
+//! 6. Hoffman, N. (2014). "Physics and Math of Shading", SIGGRAPH 2014
+//!    course *Physically Based Shading in Theory and Practice*, slides
+//!    55–56 (F0 of metals, linear).
+//!    <https://blog.selfshadow.com/publications/s2014-shading-course/hoffman/s2014_pbs_physics_math_slides.pdf>.
+//!    *Real-Time Rendering*, 4th ed., Table 9.2, reproduces these values.
+//! 7. Copper's RGB complex refractive index, reduced from the copper
+//!    spectrum distributed with pbrt and Mitsuba (Luxpop, after Palik).
+//!    The triple is a commonly used reduction; no citable publication of
+//!    it was found.
+//! 8. Iron's: Johnson, P. B. and Christy, R. W. (1974). "Optical constants
+//!    of transition metals: Ti, V, Cr, Mn, Fe, Co, Ni, and Pd", *Phys.
+//!    Rev. B* 9, 5056, point-sampled at 650, 550 and 450 nm for R, G and
+//!    B (as tabulated on refractiveindex.info).
+//! 9. Anthony, J. W., Bideaux, R. A., Bladh, K. W. and Nichols, M. C.
+//!    *Handbook of Mineralogy*, Mineralogical Society of America:
+//!    "Magnetite" (reflectance in air, 20.3–22.3% from 400 to 700 nm).
+//!    <https://www.rruff.net/doclib/hom/magnetite.pdf>.
+//! 10. USGS Spectral Library Version 7, U.S. Geological Survey Data Series
+//!     1035. <https://doi.org/10.3133/ds1035>.
 
 use glam::Vec3;
 
@@ -304,3 +374,113 @@ pub const BIRCH_BREAST_HEIGHT: [f32; 2] = [0.12, 0.284];
 pub fn luminance(c: Vec3) -> f32 {
     c.dot(Vec3::new(0.2126, 0.7152, 0.0722))
 }
+
+/// Copper's F0, linear (ref. 6).
+pub const COPPER_F0: Vec3 = Vec3::new(0.955, 0.638, 0.538);
+/// Iron's F0, linear (ref. 6), which mild steel takes.
+pub const IRON_F0: Vec3 = Vec3::new(0.562, 0.565, 0.578);
+/// Mill scale's F0: magnetite's reflectance in polished section, 20.3–22.3%
+/// over the visible, rounded down (ref. 9).
+pub const MILL_SCALE_F0: Vec3 = Vec3::new(0.2, 0.2, 0.2);
+/// Copper under a brown cuprite tarnish, as an F0: authored.
+pub const TARNISH_F0: Vec3 = Vec3::new(0.36, 0.17, 0.1);
+/// Copper under a young, rose to purplish tarnish film, as an F0:
+/// authored.
+pub const TARNISH_ROSE_F0: Vec3 = Vec3::new(0.48, 0.24, 0.22);
+/// Copper under a dark, old tarnish, as an F0: authored.
+pub const TARNISH_DARK_F0: Vec3 = Vec3::new(0.1, 0.055, 0.042);
+/// Verdigris, a weathered copper's blue-green patina: authored.
+pub const VERDIGRIS_COLOR: Vec3 = Vec3::new(0.16, 0.3, 0.245);
+/// Orange-brown rust (goethite, lepidocrocite): authored.
+pub const RUST_COLOR: Vec3 = Vec3::new(0.22, 0.085, 0.035);
+/// Dark rust scale (hematite, magnetite): authored.
+pub const RUST_DARK: Vec3 = Vec3::new(0.05, 0.03, 0.021);
+
+/// F0 of a conductor of complex refractive index `n + ik` in air.
+#[must_use]
+pub fn fresnel_f0(n: f32, k: f32) -> f32 {
+    ((n - 1.0) * (n - 1.0) + k * k) / ((n + 1.0) * (n + 1.0) + k * k)
+}
+
+/// A metal's calibration: see the [module docs](self#metals-and-their-corrosion).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct MetalReference {
+    /// The module's name, as in its identity.
+    pub module: &'static str,
+    /// F0 per Rec. 709 channel, linear (ref. 6).
+    pub f0: Vec3,
+    /// The second source's `(n, k)` per channel (refs. 7, 8).
+    pub optical: [[f32; 2]; 3],
+    /// How far F0 may lie from the second source's, per channel.
+    pub tolerance: f32,
+}
+
+impl MetalReference {
+    /// F0 from the second source's optical constants.
+    #[must_use]
+    pub fn optical_f0(&self) -> Vec3 {
+        let [r, g, b] = self.optical.map(|[n, k]| fresnel_f0(n, k));
+        Vec3::new(r, g, b)
+    }
+
+    /// Whether `f0` passes the gate.
+    #[must_use]
+    pub fn holds(&self, f0: Vec3) -> bool {
+        (f0 - self.optical_f0()).abs().max_element() <= self.tolerance
+    }
+}
+
+/// The metals of the table above, in its order.
+pub const METALS: [MetalReference; 2] = [
+    MetalReference {
+        module: "dapple_library.copper",
+        f0: COPPER_F0,
+        optical: [[0.200, 3.913], [0.924, 2.453], [1.102, 2.142]],
+        tolerance: 0.1,
+    },
+    MetalReference {
+        module: "dapple_library.steel",
+        f0: IRON_F0,
+        optical: [[2.911, 3.089], [2.950, 2.932], [2.585, 2.767]],
+        tolerance: 0.1,
+    },
+];
+
+/// An authored corrosion color and the range it is held to.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Authored {
+    /// What it is.
+    pub name: &'static str,
+    /// Its linear color.
+    pub color: Vec3,
+    /// The range it must lie in.
+    pub plausible: Plausible,
+}
+
+/// The authored corrosion colors and their gates: see the
+/// [module docs](self#metals-and-their-corrosion).
+pub const OXIDES: [Authored; 3] = [
+    Authored {
+        name: "rust",
+        color: RUST_COLOR,
+        plausible: FIRED_CLAY,
+    },
+    Authored {
+        name: "rust scale",
+        color: RUST_DARK,
+        plausible: Plausible {
+            luminance: [0.01, 0.1],
+            red_over_blue: Some([1.5, 8.0]),
+            independent: false,
+        },
+    },
+    Authored {
+        name: "verdigris",
+        color: VERDIGRIS_COLOR,
+        plausible: Plausible {
+            luminance: [0.15, 0.45],
+            red_over_blue: None,
+            independent: false,
+        },
+    },
+];

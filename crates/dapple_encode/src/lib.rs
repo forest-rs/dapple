@@ -32,7 +32,8 @@
 //! [`pack()`] turns a [`MaterialMaps`] set into a [`Bundle`] of 8-bit textures
 //! for a [`Profile`]: [`Profile::Lightweald`] (the slots of
 //! `lightweald_material`), [`Profile::Gltf`], or [`Profile::Raw`]. Each
-//! texture carries its whole mip chain. [`ktx2::write`] writes one as a KTX2
+//! texture carries its whole mip chain, and each [`Placement`] says which
+//! channels of which texture hold a parameter. [`ktx2::write`] writes one as a KTX2
 //! file with those mips; `png::write` (behind the `std` feature) writes
 //! level 0 as PNG.
 //!
@@ -86,8 +87,8 @@ pub use mips::{
     id_mips, normal_mips, preserve_coverage,
 };
 pub use pack::{
-    Bundle, EncodedTexture, MaterialMaps, PackReport, PackSettings, Profile, TextureKind,
-    encode_data, pack,
+    Bundle, EncodedTexture, MaterialMaps, PackReport, PackSettings, Placement, Profile,
+    TextureKind, encode_data, pack,
 };
 pub use quantize::{PixelFormat, linear_to_srgb, quantize_unorm8, quantize_unorm16};
 

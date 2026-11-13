@@ -26,6 +26,7 @@ combine them, and parameterized modules that build them.
   `Context::instantiate` checks bindings, derives seeds from the instance path, and records every
   operation's report against the instance that made it.
 - **Lowering.** `lower::maps` turns a material into `dapple_encode`'s maps
-  and names the parameters they cannot carry.
+  and constants, driven by the OpenPBR parameter enumeration, and names the
+  parameters they cannot carry.
 
 `#![no_std]` with `alloc`.

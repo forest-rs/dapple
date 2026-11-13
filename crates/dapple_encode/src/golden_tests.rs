@@ -51,12 +51,22 @@ fn material() -> MaterialMaps {
         occlusion: Some(image(1, occlusion).into()),
         anisotropy_direction: None,
         specular_roughness_anisotropy: None,
+        specular_weight: None,
+        specular_color: None,
+        specular_ior: None,
         subsurface_weight: None,
         subsurface_color: None,
         transmission_weight: None,
         coat_weight: None,
         coat_roughness: None,
         coat_color: None,
+        coat_normal: None,
+        fuzz_weight: None,
+        fuzz_color: None,
+        fuzz_roughness: None,
+        emission_luminance: None,
+        emission_color: None,
+        height: None,
     }
 }
 

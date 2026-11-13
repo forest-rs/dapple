@@ -26,10 +26,17 @@ pub struct Lowering {
 /// The material's maps for `dapple_encode::pack`: every bound channel
 /// [`MaterialMaps`] has a field for, maps as images on the material's grid
 /// and constants as [`Input::Constant`], with the normal map derived from
-/// the height when no `geometry_normal` is bound. A constant normal other
-/// than the unperturbed `+Z` is expanded into a map, since normals have no
-/// constant form. [`Aux::Height`] stays with the material: consumers that
-/// displace read it directly.
+/// a height map when no `geometry_normal` is bound.
+///
+/// - A constant normal other than the unperturbed `+Z` (base or coat) is
+///   expanded into a map, since normals have no constant form.
+/// - `geometry_tangent` becomes [`MaterialMaps::anisotropy_direction`]: the
+///   doubled angle of its projection onto the surface, so an axis and its
+///   opposite agree. A tangent along the normal has no axis and lowers to
+///   `(0, 0)`, which anisotropy reads as isotropic.
+/// - [`Aux::Height`] becomes [`MaterialMaps::height`] and
+///   [`Aux::Occlusion`] [`MaterialMaps::occlusion`]; the other auxiliary
+///   channels are identifiers, not texture data.
 ///
 /// The walk follows the `openpbr` parameter enumeration ([`Param::ALL`]):
 /// each parameter's type gives its channel count and its default decides
@@ -42,6 +49,7 @@ pub struct Lowering {
 pub fn maps(material: &Material) -> Result<(MaterialMaps, Lowering), MaterialError> {
     let mut maps = MaterialMaps {
         occlusion: input(material, ChannelId::Aux(Aux::Occlusion))?,
+        height: input(material, ChannelId::Aux(Aux::Height))?,
         ..MaterialMaps::default()
     };
     let mut lowering = Lowering::default();
@@ -57,7 +65,7 @@ pub fn maps(material: &Material) -> Result<(MaterialMaps, Lowering), MaterialErr
             lowering.dropped.push(param);
         }
     }
-    if maps.normal.is_none() && material.aux(Aux::Height).is_some() {
+    if maps.normal.is_none() && matches!(material.aux(Aux::Height), Some(Channel::Map(_))) {
         let normals = HeightToNormal { scale: 1.0 }.apply(&material.height()?)?;
         maps.normal = Some(Image::from(&normals));
         lowering.normal_from_height = true;
@@ -78,15 +86,28 @@ fn lower_param(
     match param {
         Param::BaseColor => maps.base_color = input(m, c)?,
         Param::BaseMetalness => maps.base_metalness = input(m, c)?,
+        Param::SpecularWeight => maps.specular_weight = input(m, c)?,
+        Param::SpecularColor => maps.specular_color = input(m, c)?,
         Param::SpecularRoughness => maps.specular_roughness = input(m, c)?,
+        Param::SpecularRoughnessAnisotropy => {
+            maps.specular_roughness_anisotropy = input(m, c)?;
+        }
+        Param::SpecularIor => maps.specular_ior = input(m, c)?,
         Param::TransmissionWeight => maps.transmission_weight = input(m, c)?,
         Param::SubsurfaceWeight => maps.subsurface_weight = input(m, c)?,
         Param::SubsurfaceColor => maps.subsurface_color = input(m, c)?,
         Param::CoatWeight => maps.coat_weight = input(m, c)?,
         Param::CoatColor => maps.coat_color = input(m, c)?,
         Param::CoatRoughness => maps.coat_roughness = input(m, c)?,
+        Param::FuzzWeight => maps.fuzz_weight = input(m, c)?,
+        Param::FuzzColor => maps.fuzz_color = input(m, c)?,
+        Param::FuzzRoughness => maps.fuzz_roughness = input(m, c)?,
+        Param::EmissionLuminance => maps.emission_luminance = input(m, c)?,
+        Param::EmissionColor => maps.emission_color = input(m, c)?,
         Param::GeometryOpacity => maps.opacity = input(m, c)?,
         Param::GeometryNormal => maps.normal = normal(m, c)?,
+        Param::GeometryTangent => maps.anisotropy_direction = direction(m, c)?,
+        Param::GeometryCoatNormal => maps.coat_normal = normal(m, c)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -104,6 +125,34 @@ fn input<const N: usize>(
             v.component(k).unwrap_or(0.0)
         }))),
         Some(Channel::Map(_)) => image(material, c)?.map(Input::Map),
+    })
+}
+
+/// Tangent channel `c` as the doubled-angle direction of its projection
+/// onto the surface, `(cos 2θ, sin 2θ)`, or `None` when it is unbound.
+fn direction(material: &Material, c: ChannelId) -> Result<Option<Input<2>>, MaterialError> {
+    let doubled = |v: dapple_field::Value| {
+        let x = v.component(0).unwrap_or(0.0);
+        let y = v.component(1).unwrap_or(0.0);
+        let r2 = x * x + y * y;
+        if r2 > 0.0 {
+            [(x * x - y * y) / r2, 2.0 * x * y / r2]
+        } else {
+            [0.0, 0.0]
+        }
+    };
+    Ok(match material.channel(c) {
+        None => None,
+        Some(Channel::Constant(v)) => Some(Input::Constant(doubled(*v))),
+        Some(Channel::Map(_)) => {
+            let grid = material.grid();
+            let values = (0..grid.len())
+                .flat_map(|i| doubled(material.value(c, i)))
+                .collect();
+            let image = Image::new(grid.width, grid.height, 2, grid.edge, values)
+                .map_err(|_| MaterialError::GridMismatch)?;
+            Some(Input::Map(image))
+        }
     })
 }
 
@@ -257,29 +306,111 @@ mod tests {
     fn parameters_without_a_map_are_dropped_unless_at_their_defaults() {
         let mut m = Material::new(grid());
         // At the specification's default, nothing is lost.
-        m.set_param(Param::SpecularIor, scalar(1.5)).unwrap();
+        m.set_param(Param::BaseWeight, scalar(1.0)).unwrap();
         // Away from it, or as a map, a parameter without a field is lost.
-        m.set_param(Param::FuzzWeight, scalar(1.0)).unwrap();
+        m.set_param(Param::CoatIor, scalar(1.4)).unwrap();
         m.set_param(
-            Param::FuzzRoughness,
-            map(PortType::Scalar, |_| Value::Scalar(0.7)),
+            Param::ThinFilmWeight,
+            map(PortType::Scalar, |_| Value::Scalar(0.0)),
         )
         .unwrap();
-        m.set_param(Param::SpecularRoughnessAnisotropy, scalar(0.4))
-            .unwrap();
         m.set_param(Param::GeometryThinWalled, scalar(1.0)).unwrap();
         let (maps, lowering) = maps(&m).unwrap();
         assert_eq!(
             lowering.dropped,
             [
-                Param::SpecularRoughnessAnisotropy,
-                Param::FuzzWeight,
-                Param::FuzzRoughness,
+                Param::CoatIor,
+                Param::ThinFilmWeight,
                 Param::GeometryThinWalled,
             ],
             "in specification order; a map is dropped even if it holds the default"
         );
-        assert!(maps.specular_roughness_anisotropy.is_none());
-        assert!(maps.anisotropy_direction.is_none());
+        assert_eq!(maps, MaterialMaps::default());
+    }
+
+    #[test]
+    fn specular_fuzz_emission_coat_normals_and_height_are_carried() {
+        let mut m = Material::new(grid());
+        let color = |c: [f32; 3]| Channel::Constant(Value::Vector3(Vec3::from_array(c)));
+        m.set_param(Param::SpecularWeight, scalar(0.8)).unwrap();
+        m.set_param(Param::SpecularColor, color([1.0, 0.9, 0.8]))
+            .unwrap();
+        m.set_param(Param::SpecularIor, scalar(1.33)).unwrap();
+        m.set_param(Param::SpecularRoughnessAnisotropy, scalar(0.4))
+            .unwrap();
+        m.set_param(Param::FuzzWeight, scalar(1.0)).unwrap();
+        m.set_param(Param::FuzzColor, color([0.3, 0.4, 0.1]))
+            .unwrap();
+        m.set_param(
+            Param::FuzzRoughness,
+            map(PortType::Scalar, |_| Value::Scalar(0.7)),
+        )
+        .unwrap();
+        m.set_param(Param::EmissionLuminance, scalar(40.0)).unwrap();
+        m.set_param(Param::EmissionColor, color([1.0, 0.5, 0.0]))
+            .unwrap();
+        let tilted = Vec3::new(0.0, 0.6, 0.8);
+        m.set_param(
+            Param::GeometryCoatNormal,
+            map(PortType::Normal(NormalFrame::Domain), |_| {
+                Value::Vector3(tilted)
+            }),
+        )
+        .unwrap();
+        m.set_aux(Aux::Height, scalar(0.002)).unwrap();
+        let (maps, lowering) = maps(&m).unwrap();
+        assert_eq!(lowering, Lowering::default(), "nothing lost");
+
+        assert_eq!(maps.specular_weight, Some(Input::Constant([0.8])));
+        assert_eq!(maps.specular_color, Some(Input::Constant([1.0, 0.9, 0.8])));
+        assert_eq!(maps.specular_ior, Some(Input::Constant([1.33])));
+        assert_eq!(
+            maps.specular_roughness_anisotropy,
+            Some(Input::Constant([0.4]))
+        );
+        assert_eq!(maps.fuzz_weight, Some(Input::Constant([1.0])));
+        assert_eq!(maps.fuzz_color, Some(Input::Constant([0.3, 0.4, 0.1])));
+        let fuzz_roughness = maps.fuzz_roughness.unwrap();
+        assert_eq!(fuzz_roughness.map().unwrap().texel(2, 1), [0.7]);
+        assert_eq!(maps.emission_luminance, Some(Input::Constant([40.0])));
+        assert_eq!(maps.emission_color, Some(Input::Constant([1.0, 0.5, 0.0])));
+        assert_eq!(maps.coat_normal.unwrap().texel(0, 0), tilted.to_array());
+        // A constant height is carried, and derives no normal map: it is
+        // flat.
+        assert_eq!(maps.height, Some(Input::Constant([0.002])));
+        assert_eq!(maps.normal, None);
+    }
+
+    #[test]
+    fn tangents_lower_to_doubled_angle_directions() {
+        let mut m = Material::new(grid());
+        let tangent = |v: Vec3| Channel::Constant(Value::Vector3(v));
+        let direction = |m: &Material| maps(m).unwrap().0.anisotropy_direction;
+        // 45°: the doubled angle is 90°.
+        m.set_param(Param::GeometryTangent, tangent(Vec3::new(1.0, 1.0, 0.0)))
+            .unwrap();
+        assert_eq!(direction(&m), Some(Input::Constant([0.0, 1.0])));
+        // An axis and its opposite are one direction; only the projection
+        // onto the surface counts.
+        m.set_param(Param::GeometryTangent, tangent(Vec3::new(-2.0, 0.0, 5.0)))
+            .unwrap();
+        assert_eq!(direction(&m), Some(Input::Constant([1.0, 0.0])));
+        // Along the normal there is no axis.
+        m.set_param(Param::GeometryTangent, tangent(Vec3::Z))
+            .unwrap();
+        assert_eq!(direction(&m), Some(Input::Constant([0.0, 0.0])));
+        // Maps lower texel by texel.
+        m.set_param(
+            Param::GeometryTangent,
+            map(PortType::Vector3, |i| {
+                Value::Vector3(if i % 2 == 0 { Vec3::X } else { Vec3::Y })
+            }),
+        )
+        .unwrap();
+        let image = direction(&m).unwrap();
+        let image = image.map().unwrap();
+        assert_eq!(image.channels(), 2);
+        assert_eq!(image.texel(0, 0), [1.0, 0.0]);
+        assert_eq!(image.texel(1, 0), [-1.0, 0.0]);
     }
 }

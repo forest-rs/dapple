@@ -98,6 +98,11 @@ impl Registry {
         self
     }
 
+    /// Every registered module, in registration order.
+    pub fn modules(&self) -> impl Iterator<Item = &Arc<dyn Module>> + '_ {
+        self.modules.iter()
+    }
+
     /// The module `id` names, at exactly its version.
     #[must_use]
     pub fn module(&self, id: &ModuleRef) -> Option<&Arc<dyn Module>> {

@@ -23,6 +23,10 @@ use crate::modules::{
 /// The varnished board's package source.
 pub const VARNISHED_BOARD: &str = include_str!("../packages/varnished_board.json");
 
+/// Every package this crate ships, as source. A package added to the
+/// crate belongs here, so its golden digests are checked.
+pub const PACKAGES: &[&str] = &[VARNISHED_BOARD];
+
 /// An engine offering this crate's modules and `dapple_package`'s own
 /// capabilities.
 #[must_use]

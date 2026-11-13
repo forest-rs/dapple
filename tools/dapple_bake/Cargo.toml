@@ -14,6 +14,9 @@ dapple_encode = { features = ["std"], workspace = true }
 dapple_field.workspace = true
 dapple_graph = { features = ["serde"], workspace = true }
 dapple_raster.workspace = true
+# The runtime, session and capture features are for `--profile`; the library
+# itself emits through the featureless API.
+footfall = { features = ["runtime", "session"], workspace = true }
 serde.workspace = true
 toml.workspace = true
 

@@ -45,6 +45,8 @@ use dapple_graph::{RasterData, Recipe};
 use dapple_raster::typed::Storage;
 use serde::Deserialize;
 
+mod observe;
+
 /// Tile size used to realize recipes.
 const TILE_SIZE: u32 = 64;
 
@@ -249,6 +251,7 @@ pub struct Baked {
 }
 
 fn images(id: &str, recipe: &Recipe) -> Result<MaterialMaps, BakeError> {
+    let _scope = observe::images();
     let (mut graph, nodes) = recipe
         .build(TILE_SIZE)
         .map_err(|e| BakeError::Recipe(id.into(), e))?;
@@ -360,6 +363,7 @@ pub fn bake(entry: &MaterialEntry, recipe: &Recipe) -> Result<Baked, BakeError> 
         .profiles
         .iter()
         .map(|&name| {
+            let _scope = observe::pack(name);
             pack(&maps, name.profile(), &settings)
                 .map(|bundle| (name, bundle))
                 .map_err(|e| BakeError::Encode(entry.id.clone(), e.to_string()))
@@ -449,10 +453,12 @@ pub enum Outcome {
 }
 
 fn write_file(path: &Path, bytes: &[u8]) -> Result<u64, BakeError> {
+    let _scope = observe::write();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| BakeError::Io(dir.into(), e))?;
     }
     std::fs::write(path, bytes).map_err(|e| BakeError::Io(path.into(), e))?;
+    observe::written(bytes.len() as u64);
     Ok(bytes.len() as u64)
 }
 
@@ -472,10 +478,12 @@ pub fn bake_manifest(
     settings: &WriteSettings,
     force: bool,
 ) -> Result<Vec<(String, Outcome)>, BakeError> {
+    let _scope = observe::manifest();
     let manifest = read_manifest(manifest_path)?;
     let base = manifest_path.parent().unwrap_or(Path::new("."));
     let mut outcomes = Vec::new();
-    for entry in &manifest.materials {
+    for (index, entry) in manifest.materials.iter().enumerate() {
+        let _scope = observe::material(index, &entry.id);
         let recipe = read_recipe(&base.join(&entry.recipe))?;
         let fingerprint = recipe
             .fingerprint()
@@ -487,6 +495,7 @@ pub fn bake_manifest(
             old.header == header && old.files.iter().all(|f| out.join(f).is_file())
         });
         if !force && intact {
+            observe::cached();
             outcomes.push((entry.id.clone(), Outcome::Cached));
             continue;
         }
@@ -511,24 +520,31 @@ pub fn bake_manifest(
             for texture in &bundle.textures {
                 if *name == ProfileName::Lightweald {
                     let rel = rel_dir.join(format!("{}.ktx2", texture.name));
-                    bytes += write_file(&out.join(&rel), &ktx2::write(texture))?;
+                    let encoded = {
+                        let _scope = observe::ktx2();
+                        ktx2::write(texture)
+                    };
+                    bytes += write_file(&out.join(&rel), &encoded)?;
                     files += 1;
                     written.push(rel);
                     for &encoding in &settings.encodings {
-                        let encoded = compress(
-                            texture,
-                            CompressSettings {
-                                encoding,
-                                quality: settings.quality,
-                                zstd: true,
-                            },
-                        )
-                        .map_err(|e| encode_error(&e))?;
                         let sub = match encoding {
                             Encoding::Uncompressed => "uncompressed",
                             Encoding::Bc => "bc",
                             Encoding::Astc => "astc",
                         };
+                        let encoded = {
+                            let _scope = observe::compress(sub);
+                            compress(
+                                texture,
+                                CompressSettings {
+                                    encoding,
+                                    quality: settings.quality,
+                                    zstd: true,
+                                },
+                            )
+                        }
+                        .map_err(|e| encode_error(&e))?;
                         let rel = rel_dir.join(sub).join(format!("{}.ktx2", texture.name));
                         bytes += write_file(&out.join(&rel), &encoded)?;
                         files += 1;
@@ -536,7 +552,11 @@ pub fn bake_manifest(
                     }
                 } else {
                     let rel = rel_dir.join(format!("{}.png", texture.name));
-                    let data = png::write(texture).map_err(|e| encode_error(&e))?;
+                    let data = {
+                        let _scope = observe::png();
+                        png::write(texture)
+                    }
+                    .map_err(|e| encode_error(&e))?;
                     bytes += write_file(&out.join(&rel), &data)?;
                     files += 1;
                     written.push(rel);
@@ -554,6 +574,7 @@ pub fn bake_manifest(
         // A partial write, even at a file boundary, cannot vouch for a bake.
         stamp.push_str(&format!("complete {}\n", written.len()));
         write_file(&stamp_path, stamp.as_bytes())?;
+        observe::baked();
         outcomes.push((
             entry.id.clone(),
             Outcome::Baked {

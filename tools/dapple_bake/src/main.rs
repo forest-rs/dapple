@@ -6,17 +6,27 @@
 //! ```text
 //! dapple_bake --manifest <materials.toml> [--out <dir>]
 //!             [--encoding uncompressed,bc,astc] [--quality fast|balanced|best]
-//!             [--force]
+//!             [--force] [--profile <capture.ffcap>]
 //! ```
+//!
+//! `--profile` records where the bake spent its time (the scopes and
+//! counters the library docs list, plus those of `dapple_graph`) to a
+//! `footfall` capture, which `footfall analyze` reads. It changes nothing the
+//! bake writes.
 
+use std::fs::File;
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use dapple_bake::{Outcome, WriteSettings, bake_manifest};
 use dapple_compress::{Encoding, Quality};
+use footfall::runtime::Runtime;
+use footfall::session::capture::CaptureRecorder;
 
 const USAGE: &str = "usage: dapple_bake --manifest <materials.toml> [--out <dir>] \
-[--encoding uncompressed,bc,astc] [--quality fast|balanced|best] [--force]";
+[--encoding uncompressed,bc,astc] [--quality fast|balanced|best] [--force] \
+[--profile <capture.ffcap>]";
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
@@ -36,6 +46,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         quality: Quality::Balanced,
     };
     let mut force = false;
+    let mut profile = None;
     let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
         let mut value = || {
@@ -66,11 +77,19 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 };
             }
             "--force" => force = true,
+            "--profile" => profile = Some(PathBuf::from(value()?)),
             other => return Err(format!("unexpected argument {other}\n{USAGE}")),
         }
     }
     let manifest = manifest.ok_or_else(|| USAGE.to_owned())?;
-    let outcomes = bake_manifest(&manifest, &out, &settings, force).map_err(|e| e.to_string())?;
+    let capture = profile.as_deref().map(Capture::start).transpose()?;
+    let outcomes = bake_manifest(&manifest, &out, &settings, force).map_err(|e| e.to_string());
+    // Keep what was captured even when the bake failed: that is when a
+    // profile is most wanted.
+    if let Some(capture) = capture {
+        capture.finish()?;
+    }
+    let outcomes = outcomes?;
     for (id, outcome) in outcomes {
         match outcome {
             Outcome::Cached => println!("{id}: unchanged, skipped"),
@@ -88,6 +107,53 @@ fn run(args: Vec<String>) -> Result<(), String> {
     }
     println!("output in {}", out.display());
     Ok(())
+}
+
+/// A `footfall` runtime installed for this process, and the capture file it
+/// is written to when the bake ends.
+struct Capture {
+    recorder: CaptureRecorder<'static, BufWriter<File>>,
+    path: PathBuf,
+}
+
+impl Capture {
+    /// Events the runtime retains until the capture is written: far more than
+    /// a bake emits (a few hundred per material), so none are evicted.
+    const EVENTS: usize = 1 << 18;
+
+    fn start(path: &Path) -> Result<Self, String> {
+        let file = File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let runtime = Runtime::builder()
+            .process_name("dapple_bake")
+            .event_capacity(Self::EVENTS)
+            .install_global()
+            .map_err(|e| e.to_string())?;
+        let recorder = CaptureRecorder::new(runtime, BufWriter::new(file))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Self {
+            recorder,
+            path: path.to_owned(),
+        })
+    }
+
+    fn finish(self) -> Result<(), String> {
+        let Self { recorder, path } = self;
+        let finished = recorder
+            .finish()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        if finished.missed() > 0 {
+            eprintln!(
+                "dapple_bake: the profile lost {} events the runtime evicted",
+                finished.missed()
+            );
+        }
+        println!(
+            "profile in {} ({} events)",
+            path.display(),
+            finished.events()
+        );
+        Ok(())
+    }
 }
 
 /// The repository root: this crate's manifest sits two levels below it.

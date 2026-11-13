@@ -3042,6 +3042,7 @@ mod tests {
     use super::*;
     use crate::raster::{Grid, Region};
     use crate::{Transformed, central_difference};
+    use alloc::vec;
     use glam::Mat2;
 
     fn torus() -> Domain {
@@ -3179,6 +3180,160 @@ mod tests {
         })
         .unwrap()
     }
+
+    /// The importer `ProgramBuilder::import` replaced: deduplicates by a
+    /// linear scan for the first node of equal fingerprint. Kept to pin that
+    /// the indexed importer builds exactly the same programs.
+    fn scanning_import(b: &mut ProgramBuilder, program: &FieldProgram) -> NodeId {
+        let mut needed = vec![false; program.nodes.len()];
+        needed[program.output.0 as usize] = true;
+        for index in (0..program.nodes.len()).rev() {
+            if needed[index] {
+                for input in program.nodes[index].op.inputs().iter() {
+                    needed[input.0 as usize] = true;
+                }
+            }
+        }
+        let mut mapped = vec![None::<NodeId>; program.nodes.len()];
+        for (index, node) in program.nodes.iter().enumerate() {
+            if !needed[index] {
+                continue;
+            }
+            let existing = b
+                .nodes
+                .iter()
+                .position(|n| n.fingerprint == node.fingerprint);
+            let id = match existing {
+                Some(existing) => NodeId(u32::try_from(existing).unwrap()),
+                None => b
+                    .add(
+                        node.op
+                            .map_inputs(|input| mapped[input.0 as usize].unwrap()),
+                    )
+                    .unwrap(),
+            };
+            mapped[index] = Some(id);
+        }
+        mapped[program.output.0 as usize].unwrap()
+    }
+
+    fn scalar_chain(len: u64, seed: u64) -> FieldProgram {
+        let mut b = ProgramBuilder::new();
+        let mut last = noise(&mut b, seed);
+        for i in 0..len {
+            last = if i % 3 == 0 {
+                let c = b
+                    .add(Op::Constant {
+                        domain: torus(),
+                        value: i as f32 * 0.01,
+                    })
+                    .unwrap();
+                b.add(Op::Add { a: last, b: c }).unwrap()
+            } else {
+                b.add(Op::Remap {
+                    input: last,
+                    from: [0.0, 1.0 + i as f32],
+                    to: [0.0, 1.0],
+                })
+                .unwrap()
+            };
+        }
+        b.finish(last).unwrap()
+    }
+
+    /// Runs varied import sequences and returns, per builder, the ids each
+    /// import returned and the finished program.
+    fn import_scenarios(
+        import: fn(&mut ProgramBuilder, &FieldProgram) -> NodeId,
+    ) -> Vec<(Vec<NodeId>, FieldProgram)> {
+        let mut bark_builder = ProgramBuilder::new();
+        let bark_out = bark(&mut bark_builder);
+        let bark_program = bark_builder.finish(bark_out).unwrap();
+        let chain_a = scalar_chain(40, 1);
+        let chain_b = scalar_chain(40, 2);
+        // Shares its first nodes with `chain_a`, then diverges.
+        let chain_a_long = scalar_chain(60, 1);
+        // Keeps nodes its output does not use.
+        let mut extra = ProgramBuilder::new();
+        let n1 = noise(&mut extra, 1);
+        let _unused = noise(&mut extra, 77);
+        let n3 = extra.add(Op::Abs { input: n1 }).unwrap();
+        let with_unused = extra.finish(n3).unwrap();
+
+        let sequences: [&[&FieldProgram]; 8] = [
+            &[&bark_program],
+            &[&bark_program, &bark_program],
+            &[&chain_a, &chain_a],
+            &[&chain_a, &chain_b, &chain_a_long],
+            &[&chain_a_long, &chain_a, &chain_b, &bark_program],
+            &[&bark_program, &chain_a, &with_unused, &chain_b],
+            &[&with_unused, &with_unused, &chain_a],
+            &[
+                &chain_b,
+                &bark_program,
+                &chain_b,
+                &chain_a_long,
+                &with_unused,
+            ],
+        ];
+        let mut out = Vec::new();
+        for sequence in sequences {
+            // Empty builder, then one pre-seeded with `add`, including a
+            // repeated op: equal fingerprints within the builder itself.
+            for seeded in [false, true] {
+                let mut b = ProgramBuilder::new();
+                if seeded {
+                    let a = noise(&mut b, 1);
+                    let again = noise(&mut b, 1);
+                    assert_ne!(a, again, "`add` does not deduplicate");
+                    b.add(Op::Abs { input: again }).unwrap();
+                }
+                let ids: Vec<NodeId> = sequence.iter().map(|p| import(&mut b, p)).collect();
+                let last = *ids.last().unwrap();
+                out.push((ids, b.finish(last).unwrap()));
+            }
+        }
+        out
+    }
+
+    /// Importing deduplicates by fingerprint, first node wins: the indexed
+    /// importer must build exactly the programs the linear scan did, node
+    /// for node, id for id and fingerprint for fingerprint.
+    #[test]
+    fn import_builds_the_programs_the_scan_built() {
+        let scanned = import_scenarios(scanning_import);
+        let indexed = import_scenarios(|b, p| b.import(p).unwrap());
+        assert_eq!(scanned.len(), indexed.len());
+        for (a, b) in scanned.iter().zip(&indexed) {
+            assert_eq!(a.0, b.0);
+            assert_eq!(a.1, b.1);
+        }
+        // Pinned from the scanning implementation: node count and a digest of
+        // all fingerprints and returned ids across every scenario.
+        let mut words = vec![FINGERPRINT_VERSION];
+        let mut nodes = 0_usize;
+        for (ids, program) in &scanned {
+            words.extend(ids.iter().map(|id| u64::from(id.0)));
+            nodes += program.len();
+            for i in 0..program.len() {
+                let [lo, hi] = fingerprint_halves(
+                    program
+                        .node_fingerprint(NodeId(u32::try_from(i).unwrap()))
+                        .unwrap(),
+                );
+                words.extend([lo, hi]);
+            }
+        }
+        let digest = fingerprint_words(&words);
+        assert_eq!(
+            (nodes, digest),
+            (IMPORT_NODES, Fingerprint(IMPORT_DIGEST)),
+            "got {nodes} nodes and digest {digest}"
+        );
+    }
+
+    const IMPORT_NODES: usize = 1315;
+    const IMPORT_DIGEST: u128 = 0x1565_1b4a_874c_0331_45ea_764c_e4da_408f;
 
     #[test]
     fn programs_evaluate_like_the_direct_fields() {

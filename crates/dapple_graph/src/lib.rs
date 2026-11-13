@@ -273,7 +273,7 @@ impl RasterData {
     }
 
     /// Width, height, origin, texel size and edge policy.
-    fn shape(&self) -> (u32, u32, Vec2, Vec2, Edge) {
+    fn shape(&self) -> Shape {
         match self {
             Self::Scalar(r) => (r.width(), r.height(), r.origin(), r.texel(), r.edge()),
             Self::Vector3(r) => (r.width(), r.height(), r.origin(), r.texel(), r.edge()),
@@ -308,6 +308,9 @@ impl RasterData {
         TypedRaster::new(port, storage).map_err(NodeError::Typed)
     }
 }
+
+/// A raster's width, height, origin, texel size and edge policy.
+type Shape = (u32, u32, Vec2, Vec2, Edge);
 
 /// A raster value and its content fingerprint.
 #[derive(Clone, Debug, PartialEq)]
@@ -433,18 +436,20 @@ enum Source {
     Raster {
         params: RasterParams,
         input: u32,
+        /// The input's shape: kernels and the output's texels depend on its
+        /// texel size, which can change while its grid stays (a mip of 24
+        /// rows or of 25 has 12).
+        shape: Shape,
     },
     Mip {
         filter: Filter,
         input: u32,
-        /// The source's size, which sets the taps of each tile even when the
-        /// level below it keeps its size.
-        source_size: (u32, u32),
+        /// The source's shape: its size sets the taps of each tile and its
+        /// texel size the level's, even when the level keeps its grid.
+        source: Shape,
     },
     /// A raster computed whole, from a derivation fingerprint.
-    Whole {
-        derivation: u64,
-    },
+    Whole { derivation: u64 },
 }
 
 /// State a sample node keeps between runs.
@@ -466,8 +471,8 @@ struct SampleState {
 struct SampleLayout {
     policy: SamplePolicy,
     port: PortType,
-    /// Per sampled raster: its size, origin, texel size, and edge policy.
-    levels: Vec<(u32, u32, Vec2, Vec2, Edge)>,
+    /// Per sampled raster: its shape.
+    levels: Vec<Shape>,
 }
 
 /// A graph node: its kind, its tile key space, and its state between runs.
@@ -1303,6 +1308,7 @@ fn run_raster(
     let source = Source::Raster {
         params,
         input: value.tile_space,
+        shape: value.data.shape(),
     };
     let same = state.source.as_ref() == Some(&source)
         && state
@@ -1422,7 +1428,7 @@ fn run_mip(
     let source = Source::Mip {
         filter,
         input: value.tile_space,
-        source_size: (sw, sh),
+        source: value.data.shape(),
     };
     let same = state.source.as_ref() == Some(&source)
         && state

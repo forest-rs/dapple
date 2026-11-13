@@ -28,4 +28,13 @@ dependents off. Realize, raster, normals and mip nodes recompute only the
 tiles an edit reaches. A node nothing reads can be removed. Values on edges
 are reference-counted programs and rasters with fingerprints.
 
+A run reports to [`footfall`](https://crates.io/crates/footfall): a scope per
+`run` and per node execution (`dapple_graph.run`, `dapple_graph.node`, naming
+the node's kind and key) and, once per run, a counter for each `TileReport`
+field (`dapple_graph.tiles_recomputed` and so on). With no backend installed
+this costs a level check per emission; a host that installs one, such as
+`footfall::runtime`, sees where time went. Nothing is read back, so results,
+fingerprints and `TileReport`s are identical either way. The crate docs list
+every name.
+
 `#![no_std]` with `alloc`.

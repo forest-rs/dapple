@@ -15,10 +15,14 @@ dapple_encode.workspace = true
 dapple_field.workspace = true
 dapple_raster.workspace = true
 execution_graph.workspace = true
+footfall.workspace = true
 glam.workspace = true
 invalidation.workspace = true
 libm.workspace = true
 serde = { optional = true, workspace = true }
+
+[dev-dependencies]
+footfall = { features = ["runtime"], workspace = true }
 
 [features]
 default = []

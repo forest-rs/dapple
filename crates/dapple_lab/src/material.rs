@@ -236,3 +236,183 @@ pub fn unit_tile(n: u32) -> Grid {
         edge: dapple_field::Edge::Wrap,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+
+    use dapple_field::PortType;
+    use dapple_material::{Aux, Tiling};
+
+    use super::*;
+    use crate::report::Entry;
+
+    /// A material on an `n`-texel tile whose height is `f` of the texel
+    /// center, with a plain base color and mid roughness.
+    fn material(n: u32, tiling: bool, f: impl Fn(Vec2) -> f32) -> Material {
+        let grid = unit_tile(n);
+        let mut m = Material::new(grid);
+        let heights: Vec<Value> = (0..grid.len())
+            .map(|i| Value::Scalar(f(grid.center(i))))
+            .collect();
+        m.set_aux(
+            Aux::Height,
+            Channel::Map(grid.typed(PortType::Scalar, heights).unwrap()),
+        )
+        .unwrap();
+        m.set_param(
+            dapple_material::Param::BaseColor,
+            Channel::Constant(Value::Vector3(glam::Vec3::new(0.4, 0.3, 0.2))),
+        )
+        .unwrap();
+        m.set_param(
+            dapple_material::Param::SpecularRoughness,
+            Channel::Constant(Value::Scalar(0.5)),
+        )
+        .unwrap();
+        m.set_tiling(Tiling {
+            x: tiling,
+            y: tiling,
+        });
+        m
+    }
+
+    /// A smooth periodic height, in meters.
+    fn waves(p: Vec2) -> f32 {
+        0.002
+            * libm::sinf(core::f32::consts::TAU * 3.0 * p.x)
+            * libm::cosf(core::f32::consts::TAU * 2.0 * p.y)
+    }
+
+    fn failed(report: &Report) -> Vec<&str> {
+        report
+            .failures()
+            .map(|e| match e {
+                Entry::Measurement(m) => m.name.as_str(),
+                Entry::Check(c) => c.name.as_str(),
+            })
+            .collect()
+    }
+
+    fn measurement(report: &Report, name: &str) -> Option<crate::Measurement> {
+        report.entries.iter().find_map(|e| match e {
+            Entry::Measurement(m) if m.name == name => Some(m.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_sound_material_reports_its_channels_and_passes() {
+        let r = material_report("waves", &material(16, true, waves));
+        assert_eq!(r.subject, "waves");
+        assert!(r.passed(), "failures: {:?}", failed(&r));
+        assert_eq!(measurement(&r, "grid.width").unwrap().value, 16.0);
+        assert_eq!(measurement(&r, "grid.height").unwrap().value, 16.0);
+        let max = measurement(&r, "height.max").expect("a height statistic");
+        assert!(max.value > 0.0015 && max.value <= 0.002, "{}", max.value);
+        // Per-component statistics for the color, one-number ones for
+        // scalars.
+        assert!(measurement(&r, "base_color[2].mean").is_some());
+        assert!(measurement(&r, "specular_roughness.mean").is_some());
+        // The seam is bounded along the axes the material promises.
+        let seam = measurement(&r, "seam.height.x").expect("a seam measurement");
+        assert_eq!(seam.bounds, Some([0.0, f64::from(SEAM_TOLERANCE)]));
+        for name in ["finite.height", "ranges", "lowering"] {
+            assert!(
+                r.entries
+                    .iter()
+                    .any(|e| matches!(e, Entry::Check(c) if c.name == name && c.pass)),
+                "{name} passes"
+            );
+        }
+        assert_eq!(
+            r.to_json(),
+            material_report("waves", &material(16, true, waves)).to_json()
+        );
+    }
+
+    #[test]
+    fn a_seam_is_informational_unless_the_material_promises_to_tile() {
+        let ramp = |p: Vec2| 0.004 * p.x;
+        let bounded = material_report("ramp", &material(16, true, ramp));
+        assert!(
+            failed(&bounded).contains(&"seam.height.x"),
+            "a ramp does not tile: {:?}",
+            failed(&bounded)
+        );
+        let free = material_report("ramp", &material(16, false, ramp));
+        assert!(free.passed(), "no promise, no failure: {:?}", failed(&free));
+        assert_eq!(measurement(&free, "seam.height.x").unwrap().bounds, None);
+    }
+
+    #[test]
+    fn a_broken_material_fails_by_name() {
+        let mut m = material(16, true, waves);
+        m.set_param(
+            dapple_material::Param::BaseColor,
+            Channel::Constant(Value::Vector3(glam::Vec3::new(f32::NAN, 0.3, 0.2))),
+        )
+        .unwrap();
+        m.set_param(
+            dapple_material::Param::SpecularRoughness,
+            Channel::Constant(Value::Scalar(2.0)),
+        )
+        .unwrap();
+        let r = material_report("broken", &m);
+        assert!(!r.passed());
+        let names = failed(&r);
+        assert!(names.contains(&"finite.base_color"), "{names:?}");
+        assert!(names.contains(&"ranges"), "{names:?}");
+        assert!(r.to_json().contains("\"passed\": false"));
+    }
+
+    #[test]
+    fn a_whole_texel_transform_moves_every_channel() {
+        let r = transform_check(&material(16, true, waves));
+        assert!(r.passed(), "failures: {:?}", failed(&r));
+        assert_eq!(r.subject, "transform");
+        assert_eq!(r.entries.len(), 1);
+    }
+
+    #[test]
+    fn feature_size_is_resolution_independent_only_when_filtered_content_agrees() {
+        let height = ChannelId::Aux(Aux::Height);
+        let coarse = material(32, true, waves);
+        let fine = material(64, true, waves);
+        let r = resolution_check("waves", height, &coarse, &fine);
+        assert!(r.passed(), "same content: {:?}", failed(&r));
+        let ratio = measurement(&r, "waves.feature_size.ratio").unwrap();
+        assert!((0.85..=1.15).contains(&ratio.value), "{}", ratio.value);
+
+        // Content that is finer at the finer grid is another feature size.
+        let busy = material(64, true, |p| waves(p * 4.0));
+        let r = resolution_check("waves", height, &coarse, &busy);
+        assert!(!r.passed(), "features that shrank must fail");
+
+        // Grids that are not whole multiples, and a channel that is not a
+        // scalar, are refused rather than measured.
+        let odd = material(48, true, waves);
+        assert!(!resolution_check("waves", height, &coarse, &odd).passed());
+        let color = ChannelId::Param(dapple_material::Param::BaseColor);
+        assert!(!resolution_check("waves", color, &coarse, &fine).passed());
+    }
+
+    #[test]
+    fn agreement_compares_digests_exactly() {
+        assert!(agreement("same", 0xabc, 0xabc).passed());
+        let r = agreement("different", 0xabc, 0xabe);
+        assert!(!r.passed());
+        assert!(r.to_json().contains("0000000000000abc vs 0000000000000abe"));
+    }
+
+    #[test]
+    fn unit_tiles_are_square_and_wrap() {
+        let g = unit_tile(8);
+        assert_eq!(
+            (g.width, g.height, g.edge),
+            (8, 8, dapple_field::Edge::Wrap)
+        );
+        assert_eq!(g.texel, Vec2::splat(0.125));
+        assert_eq!(g.origin, Vec2::ZERO);
+    }
+}

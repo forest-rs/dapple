@@ -29,8 +29,8 @@
 //! blur. Filtering follows the image's [`Edge`]: a wrapping image stays
 //! tileable on every level.
 //!
-//! [`pack()`] turns a [`MaterialMaps`] set into a [`Bundle`] of 8-bit textures
-//! for a [`Profile`]: [`Profile::Lightweald`] (the slots of
+//! [`pack()`] turns a [`MaterialMaps`] set into a [`Bundle`] of textures and
+//! constants for a [`Profile`]: [`Profile::Lightweald`] (the slots of
 //! `lightweald_material`), [`Profile::Gltf`], or [`Profile::Raw`]. Each
 //! texture carries its whole mip chain, and each [`Placement`] says which
 //! channels of which texture hold a parameter. [`ktx2::write`] writes one as a KTX2

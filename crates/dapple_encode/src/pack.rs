@@ -26,15 +26,26 @@ pub enum Profile {
     /// surface parameters hold every OpenPBR parameter, so any constant but
     /// occlusion is carried as one.
     Lightweald,
-    /// glTF 2.0: `base_color` as Lightweald, `normal` as RGB tangent-space
-    /// XYZ, and the `orm` texture shared by `occlusionTexture` and
-    /// `metallicRoughnessTexture`. Constants are carried as glTF's factors,
-    /// except occlusion (glTF has no occlusion factor) and coat tint (no
-    /// extension has one).
+    /// glTF 2.0 and its material extensions: `base_color` as Lightweald,
+    /// `normal` as RGB tangent-space XYZ, the `orm` texture shared by
+    /// `occlusionTexture` and `metallicRoughnessTexture`, and one texture
+    /// per extension in the layout it reads: `anisotropy`
+    /// (`KHR_materials_anisotropy`), `specular` (`KHR_materials_specular`),
+    /// `diffuse_transmission`, `transmission`, `clearcoat` and
+    /// `clearcoat_normal` (`KHR_materials_clearcoat`), `sheen`
+    /// (`KHR_materials_sheen`) and `emissive` (with
+    /// `KHR_materials_emissive_strength`); see [`pack()`]. Constants are
+    /// carried as glTF's factors (`specular_ior` only as one, through
+    /// `KHR_materials_ior`), except occlusion (glTF has no occlusion
+    /// factor), coat tint (no extension has one) and height (glTF has no
+    /// displacement).
     Gltf,
-    /// One texture per parameter map, linear 8-bit, normals in the input
-    /// frame, and every constant as one; for inspection and tools rather
-    /// than rendering.
+    /// One texture per parameter map, normals in the input frame, and
+    /// every constant as one; for inspection and tools rather than
+    /// rendering. Data in `[0, 1]` is linear 8-bit; parameters without an
+    /// upper bound (`specular_weight`, `specular_ior`,
+    /// `emission_luminance`, `height`) are 16-bit over the map's own
+    /// `[min, max]`, which their placement states.
     Raw,
 }
 
@@ -121,6 +132,13 @@ pub struct MaterialMaps {
     pub anisotropy_direction: Option<Input<2>>,
     /// OpenPBR `specular_roughness_anisotropy`.
     pub specular_roughness_anisotropy: Option<Input<1>>,
+    /// OpenPBR `specular_weight`, at least 0; values above 1 strengthen
+    /// the dielectric reflection.
+    pub specular_weight: Option<Input<1>>,
+    /// OpenPBR `specular_color`: the tint of the specular reflection.
+    pub specular_color: Option<Input<3>>,
+    /// OpenPBR `specular_ior`, the dielectric index of refraction.
+    pub specular_ior: Option<Input<1>>,
     /// OpenPBR `subsurface_weight`. On a thin-walled material
     /// (`geometry_thin_walled`, a material constant rather than a map), this
     /// is diffuse translucency: the share of light scattered through a thin
@@ -137,6 +155,24 @@ pub struct MaterialMaps {
     pub coat_roughness: Option<Input<1>>,
     /// OpenPBR `coat_color`: the coat's absorption tint.
     pub coat_color: Option<Input<3>>,
+    /// OpenPBR `geometry_coat_normal`: the coat's unit shading normals, in
+    /// the frame of [`Self::normal`]. A map only, as for the base normal.
+    pub coat_normal: Option<Image>,
+    /// OpenPBR `fuzz_weight`: how much of the surface the fuzz (sheen)
+    /// layer covers.
+    pub fuzz_weight: Option<Input<1>>,
+    /// OpenPBR `fuzz_color`.
+    pub fuzz_color: Option<Input<3>>,
+    /// OpenPBR `fuzz_roughness`.
+    pub fuzz_roughness: Option<Input<1>>,
+    /// OpenPBR `emission_luminance`, in nits (cd/m²), at least 0.
+    pub emission_luminance: Option<Input<1>>,
+    /// OpenPBR `emission_color`.
+    pub emission_color: Option<Input<3>>,
+    /// Displacement above the surface's datum in the material's length
+    /// unit (meters for `dapple_material`); an auxiliary output, not an
+    /// OpenPBR parameter.
+    pub height: Option<Input<1>>,
 }
 
 /// OpenPBR 1.1's defaults for what [`MaterialMaps`] carries.
@@ -149,12 +185,21 @@ mod default {
     pub(super) const OCCLUSION: [f32; 1] = [1.0];
     pub(super) const ANISOTROPY_DIRECTION: [f32; 2] = [1.0, 0.0];
     pub(super) const SPECULAR_ROUGHNESS_ANISOTROPY: [f32; 1] = [0.0];
+    pub(super) const SPECULAR_WEIGHT: [f32; 1] = [1.0];
+    pub(super) const SPECULAR_COLOR: [f32; 3] = [1.0; 3];
+    pub(super) const SPECULAR_IOR: [f32; 1] = [1.5];
     pub(super) const SUBSURFACE_WEIGHT: [f32; 1] = [0.0];
     pub(super) const SUBSURFACE_COLOR: [f32; 3] = [0.8; 3];
     pub(super) const TRANSMISSION_WEIGHT: [f32; 1] = [0.0];
     pub(super) const COAT_WEIGHT: [f32; 1] = [0.0];
     pub(super) const COAT_ROUGHNESS: [f32; 1] = [0.0];
     pub(super) const COAT_COLOR: [f32; 3] = [1.0; 3];
+    pub(super) const FUZZ_WEIGHT: [f32; 1] = [0.0];
+    pub(super) const FUZZ_COLOR: [f32; 3] = [1.0; 3];
+    pub(super) const FUZZ_ROUGHNESS: [f32; 1] = [0.5];
+    pub(super) const EMISSION_LUMINANCE: [f32; 1] = [0.0];
+    pub(super) const EMISSION_COLOR: [f32; 3] = [1.0; 3];
+    pub(super) const HEIGHT: [f32; 1] = [0.0];
 }
 
 /// One [`MaterialMaps`] field, seen without its type.
@@ -187,21 +232,25 @@ fn entry<'a, const N: usize>(
     }
 }
 
+fn normal_entry<'a>(name: &'static str, map: Option<&'a Image>) -> Entry<'a> {
+    Entry {
+        name,
+        channels: 3,
+        map,
+        constant: None,
+        default: &default::NORMAL,
+        unit: false,
+    }
+}
+
 impl MaterialMaps {
     /// Every field, in declaration order.
-    fn entries(&self) -> [Entry<'_>; 14] {
+    fn entries(&self) -> [Entry<'_>; 24] {
         use default as d;
         [
             entry("base_color", &self.base_color, &d::BASE_COLOR, true),
             entry("opacity", &self.opacity, &d::OPACITY, true),
-            Entry {
-                name: "normal",
-                channels: 3,
-                map: self.normal.as_ref(),
-                constant: None,
-                default: &d::NORMAL,
-                unit: false,
-            },
+            normal_entry("normal", self.normal.as_ref()),
             entry(
                 "specular_roughness",
                 &self.specular_roughness,
@@ -228,6 +277,19 @@ impl MaterialMaps {
                 true,
             ),
             entry(
+                "specular_weight",
+                &self.specular_weight,
+                &d::SPECULAR_WEIGHT,
+                false,
+            ),
+            entry(
+                "specular_color",
+                &self.specular_color,
+                &d::SPECULAR_COLOR,
+                true,
+            ),
+            entry("specular_ior", &self.specular_ior, &d::SPECULAR_IOR, false),
+            entry(
                 "subsurface_weight",
                 &self.subsurface_weight,
                 &d::SUBSURFACE_WEIGHT,
@@ -253,6 +315,28 @@ impl MaterialMaps {
                 true,
             ),
             entry("coat_color", &self.coat_color, &d::COAT_COLOR, true),
+            normal_entry("coat_normal", self.coat_normal.as_ref()),
+            entry("fuzz_weight", &self.fuzz_weight, &d::FUZZ_WEIGHT, true),
+            entry("fuzz_color", &self.fuzz_color, &d::FUZZ_COLOR, true),
+            entry(
+                "fuzz_roughness",
+                &self.fuzz_roughness,
+                &d::FUZZ_ROUGHNESS,
+                true,
+            ),
+            entry(
+                "emission_luminance",
+                &self.emission_luminance,
+                &d::EMISSION_LUMINANCE,
+                false,
+            ),
+            entry(
+                "emission_color",
+                &self.emission_color,
+                &d::EMISSION_COLOR,
+                true,
+            ),
+            entry("height", &self.height, &d::HEIGHT, false),
         ]
     }
 }
@@ -262,8 +346,8 @@ impl MaterialMaps {
 fn states_constant(profile: Profile, name: &str) -> bool {
     match profile {
         Profile::Raw => true,
-        Profile::Lightweald => name != "occlusion",
-        Profile::Gltf => !matches!(name, "occlusion" | "coat_color"),
+        Profile::Lightweald => !matches!(name, "occlusion" | "height"),
+        Profile::Gltf => !matches!(name, "occlusion" | "coat_color" | "height"),
     }
 }
 
@@ -336,6 +420,8 @@ pub struct PackReport {
     pub coverage: Vec<CoverageLevel>,
     /// Largest normal variance moved into roughness, per level.
     pub normal_variance: Vec<f32>,
+    /// Largest coat normal variance moved into coat roughness, per level.
+    pub coat_normal_variance: Vec<f32>,
     /// Parameters given that the profile can carry neither in a texture
     /// nor as a constant, by [`MaterialMaps`] field name in field order;
     /// their values are not in the bundle. A constant equal to the
@@ -348,9 +434,12 @@ pub struct PackReport {
 ///
 /// A parameter value is `range[0] + (range[1] - range[0]) * t`, where `t`
 /// is the channel's texel as a `[0, 1]` fraction of full scale after the
-/// format's transfer function (sRGB channels are decoded first). When two
-/// placements cover the same channels, the channels hold the product of
-/// their values.
+/// format's transfer function (sRGB channels are decoded first).
+///
+/// When several placements cover the same channels, the channels hold the
+/// product of those parameters (glTF's sheen color is `fuzz_color` times
+/// `fuzz_weight`); such ranges all start at 0, and the product is `t` times
+/// the product of their `range[1]`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Placement {
     /// The parameter, by its [`MaterialMaps`] field name, for example
@@ -361,7 +450,8 @@ pub struct Placement {
     /// The texel channels it occupies, as many as the parameter has.
     pub channels: Range<usize>,
     /// The values texel 0 and full scale stand for: `[0, 1]` for most
-    /// parameters, `[-1, 1]` for unit vectors.
+    /// parameters, `[-1, 1]` for unit vectors, and the map's own extent for
+    /// a parameter without an upper bound.
     pub range: [f32; 2],
 }
 
@@ -387,9 +477,10 @@ pub struct Bundle {
     /// The profile the textures follow.
     pub profile: Profile,
     /// The textures, in a fixed order: `base_color`, `normal`, `orm`,
-    /// `anisotropy`, then translucency: `diffuse_transmission` (glTF) and
-    /// `transmission`, then the coat: `clearcoat` (glTF) (raw: one per
-    /// parameter, in [`MaterialMaps`] field order).
+    /// `anisotropy`, `specular`, then translucency: `diffuse_transmission`
+    /// and `transmission`, then the coat: `clearcoat` and
+    /// `clearcoat_normal`, then `sheen` and `emissive` (raw: one per
+    /// parameter map, in [`MaterialMaps`] field order).
     pub textures: Vec<EncodedTexture>,
     /// Where each parameter went that a texture holds, in texture order.
     ///
@@ -596,10 +687,33 @@ fn encode(
 ///
 /// Coat: glTF packs `clearcoat` (linear R `coat_weight`, G `coat_roughness`),
 /// the layout `KHR_materials_clearcoat`'s `clearcoatTexture` (R) and
-/// `clearcoatRoughnessTexture` (G) read from one image. The extension has no
-/// tint, so `coat_color` is reported unsupported; Lightweald has no coat
-/// slot and reports coat maps. Coat roughness mips are filtered in `α²`,
-/// like specular roughness.
+/// `clearcoatRoughnessTexture` (G) read from one image, and the coat normal
+/// as `clearcoat_normal`, stored like `normal`, for
+/// `clearcoatNormalTexture`. The coat normal's variance widens coat
+/// roughness as the base normal's widens specular roughness. The extension
+/// has no tint, so `coat_color` is reported unsupported; Lightweald has no
+/// coat slot and reports coat maps. Coat roughness mips are filtered in
+/// `α²`, like specular roughness.
+///
+/// glTF's other extensions:
+///
+/// - `specular`: sRGB RGB `specular_color` and linear A `specular_weight`,
+///   which `KHR_materials_specular`'s `specularColorTexture` and
+///   `specularTexture` read. A weight above 1 is stored as a fraction of
+///   its largest value, which the placement's range states (glTF's
+///   `specularFactor`).
+/// - `sheen`: sRGB RGB `fuzz_color` times `fuzz_weight` (the extension has
+///   no weight) and linear A `fuzz_roughness`, which
+///   `KHR_materials_sheen`'s `sheenColorTexture` and
+///   `sheenRoughnessTexture` read.
+/// - `emissive`: sRGB RGB `emission_color` times `emission_luminance`
+///   divided by the largest luminance, whose value the luminance's
+///   placement range states; converting nits to a glTF emissive strength is
+///   the consumer's choice.
+/// - `specular_ior` has no texture in `KHR_materials_ior`: a constant is a
+///   factor, a map is reported unsupported.
+///
+/// Lightweald has no slot for these yet and reports their maps.
 ///
 /// # Errors
 ///
@@ -803,34 +917,10 @@ fn textures(
         }
     }
     if let Some(normals) = &normals {
-        let unit = |v: f32| v * 0.5 + 0.5;
-        let format = match profile {
-            Profile::Lightweald => PixelFormat::Rg8Unorm,
-            Profile::Gltf | Profile::Raw => PixelFormat::Rgba8Unorm,
-        };
-        textures.push(encode(
-            "normal",
-            format,
-            level_count,
-            edge,
-            |level, i, out| {
-                let n = &normals.levels()[level].values[i * 3..i * 3 + 3];
-                let y = if raw { n[1] } else { -n[1] };
-                out.push(quantize_unorm8(unit(n[0])));
-                out.push(quantize_unorm8(unit(y)));
-                if format == PixelFormat::Rgba8Unorm {
-                    out.push(quantize_unorm8(unit(n[2])));
-                    out.push(255);
-                }
-            },
-            size,
-        ));
-        let channels = if format == PixelFormat::Rg8Unorm {
-            0..2
-        } else {
-            0..3
-        };
+        let texture = normal_texture("normal", normals, profile);
+        let channels = 0..texture.format.channels().min(3);
         place(&mut placements, "normal", &[("normal", channels, SIGNED)]);
+        textures.push(texture);
     }
     match profile {
         Profile::Lightweald | Profile::Gltf => {
@@ -977,6 +1067,75 @@ fn textures(
             }
         }
     }
+    let specular_weight = map(&maps.specular_weight);
+    let specular_color = map(&maps.specular_color);
+    match profile {
+        Profile::Lightweald => {}
+        Profile::Gltf if specular_weight.is_some() || specular_color.is_some() => {
+            // KHR_materials_specular reads the weight from A as a fraction
+            // of `specularFactor`, so weights above 1 are scaled into range.
+            let weight_fill = fill(&maps.specular_weight, d::SPECULAR_WEIGHT)[0];
+            let scale = specular_weight.map_or(weight_fill, max_value).max(1.0);
+            let mut image = rgba(
+                first,
+                specular_color,
+                fill(&maps.specular_color, d::SPECULAR_COLOR),
+                specular_weight,
+                weight_fill,
+            );
+            for t in image.values.as_chunks_mut::<4>().0 {
+                t[3] /= scale;
+            }
+            textures.push(srgb_rgb_linear_a(
+                "specular",
+                &data_mips(&image, settings.filter),
+            ));
+            if maps.specular_color.is_some() {
+                place(
+                    &mut placements,
+                    "specular",
+                    &[("specular_color", 0..3, UNIT)],
+                );
+            }
+            if maps.specular_weight.is_some() {
+                place(
+                    &mut placements,
+                    "specular",
+                    &[("specular_weight", 3..4, [0.0, scale])],
+                );
+            }
+        }
+        Profile::Gltf => {}
+        Profile::Raw => {
+            if let Some(weight) = specular_weight {
+                raw_ranged(
+                    &mut textures,
+                    &mut placements,
+                    "specular_weight",
+                    weight,
+                    settings.filter,
+                );
+            }
+            if let Some(color) = specular_color {
+                raw_map(
+                    &mut textures,
+                    &mut placements,
+                    "specular_color",
+                    color,
+                    settings.filter,
+                );
+            }
+            if let Some(ior) = map(&maps.specular_ior) {
+                raw_ranged(
+                    &mut textures,
+                    &mut placements,
+                    "specular_ior",
+                    ior,
+                    settings.filter,
+                );
+            }
+        }
+    }
     let subsurface_weight = map(&maps.subsurface_weight);
     let subsurface_color = map(&maps.subsurface_color);
     match profile {
@@ -1066,13 +1225,29 @@ fn textures(
         ));
     }
     let coat_weight = map(&maps.coat_weight).map(|w| data_mips(w, settings.filter));
-    let coat_roughness = map(&maps.coat_roughness).map(|r| roughness_mips(r, settings.filter));
+    let coat_rough_map = map(&maps.coat_roughness);
+    let coat_rough_fill = fill(&maps.coat_roughness, d::COAT_ROUGHNESS)[0];
+    let (coat_normals, coat_roughness) = match &maps.coat_normal {
+        Some(n) => {
+            let chain = normal_mips(n, coat_rough_map, coat_rough_fill, settings.filter)?;
+            report.coat_normal_variance = chain.max_variance.clone();
+            let roughness = if settings.fold_normal_variance {
+                Some(chain.roughness)
+            } else {
+                coat_rough_map.map(|r| roughness_mips(r, settings.filter))
+            };
+            (Some(chain.normals), roughness)
+        }
+        None => (
+            None,
+            coat_rough_map.map(|r| roughness_mips(r, settings.filter)),
+        ),
+    };
     match profile {
         Profile::Lightweald => {}
         Profile::Gltf => {
             if coat_weight.is_some() || coat_roughness.is_some() {
                 let weight_fill = fill(&maps.coat_weight, d::COAT_WEIGHT)[0];
-                let roughness_fill = fill(&maps.coat_roughness, d::COAT_ROUGHNESS)[0];
                 textures.push(encode(
                     "clearcoat",
                     PixelFormat::Rgba8Unorm,
@@ -1084,7 +1259,7 @@ fn textures(
                             &coat_roughness,
                             level,
                             i,
-                            roughness_fill,
+                            coat_rough_fill,
                         )));
                         out.push(0);
                         out.push(255);
@@ -1093,7 +1268,11 @@ fn textures(
                 ));
                 for (name, placed, channel) in [
                     ("coat_weight", maps.coat_weight.is_some(), 0),
-                    ("coat_roughness", maps.coat_roughness.is_some(), 1),
+                    (
+                        "coat_roughness",
+                        coat_roughness.is_some() || maps.coat_roughness.is_some(),
+                        1,
+                    ),
                 ] {
                     if placed {
                         place(
@@ -1103,6 +1282,14 @@ fn textures(
                         );
                     }
                 }
+            }
+            if let Some(normals) = &coat_normals {
+                textures.push(normal_texture("clearcoat_normal", normals, profile));
+                place(
+                    &mut placements,
+                    "clearcoat_normal",
+                    &[("coat_normal", 0..3, SIGNED)],
+                );
             }
         }
         Profile::Raw => {
@@ -1131,14 +1318,170 @@ fn textures(
                     settings.filter,
                 );
             }
-        }
-    }
-    if !raw {
-        for texture in &mut textures {
-            if texture.name == "normal" {
-                texture.kind = TextureKind::Normal;
+            if let Some(normals) = &coat_normals {
+                textures.push(normal_texture("coat_normal", normals, profile));
+                place(
+                    &mut placements,
+                    "coat_normal",
+                    &[("coat_normal", 0..3, SIGNED)],
+                );
             }
         }
+    }
+
+    let fuzz_weight = map(&maps.fuzz_weight);
+    let fuzz_color = map(&maps.fuzz_color);
+    let fuzz_roughness = map(&maps.fuzz_roughness).map(|r| roughness_mips(r, settings.filter));
+    match profile {
+        Profile::Lightweald => {}
+        Profile::Gltf
+            if fuzz_weight.is_some() || fuzz_color.is_some() || fuzz_roughness.is_some() =>
+        {
+            // KHR_materials_sheen has no weight: its color is the fuzz color
+            // times the fuzz weight.
+            let mut tint = rgba(
+                first,
+                fuzz_color,
+                fill(&maps.fuzz_color, d::FUZZ_COLOR),
+                fuzz_weight,
+                fill(&maps.fuzz_weight, d::FUZZ_WEIGHT)[0],
+            );
+            let roughness_fill = fill(&maps.fuzz_roughness, d::FUZZ_ROUGHNESS)[0];
+            for t in tint.values.as_chunks_mut::<4>().0 {
+                let w = t[3];
+                for c in &mut t[..3] {
+                    *c *= w;
+                }
+                t[3] = roughness_fill;
+            }
+            let mut chain = data_mips(&tint, settings.filter);
+            if let Some(roughness) = &fuzz_roughness {
+                chain = with_alpha(&chain, roughness);
+            }
+            textures.push(srgb_rgb_linear_a("sheen", &chain));
+            for (name, given, channels) in [
+                ("fuzz_color", maps.fuzz_color.is_some(), 0..3),
+                ("fuzz_weight", maps.fuzz_weight.is_some(), 0..3),
+                ("fuzz_roughness", maps.fuzz_roughness.is_some(), 3..4),
+            ] {
+                if given {
+                    place(&mut placements, "sheen", &[(name, channels, UNIT)]);
+                }
+            }
+        }
+        Profile::Gltf => {}
+        Profile::Raw => {
+            if let Some(weight) = fuzz_weight {
+                raw_map(
+                    &mut textures,
+                    &mut placements,
+                    "fuzz_weight",
+                    weight,
+                    settings.filter,
+                );
+            }
+            if let Some(color) = fuzz_color {
+                raw_map(
+                    &mut textures,
+                    &mut placements,
+                    "fuzz_color",
+                    color,
+                    settings.filter,
+                );
+            }
+            if fuzz_roughness.is_some() {
+                textures.push(encode(
+                    "fuzz_roughness",
+                    PixelFormat::R8Unorm,
+                    level_count,
+                    edge,
+                    |level, i, out| {
+                        out.push(quantize_unorm8(value(&fuzz_roughness, level, i, 0.0)));
+                    },
+                    size,
+                ));
+                place(
+                    &mut placements,
+                    "fuzz_roughness",
+                    &[("fuzz_roughness", 0..1, UNIT)],
+                );
+            }
+        }
+    }
+
+    let luminance = map(&maps.emission_luminance);
+    let emission_color = map(&maps.emission_color);
+    match profile {
+        Profile::Lightweald => {}
+        Profile::Gltf if luminance.is_some() || emission_color.is_some() => {
+            // glTF's emissive texture is a color: the luminance, divided by
+            // its largest value, scales it, and that largest value is the
+            // luminance's range (glTF's emissive strength).
+            let luminance_fill = fill(&maps.emission_luminance, d::EMISSION_LUMINANCE)[0];
+            let scale = luminance.map_or(luminance_fill, max_value).max(0.0);
+            let mut light = rgba(
+                first,
+                emission_color,
+                fill(&maps.emission_color, d::EMISSION_COLOR),
+                luminance,
+                luminance_fill,
+            );
+            for t in light.values.as_chunks_mut::<4>().0 {
+                let l = if scale > 0.0 { t[3] / scale } else { 0.0 };
+                for c in &mut t[..3] {
+                    *c *= l;
+                }
+                t[3] = 1.0;
+            }
+            textures.push(srgb_rgb_linear_a(
+                "emissive",
+                &data_mips(&light, settings.filter),
+            ));
+            if maps.emission_color.is_some() {
+                place(
+                    &mut placements,
+                    "emissive",
+                    &[("emission_color", 0..3, UNIT)],
+                );
+            }
+            if maps.emission_luminance.is_some() {
+                place(
+                    &mut placements,
+                    "emissive",
+                    &[("emission_luminance", 0..3, [0.0, scale])],
+                );
+            }
+        }
+        Profile::Gltf => {}
+        Profile::Raw => {
+            if let Some(luminance) = luminance {
+                raw_ranged(
+                    &mut textures,
+                    &mut placements,
+                    "emission_luminance",
+                    luminance,
+                    settings.filter,
+                );
+            }
+            if let Some(color) = emission_color {
+                raw_map(
+                    &mut textures,
+                    &mut placements,
+                    "emission_color",
+                    color,
+                    settings.filter,
+                );
+            }
+        }
+    }
+    if let (Profile::Raw, Some(height)) = (profile, map(&maps.height)) {
+        raw_ranged(
+            &mut textures,
+            &mut placements,
+            "height",
+            height,
+            settings.filter,
+        );
     }
     Ok((textures, placements))
 }
@@ -1179,6 +1522,125 @@ fn raw_map(
         },
     ));
     place(placements, name, &[(name, 0..channels, UNIT)]);
+}
+
+/// A raw profile's texture for a scalar map without an upper bound: 16-bit
+/// over the map's own `[min, max]`, which its placement states.
+fn raw_ranged(
+    textures: &mut Vec<EncodedTexture>,
+    placements: &mut Vec<Placement>,
+    name: &'static str,
+    image: &Image,
+    filter: Filter,
+) {
+    let chain = data_mips(image, filter);
+    let (lo, hi) = image
+        .values
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| {
+            (lo.min(v), hi.max(v))
+        });
+    let span = hi - lo;
+    textures.push(encode(
+        name,
+        PixelFormat::R16Unorm,
+        chain.levels().len(),
+        image.edge,
+        |level, i, out| {
+            let v = chain.levels()[level].values[i];
+            let t = if span > 0.0 { (v - lo) / span } else { 0.0 };
+            out.extend_from_slice(&quantize_unorm16(t).to_le_bytes());
+        },
+        |level| {
+            let l = &chain.levels()[level];
+            (l.width, l.height)
+        },
+    ));
+    place(placements, name, &[(name, 0..1, [lo, hi])]);
+}
+
+/// The largest value of a one-channel image.
+fn max_value(image: &Image) -> f32 {
+    image
+        .values
+        .iter()
+        .fold(f32::NEG_INFINITY, |m, &v| m.max(v))
+}
+
+/// `chain` with each level's alpha replaced by `alpha`'s single channel.
+fn with_alpha(chain: &MipChain, alpha: &MipChain) -> MipChain {
+    MipChain::from_levels(
+        chain
+            .levels()
+            .iter()
+            .zip(alpha.levels())
+            .map(|(rgba, a)| {
+                let mut out = rgba.clone();
+                for (t, &a) in out.values.as_chunks_mut::<4>().0.iter_mut().zip(&a.values) {
+                    t[3] = a;
+                }
+                out
+            })
+            .collect(),
+    )
+}
+
+/// An RGBA chain as an sRGB texture: RGB sRGB-encoded, alpha linear.
+fn srgb_rgb_linear_a(name: &'static str, chain: &MipChain) -> EncodedTexture {
+    let base = chain.base();
+    encode(
+        name,
+        PixelFormat::Rgba8Srgb,
+        chain.levels().len(),
+        base.edge,
+        |level, i, out| {
+            let t = &chain.levels()[level].values[i * 4..i * 4 + 4];
+            for &c in &t[..3] {
+                out.push(quantize_unorm8(linear_to_srgb(c)));
+            }
+            out.push(quantize_unorm8(t[3]));
+        },
+        |level| {
+            let l = &chain.levels()[level];
+            (l.width, l.height)
+        },
+    )
+}
+
+/// A chain of unit normals as `profile` stores them: Lightweald keeps XY,
+/// glTF and raw XYZ (with alpha 1); Lightweald and glTF negate Y so `+Y`
+/// points to the image top, and are [`TextureKind::Normal`].
+fn normal_texture(name: &'static str, normals: &MipChain, profile: Profile) -> EncodedTexture {
+    let unit = |v: f32| v * 0.5 + 0.5;
+    let format = match profile {
+        Profile::Lightweald => PixelFormat::Rg8Unorm,
+        Profile::Gltf | Profile::Raw => PixelFormat::Rgba8Unorm,
+    };
+    let raw = profile == Profile::Raw;
+    let mut texture = encode(
+        name,
+        format,
+        normals.levels().len(),
+        normals.base().edge,
+        |level, i, out| {
+            let n = &normals.levels()[level].values[i * 3..i * 3 + 3];
+            let y = if raw { n[1] } else { -n[1] };
+            out.push(quantize_unorm8(unit(n[0])));
+            out.push(quantize_unorm8(unit(y)));
+            if format == PixelFormat::Rgba8Unorm {
+                out.push(quantize_unorm8(unit(n[2])));
+                out.push(255);
+            }
+        },
+        |level| {
+            let l = &normals.levels()[level];
+            (l.width, l.height)
+        },
+    );
+    if !raw {
+        texture.kind = TextureKind::Normal;
+    }
+    texture
 }
 
 /// Encodes an arbitrary chain of data, such as height or identifiers, as one
@@ -1670,6 +2132,159 @@ mod tests {
             Err(EncodeError::InvalidParameter {
                 name: "coat_roughness"
             })
+        );
+    }
+
+    /// A 4×4 one-channel image alternating `a` and `b` along rows.
+    fn alternating(a: f32, b: f32) -> Image {
+        let values = (0..16).map(|i| if i % 2 == 0 { a } else { b }).collect();
+        Image::new(4, 4, 1, Edge::Wrap, values).unwrap()
+    }
+
+    fn extensions() -> MaterialMaps {
+        let tilted = [0.6, 0.0, 0.8];
+        MaterialMaps {
+            specular_weight: Some(flat(1, &[2.0]).into()),
+            specular_color: Some([0.5, 0.9, 0.2].into()),
+            specular_ior: Some(alternating(1.4, 1.6).into()),
+            coat_weight: Some(1.0.into()),
+            coat_normal: Some(flat(3, &tilted)),
+            fuzz_weight: Some(flat(1, &[0.5]).into()),
+            fuzz_color: Some([1.0, 0.5, 0.25].into()),
+            fuzz_roughness: Some(0.7.into()),
+            emission_luminance: Some(alternating(100.0, 50.0).into()),
+            emission_color: Some([1.0, 0.5, 0.0].into()),
+            height: Some(alternating(-0.01, 0.03).into()),
+            ..MaterialMaps::default()
+        }
+    }
+
+    #[test]
+    fn gltf_packs_its_extension_layouts() {
+        let gltf = pack(&extensions(), Profile::Gltf, &PackSettings::default()).unwrap();
+        let names: Vec<_> = gltf.textures.iter().map(|t| t.name).collect();
+        assert_eq!(
+            names,
+            [
+                "specular",
+                "clearcoat",
+                "clearcoat_normal",
+                "sheen",
+                "emissive"
+            ]
+        );
+        let srgb = |v: f32| quantize_unorm8(linear_to_srgb(v));
+
+        // KHR_materials_specular: RGB color, A the weight over its largest
+        // value, which the placement states.
+        let specular = gltf.texture("specular").unwrap();
+        assert_eq!(specular.format, PixelFormat::Rgba8Srgb);
+        assert_eq!(
+            specular.levels[0][..4],
+            [srgb(0.5), srgb(0.9), srgb(0.2), 255]
+        );
+        assert_eq!(gltf.placement("specular_weight").unwrap().range, [0.0, 2.0]);
+
+        // KHR_materials_clearcoat: the constant weight fills R, the coat
+        // normal's variance widens G, and the coat normal has its own
+        // texture with +Y toward the image top.
+        let clearcoat = gltf.texture("clearcoat").unwrap();
+        assert_eq!(clearcoat.levels[0][0], 255);
+        assert_eq!(gltf.placement("coat_weight").unwrap().channels, 0..1);
+        assert_eq!(gltf.placement("coat_roughness").unwrap().channels, 1..2);
+        let coat_normal = gltf.texture("clearcoat_normal").unwrap();
+        assert_eq!(coat_normal.kind, TextureKind::Normal);
+        assert_eq!(
+            coat_normal.levels[0][..4],
+            [quantize_unorm8(0.8), 128, quantize_unorm8(0.9), 255]
+        );
+        assert_eq!(gltf.report.coat_normal_variance.len(), 3);
+
+        // KHR_materials_sheen: color times weight in RGB, roughness in A.
+        let sheen = gltf.texture("sheen").unwrap();
+        assert_eq!(
+            sheen.levels[0][..4],
+            [srgb(0.5), srgb(0.25), srgb(0.125), quantize_unorm8(0.7)]
+        );
+        let on = |name| gltf.placement(name).unwrap().channels.clone();
+        assert_eq!(on("fuzz_color"), on("fuzz_weight"), "a product");
+        assert_eq!(on("fuzz_roughness"), 3..4);
+
+        // Emission: color times luminance over the largest luminance.
+        let emissive = gltf.texture("emissive").unwrap();
+        assert_eq!(emissive.levels[0][..3], [255, srgb(0.5), 0]);
+        assert_eq!(emissive.levels[0][4..7], [srgb(0.5), srgb(0.25), 0]);
+        let luminance = gltf.placement("emission_luminance").unwrap();
+        assert_eq!(
+            (luminance.channels.clone(), luminance.range),
+            (0..3, [0.0, 100.0])
+        );
+
+        // KHR_materials_ior has no texture, and glTF has no displacement.
+        assert_eq!(gltf.report.unsupported, ["specular_ior", "height"]);
+        assert!(gltf.constants.is_empty(), "every constant shares a texture");
+
+        let constant_ior = MaterialMaps {
+            specular_ior: Some(1.33.into()),
+            ..MaterialMaps::default()
+        };
+        let gltf = pack(&constant_ior, Profile::Gltf, &PackSettings::default()).unwrap();
+        assert_eq!(gltf.constant("specular_ior"), Some([1.33].as_slice()));
+    }
+
+    #[test]
+    fn lightweald_and_raw_carry_or_report_the_extensions() {
+        let settings = PackSettings::default();
+        let lightweald = pack(&extensions(), Profile::Lightweald, &settings).unwrap();
+        assert!(lightweald.textures.is_empty());
+        assert_eq!(
+            lightweald.report.unsupported,
+            [
+                "specular_weight",
+                "specular_ior",
+                "coat_normal",
+                "fuzz_weight",
+                "emission_luminance",
+                "height"
+            ]
+        );
+        let constants: Vec<_> = lightweald.constants.iter().map(|c| c.name).collect();
+        assert_eq!(
+            constants,
+            [
+                "specular_color",
+                "coat_weight",
+                "fuzz_color",
+                "fuzz_roughness",
+                "emission_color"
+            ]
+        );
+
+        let raw = pack(&extensions(), Profile::Raw, &settings).unwrap();
+        let names: Vec<_> = raw.textures.iter().map(|t| t.name).collect();
+        assert_eq!(
+            names,
+            [
+                "specular_weight",
+                "specular_ior",
+                "coat_roughness",
+                "coat_normal",
+                "fuzz_weight",
+                "emission_luminance",
+                "height"
+            ]
+        );
+        assert!(raw.report.unsupported.is_empty());
+        // Parameters without an upper bound are 16-bit over their own range.
+        let ior = raw.texture("specular_ior").unwrap();
+        assert_eq!(ior.format, PixelFormat::R16Unorm);
+        assert_eq!(ior.levels[0][..4], [0, 0, 255, 255]);
+        assert_eq!(raw.placement("specular_ior").unwrap().range, [1.4, 1.6]);
+        assert_eq!(raw.placement("height").unwrap().range, [-0.01, 0.03]);
+        assert_eq!(
+            raw.texture("coat_normal").unwrap().kind,
+            TextureKind::Data,
+            "raw normals stay in the input frame"
         );
     }
 }

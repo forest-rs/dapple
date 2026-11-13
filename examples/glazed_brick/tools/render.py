@@ -19,8 +19,9 @@ into <gallery-dir>:
   displaced geometry.
 
 The glaze is OpenPBR's coat, rendered as Principled BSDF's coat: weight
-and roughness from `clearcoat.png` (R, G), tint from `coat_color.png`, IOR
-1.5; the base under it is the glaze's pigment (or the exposed body).
+and roughness from `clearcoat.png` (R, G), tint from `coat_color.png`
+(linear, from the raw profile), IOR 1.5; the base under it is the glaze's
+pigment (or the exposed body).
 
 The wall is 2 m wide (two repeats of the 1 m tile) and 1 m tall, displaced
 by the height map in meters. The maps' rows start at domain `y = 0` at the
@@ -125,7 +126,8 @@ base_color = image("base_color.png", "sRGB")
 orm = image("orm.png", "Non-Color")
 normal = image("normal.png", "Non-Color")
 clearcoat = image("clearcoat.png", "Non-Color")
-coat_color = image("coat_color.png", "sRGB")
+# The raw profile stores the tint linearly.
+coat_color = image("coat_color.png", "Non-Color")
 height = image("height.png", "Non-Color")
 
 

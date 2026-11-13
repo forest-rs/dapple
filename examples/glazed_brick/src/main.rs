@@ -15,11 +15,13 @@
 //! `maps/` holds the material packed by `dapple_encode` for the glTF
 //! profile: `base_color.png` (sRGB), `normal.png` (tangent-space, `+Y`
 //! toward the image top), `orm.png` (occlusion, roughness, metalness),
-//! `clearcoat.png` (R coat weight, G coat roughness), and, outside glTF,
-//! `coat_color.png` (sRGB coat tint, which glTF cannot carry) and
-//! `height.png`, 16-bit height over the range `height.txt` gives in meters.
-//! Rows run from domain `y = 0` at the image top, as glTF reads textures.
-//! `tools/render.py` renders them in Blender as a displaced wall.
+//! `clearcoat.png` (R coat weight, G coat roughness), `clearcoat_normal.png`
+//! and `sheen.png` (the moss's fuzz: sRGB color times weight, A roughness).
+//! What glTF cannot carry comes from the raw profile instead:
+//! `coat_color.png` (linear coat tint) and `height.png`, 16-bit height over
+//! the range `height.txt` gives in meters. Rows run from domain `y = 0` at
+//! the image top, as glTF reads textures. `tools/render.py` renders them in
+//! Blender as a displaced wall.
 //!
 //! `diagnostics.txt` lists every module instance by path and every
 //! material operation's approximation report, attributed to the instance
@@ -30,9 +32,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
-use dapple_encode::{
-    Edge, Filter, Image, PackSettings, PixelFormat, Profile, data_mips, encode_data, pack,
-};
+use dapple_encode::{Edge, PackSettings, Profile, pack};
 use dapple_field::Value;
 use dapple_library::glazed_brick::{BODY, DIRT, GLAZE, MORTAR, SALT, STONE};
 use dapple_library::modules::{GlazedBrickWall, StoneSill};
@@ -186,7 +186,9 @@ fn write_previews(out: &Path, m: &Material) -> Result<()> {
     Ok(())
 }
 
-/// Packs the material for the glTF profile and writes it as PNG files.
+/// Packs the material for the glTF profile and writes it as PNG files,
+/// with the raw profile's textures for whatever glTF reports it cannot
+/// carry.
 fn write_maps(dir: &Path, m: &Material) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let (maps, lowering) = lower::maps(m)?;
@@ -194,46 +196,30 @@ fn write_maps(dir: &Path, m: &Material) -> Result<()> {
         "lowered: normal from height {}, dropped {:?}",
         lowering.normal_from_height, lowering.dropped
     );
-    let bundle = pack(&maps, Profile::Gltf, &PackSettings::default())?;
-    println!("packing could not carry {:?}", bundle.report.unsupported);
-    let mut textures: Vec<_> = bundle.textures.iter().collect();
-
-    let grid = m.grid();
-    let height = m.height()?;
-    let (lo, hi) = height
-        .values()
-        .iter()
-        .fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
-    let unit: Vec<f32> = height
-        .values()
-        .iter()
-        .map(|&v| (v - lo) / (hi - lo))
-        .collect();
-    let chain = data_mips(
-        &Image::new(grid.width, grid.height, 1, Edge::Wrap, unit)?,
-        Filter::Box,
+    let settings = PackSettings::default();
+    let gltf = pack(&maps, Profile::Gltf, &settings)?;
+    let constants: Vec<_> = gltf.constants.iter().map(|c| c.name).collect();
+    println!(
+        "glTF constants {constants:?}; could not carry {:?}",
+        gltf.report.unsupported
     );
-    let height_texture = encode_data("height", &chain, PixelFormat::R16Unorm)?;
-    textures.push(&height_texture);
-    // The coat's tint, which glTF cannot carry, for renderers that can.
-    let tint: Vec<f32> = (0..grid.len())
-        .flat_map(|i| {
-            let c = vec3(m.value(ChannelId::Param(Param::CoatColor), i));
-            [c.x, c.y, c.z, 1.0]
-        })
-        .collect();
-    let tint_chain = data_mips(
-        &Image::new(grid.width, grid.height, 4, Edge::Wrap, tint)?,
-        Filter::Box,
-    );
-    let tint_texture = encode_data("coat_color", &tint_chain, PixelFormat::Rgba8Srgb)?;
-    textures.push(&tint_texture);
+    let raw = pack(&maps, Profile::Raw, &settings)?;
+    let mut textures: Vec<_> = gltf.textures.iter().collect();
+    for name in &gltf.report.unsupported {
+        match raw.texture(name) {
+            Some(texture) => textures.push(texture),
+            None => println!("{name} is the constant {:?}", raw.constant(name)),
+        }
+    }
     for texture in textures {
         let path = dir.join(format!("{}.png", texture.name));
         std::fs::write(&path, dapple_encode::png::write(texture)?)?;
         println!("{}", path.display());
     }
-    std::fs::write(dir.join("height.txt"), format!("{lo} {hi}\n"))?;
+    if let Some(height) = raw.placement("height") {
+        let [lo, hi] = height.range;
+        std::fs::write(dir.join("height.txt"), format!("{lo} {hi}\n"))?;
+    }
     Ok(())
 }
 

@@ -410,11 +410,15 @@ Every node output has a fingerprint:
 - field outputs: `hash(op, parameters, input fingerprints)`;
 - raster outputs: additionally hashed with the resolution, domain and tile.
 
-A **tile cache** is keyed by fingerprint and bounded by a byte budget, with
-explicit eviction and reported hits, misses and evictions. The cache is shared
-across realizations, so a 1K preview and a 4K bake of the same graph share any
-tiles that are resolution-independent. Few are, honestly; mostly they share
-field compilation.
+Fingerprints name outputs and drive early cutoff; they are not yet the key of
+a cache. The graph retains each node's output (see above) and keeps no
+separate store of evicted tiles.
+
+Intended, not yet built: a **tile cache** keyed by fingerprint and bounded by
+a byte budget, with explicit eviction and reported hits, misses and
+evictions. It would be shared across realizations, so a 1K preview and a 4K
+bake of the same graph share any tiles that are resolution-independent. Few
+are, honestly; mostly they share field compilation.
 
 **Budgets:** a realization can take a work budget (tiles or evaluated samples
 per call). It returns partial progress with a report, and resuming continues
@@ -653,18 +657,22 @@ starts.
 |---|---|---|
 | `dapple_field` | Field IR, domains, footprints, intervals, the evaluator, the noise/cellular/pattern op set | yes |
 | `dapple_raster` | Tiled rasters, raster ops, kernels and footprints | yes |
-| `dapple_graph` | Material graph value, typed ports, validation, compilation onto `execution_graph`, tile invalidation, caches, budgets, reports | yes |
+| `dapple_graph` | Material graph value, typed ports, validation, compilation onto `execution_graph`, tile invalidation, tile budgets, tile reports | yes |
 | `dapple_material` | Material values (OpenPBR bindings, auxiliary channels), the four material operations and their reports, programs over materials, modules, resources | yes |
 | `dapple_package` | Portable material packages: the versioned JSON source of module interfaces, graph bodies and presets, compiled against an engine's modules and capabilities | yes |
 | `dapple_encode` | Per-type mip builders, specular AA, packing profiles; PNG/EXR/KTX2 writing and the `ctt` compressor behind `std` | core yes |
 | `dapple_imaging` | Imaging scenes → coverage fields | yes |
 | `dapple_exedra` | `Chart` domain: rasterized chart layouts, seam gutters | yes |
-| `dapple_library` | Ready-made materials (oak bark, solid oak) as field programs | yes |
-| `dapple` | Leaf-only facade | yes |
+| `dapple_library` | Ready-made materials (oak bark, solid oak, brick, parquet, gravel, glazed brick) as field programs, shared modules, and the varnished-board package | yes |
+| `dapple_elements` | Keyed element sets: bindings, instances, element programs | yes |
+| `dapple_lab` | Headless material laboratory: reports, measurements, fitting | yes |
+| `dapple_compress` | Block compression and Zstandard supercompression of encoded textures, through `ctt` | std |
+| `tools/dapple_bake` | Bakes the recipes a TOML manifest lists | std |
 | `examples/*` | Material gallery (plane, sphere and draped-cloth previews through lightweald and Blender), wood/stone/brick/bark studies | std |
-| `benchmarks/*` | Wind tunnels: samples per second per op, tile realize and cache, incremental edit latency | std |
 
-Plus the shared `openpbr` crate outside dapple (see above).
+Plus the shared `openpbr` crate outside dapple (see above). Not yet built: a
+leaf-only `dapple` facade crate, and `benchmarks/*` wind tunnels (samples per
+second per op, tile realize and cache, incremental edit latency).
 
 **Dependencies:**
 - `glam`, for math;
@@ -680,7 +688,10 @@ determinism and footprints are the point.
 
 ## Authoring
 
-A Rust builder comes first:
+A Rust builder comes first. This is a sketch of the intended authoring API,
+not the current one; the graph today is built with `MaterialGraph::field`,
+`realize`, `normals`, `raster` and the other typed constructors in
+`dapple_graph`, and materials bind channels through `dapple_material`:
 
 ```rust
 let mut g = MaterialGraph::new(Domain::periodic([1, 1]));
@@ -710,7 +721,7 @@ are unchanged. Named exposed parameters are still to come.
 
 ## Introspection
 
-Every realization returns a report with:
+Intended: every realization returns a report with:
 - per-node timings;
 - samples and tiles evaluated, cache hits/misses/evictions, bytes live;
 - tiles skipped by intervals, and conservative-dependency fallbacks;
@@ -718,7 +729,16 @@ Every realization returns a report with:
 - for encoding: mip levels, compression, the encoder version, and the
   parameters each packing profile could not carry.
 
-**Debug views:**
+Built so far: `MaterialGraph::tile_report` returns a `TileReport` (tiles
+recomputed, reused and changed, texels recomputed, whole recomputes,
+unbounded changes and warps, pending tiles), `run` returns the executor's
+`RunSummary` (including cut-off nodes), `run_count` gives per-node run
+counts, and `execution_graph` exposes the underlying graph, but dapple
+itself has no DOT dump yet.
+Packing reports its own `PackReport`. Timings, bytes live, value ranges and
+NaN/Inf counts are not recorded yet.
+
+**Debug views** (intended; none is built):
 - realize any intermediate port as an image;
 - tile-dirtiness overlays after an edit;
 - footprint heat maps, showing where band-limiting dropped octaves;
@@ -735,12 +755,12 @@ stubbed.
    with plane and periodic domains, value/gradient noise, fBm, cellular
    noise and footprints; keyed hashing with golden values across platforms.
 2. **The graph and incremental realization:** `dapple_graph` on
-   `execution_graph`, tile invalidation, fingerprints, the cache, reports,
-   and early cutoff through `values_equal` (execution #98).
+   `execution_graph`, tile invalidation, fingerprints, tile budgets, tile
+   reports, and early cutoff through `values_equal` (execution #98).
 3. **Sylva's first sets:** blur, height → normal, AO and distance
    transforms; `dapple_imaging` coverage; `dapple_encode` with per-type
-   mips, PNG and KTX2, and the `lightweald` and `gltf` profiles; oak bark and
-   an oak leaf set.
+   mips, PNG and KTX2, and the `lightweald` and `gltf` profiles; oak bark. An
+   oak leaf set is not built.
 4. **Solid and chart domains:** solid wood grain, `dapple_exedra` chart
    baking, and the pavilion timbers (`examples/timber_bake`) as the first
    consumer.
@@ -997,9 +1017,10 @@ meaning.
   thresholds, histogram measurement, percentile remapping, controlled
   normalization) and directional processing (directional blur,
   slope-driven sampling, vector displacement, later advection). The
-  scheduler knows each op's category (local stencil, separable pass,
-  reduction, global transform, iterative solve) so locality, parallelism,
-  work reporting and cancellation stay coherent.
+  intent is that the scheduler knows each op's category (local stencil,
+  separable pass, reduction, global transform, iterative solve) so locality,
+  parallelism, work reporting and cancellation stay coherent. Each op
+  declares one through `RasterOp::category`, but nothing consumes it yet.
 - **Gates:** the same stone, wood and finish modules reused in several
   assets without duplicating graphs; a material-wide transform moves every
   channel; each material operation reports its approximations.

@@ -23,6 +23,7 @@ members = [
     "examples/material_lab",
     "examples/timber_bake",
     "examples/varnished_board",
+    "examples/weathered_metal",
     "tools/dapple_bake",
 ]
 

@@ -1616,6 +1616,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "weathered_metal"
+version = "0.0.0"
+dependencies = [
+ "dapple_encode",
+ "dapple_export",
+ "dapple_field",
+ "dapple_lab",
+ "dapple_library",
+ "dapple_material",
+ "dapple_package",
+ "glam",
+ "png",
+]
+
+[[package]]
 name = "web-sys"
 version = "0.3.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"

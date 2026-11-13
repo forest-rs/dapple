@@ -11,11 +11,13 @@ publish = false
 [dependencies]
 dapple_field.workspace = true
 dapple_library.workspace = true
-dapple_raster.workspace = true
 glam.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+dapple_graph.workspace = true
+dapple_raster.workspace = true
+execution_graph.workspace = true
 
 [lib]
 # The library only holds shared fixtures; keeping it out of `cargo bench`
@@ -28,6 +30,10 @@ harness = false
 
 [[bench]]
 name = "field"
+harness = false
+
+[[bench]]
+name = "graph"
 harness = false
 
 [[bench]]

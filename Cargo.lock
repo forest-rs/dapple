@@ -483,8 +483,10 @@ version = "0.0.0"
 dependencies = [
  "criterion",
  "dapple_field",
+ "dapple_graph",
  "dapple_library",
  "dapple_raster",
+ "execution_graph",
  "glam",
 ]
 

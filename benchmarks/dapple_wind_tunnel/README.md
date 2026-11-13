@@ -81,3 +81,27 @@ suite short.
   height raster, by central differences.
 
 Sizes are 256 and 1024 texels a side.
+
+## `graph`
+
+`MaterialGraph` runs and edits on one recipe: gradient noise and a disk
+combined by `max`, realized over one period in 32-texel tiles, blurred, and
+turned into normals by `HeightToNormal`. Sizes are 256 and 512 texels a side
+(64 and 256 tiles), so the cost of an edit can be compared with the size of
+the raster. Each edit benchmark alternates between two values so every
+iteration is a real edit, and times the edit and the run together.
+
+- `graph/fresh_run/<size>`: a first run of a freshly built graph. Building is
+  not timed.
+- `graph/clean_run/<size>`: a run with nothing edited.
+- `graph/edit_local_disk/<size>`: move the disk (`Op::Disk`), an edit that
+  states its change region, so only the tiles it reaches recompute. The
+  benchmark checks that the edit stays local before it measures.
+- `graph/edit_global_seed/<size>`: reseed the noise, which changes every
+  texel.
+- `graph/edit_blur_sigma/<size>`: change the blur, which re-runs the blur and
+  the normals but not the realization.
+- `graph/budgeted_slice/<size>`: the first run after moving the disk under a
+  budget of four tiles, the work a caller with a frame budget pays per run.
+- `graph/budgeted_converge/<size>`: the same edit, run until the budget leaves
+  nothing pending.

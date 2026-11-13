@@ -26,6 +26,7 @@
 //! | [`Steel`] | Riveted mild-steel plate, ground or under mill scale. |
 //! | [`Patina`] | Copper's tarnish, then verdigris where water stays and runs. |
 //! | [`Rust`] | Rust on bare steel: flash rust, deep pitted rust, and its runoff. |
+//! | [`Paint`] | A primer and a topcoat, chipped at edges, in flakes and scratches. |
 //!
 //! The bark and masonry modules' colors are calibrated against measured
 //! reflectance, and the metals' F0 against tabulated reflectance checked
@@ -36,8 +37,8 @@
 //! [`StoneSill`] (a glazed wall, a stone sill on a mortar bed, weathering),
 //! [`VarnishedBoard`] (wood, varnish finish, grime), [`Threshold`]
 //! (stone, wood and an oil finish), [`WeatheredCopper`] (copper and its
-//! patina) and [`RustedSteel`] (steel and
-//! rust).
+//! patina), [`RustedSteel`] (steel and rust) and [`PaintedSteel`] (steel,
+//! paint and rust).
 //!
 //! Modules build on whatever grid their context has; on a wrapping grid
 //! their noise uses whole lattice cells per period, so they tile.
@@ -65,13 +66,15 @@ mod finish;
 mod masonry;
 mod metal;
 mod mortar;
+mod paint;
 mod stone;
 mod wear;
 mod weathering;
 mod wood;
 
 pub use assets::{
-    GlazedBrickWall, RustedSteel, StoneSill, Threshold, VarnishedBoard, WeatheredCopper,
+    GlazedBrickWall, PaintedSteel, RustedSteel, StoneSill, Threshold, VarnishedBoard,
+    WeatheredCopper,
 };
 pub use bark::{Beech, Birch, ScotsPine, Spruce};
 pub use ceramic::CeramicBody;
@@ -80,6 +83,7 @@ pub use finish::Finish;
 pub use masonry::{AshlarLimestone, FlintWall, Marble, RomanBrick, RubbleWall, TerracottaTile};
 pub use metal::{Copper, Steel};
 pub use mortar::Mortar;
+pub use paint::Paint;
 pub use stone::Stone;
 pub use wear::{ByExample, EdgeWear, Moss};
 pub use weathering::{Efflorescence, Grime, Streaks};

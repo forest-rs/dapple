@@ -837,12 +837,15 @@ mod metals {
     use dapple_material::resource::NoResources;
     use dapple_material::{Aux, ChannelId, Material, Param, Tiling};
     use dapple_package::Package;
+    use dapple_raster::{DistanceTransform, RasterOp};
     use glam::Vec3;
 
-    use crate::glazed_brick::{METAL, PATINA, RUST};
+    use crate::glazed_brick::{METAL, PAINT, PATINA, RUST};
     use crate::modules::calibration::{METALS, OXIDES, fresnel_f0};
-    use crate::modules::{Copper, Patina, RustedSteel, Steel, WeatheredCopper};
-    use crate::packages::{RUSTED_STEEL, WEATHERED_COPPER, registry};
+    use crate::modules::{
+        Copper, Paint, PaintedSteel, Patina, Rust, RustedSteel, Steel, WeatheredCopper,
+    };
+    use crate::packages::{PAINTED_STEEL, RUSTED_STEEL, WEATHERED_COPPER, registry};
 
     fn build(module: &dyn Module, n: u32, bind: Bind) -> Material {
         let mut cx = Context::new(super::glazed::tile(n), &NoResources);
@@ -1011,15 +1014,71 @@ mod metals {
         assert!(luminance(0.5) < 0.5 * luminance(0.0), "tarnish darkens");
     }
 
+    /// Paint hides the metal; its chips bare it; and rust grows only on
+    /// what is bare and the paint it creeps under, not under sound paint.
+    #[test]
+    fn paint_chips_bare_the_steel_and_rust_follows_the_chips() {
+        let steel = build(&Steel, 128, Bind::new());
+        let mut cx = Context::new(super::glazed::tile(128), &NoResources);
+        let painted = cx
+            .instantiate(
+                &Paint,
+                "m",
+                Bind::new().material("base", steel).scalar("chipping", 0.05),
+            )
+            .unwrap()
+            .take_material("material")
+            .unwrap();
+        let n = painted.grid().len();
+        let (_, paint_metal, paint) = means(&painted, |i| surface(&painted, i) == PAINT);
+        assert!(
+            paint_metal < 1e-3 && paint > n / 2,
+            "{paint_metal} over {paint}"
+        );
+        let bared = (0..n)
+            .filter(|&i| scalar(&painted, Param::BaseMetalness, i) > 0.5)
+            .count();
+        assert!(bared > 0 && bared < n / 20, "{bared} bare texels");
+
+        let rusted = cx
+            .instantiate(
+                &Rust,
+                "rust",
+                Bind::new()
+                    .material("base", painted.clone())
+                    .scalar("age", 0.5)
+                    .scalar("wetness", 0.0),
+            )
+            .unwrap()
+            .take_material("material")
+            .unwrap();
+        let metal = painted
+            .scalar(ChannelId::Param(Param::BaseMetalness))
+            .unwrap();
+        let from_bare = DistanceTransform { threshold: 0.5 }.apply(&metal).unwrap();
+        let mut rust = 0;
+        for i in 0..n {
+            if surface(&rusted, i) == RUST {
+                rust += 1;
+                assert!(
+                    from_bare.values()[i] < 0.02,
+                    "rust under sound paint at {i}"
+                );
+            }
+        }
+        assert!(rust > bared / 4, "{rust} rusted of {bared} bared");
+    }
+
     /// Each metal's package survives a round trip, realizes its native
     /// asset's bits, and rebuilds every preset as the native asset does
     /// with the preset's values bound; every preset tiles.
     #[test]
     fn metal_packages_match_their_native_assets_at_every_preset() {
         let engine = registry();
-        let packages: [(&str, &dyn Module); 2] = [
+        let packages: [(&str, &dyn Module); 3] = [
             (WEATHERED_COPPER, &WeatheredCopper),
             (RUSTED_STEEL, &RustedSteel),
+            (PAINTED_STEEL, &PaintedSteel),
         ];
         for (source, native) in packages {
             let package = Package::from_json(source).expect("reads");

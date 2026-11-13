@@ -44,7 +44,7 @@ fn material_output() -> Vec<OutputDecl> {
 
 /// Convexity: how far the height stands above its blur over `radius`, in
 /// meters; positive on ridges and arrises, negative in hollows.
-fn convexity(base: &Material, radius: f32) -> Result<Raster, ModuleError> {
+pub(super) fn convexity(base: &Material, radius: f32) -> Result<Raster, ModuleError> {
     let grid = base.grid();
     let h = base.height()?;
     let blurred = GaussianBlur { sigma: radius }.apply(&h)?;

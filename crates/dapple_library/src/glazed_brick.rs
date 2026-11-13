@@ -73,6 +73,8 @@ pub const METAL: u32 = 12;
 pub const PATINA: u32 = 13;
 /// Surface-material identifier of rust.
 pub const RUST: u32 = 14;
+/// Surface-material identifier of paint (topcoat and primer).
+pub const PAINT: u32 = 15;
 
 /// Bricks per course and courses per 1 m tile: 250 × 71 mm courses
 /// including the joints.

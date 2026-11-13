@@ -20,9 +20,9 @@ use dapple_raster::{DistanceTransform, Raster, RasterOp};
 use glam::{Vec2, Vec3};
 
 use super::{
-    CeramicBody, Copper, EdgeWear, Efflorescence, Finish, Grime, Mortar, Moss, Patina, Rust, Steel,
-    Stone, Streaks, Wood, color, fail, flag, fraction, integer, mask_map, meters, scalar_map, seed,
-    smoothstep,
+    CeramicBody, Copper, EdgeWear, Efflorescence, Finish, Grime, Mortar, Moss, Paint, Patina, Rust,
+    Steel, Stone, Streaks, Wood, color, fail, flag, fraction, integer, mask_map, meters,
+    scalar_map, seed, smoothstep,
 };
 use crate::glazed_brick::{self, GLAZE, JOINT, Palette, Structure, glazes};
 
@@ -576,6 +576,68 @@ impl Module for RustedSteel {
                 "rust",
                 Bind::new()
                     .material("base", steel)
+                    .scalar("age", args.scalar("age"))
+                    .scalar("wetness", args.scalar("wetness")),
+            )?,
+        )?;
+        Ok(Outputs::new().with("material", Output::Material(m)))
+    }
+}
+
+/// Painted riveted steel: [`Steel`] under [`Paint`] of `paint` color, as
+/// glossy as `gloss`, chipped over `chipping` of the surface, then
+/// [`Rust`] by `age` where the chips bare the metal, creeping under the
+/// paint and bleeding down over it as far as `wetness` says.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct PaintedSteel;
+
+impl Module for PaintedSteel {
+    fn interface(&self) -> Interface {
+        Interface {
+            id: ModuleId::new("dapple_library.painted_steel", 1),
+            doc: "painted riveted steel, chipped and rusting".into(),
+            params: vec![
+                color(
+                    "paint",
+                    Vec3::new(0.035, 0.085, 0.11),
+                    "the topcoat's color",
+                ),
+                fraction("gloss", 0.5, "how glossy the topcoat is"),
+                fraction(
+                    "chipping",
+                    0.03,
+                    "share of the surface that lost its topcoat",
+                ),
+                fraction("fade", 0.3, "how far the topcoat has chalked"),
+                fraction("age", 0.4, "how far the bared steel has rusted"),
+                fraction("wetness", 0.6, "how much water's paths decide where"),
+                seed(),
+            ],
+            inputs: vec![],
+            outputs: material_output(),
+        }
+    }
+
+    fn build(&self, cx: &mut Context<'_>, args: &Args) -> Result<Outputs, ModuleError> {
+        let steel = take(cx.instantiate(&Steel, "steel", Bind::new())?)?;
+        let painted = take(
+            cx.instantiate(
+                &Paint,
+                "paint",
+                Bind::new()
+                    .material("base", steel)
+                    .color("color", args.color("paint"))
+                    .scalar("gloss", args.scalar("gloss"))
+                    .scalar("chipping", args.scalar("chipping"))
+                    .scalar("fade", args.scalar("fade")),
+            )?,
+        )?;
+        let m = take(
+            cx.instantiate(
+                &Rust,
+                "rust",
+                Bind::new()
+                    .material("base", painted)
                     .scalar("age", args.scalar("age"))
                     .scalar("wetness", args.scalar("wetness")),
             )?,

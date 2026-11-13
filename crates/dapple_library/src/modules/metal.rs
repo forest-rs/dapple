@@ -282,7 +282,7 @@ fn canning(w: f32) -> f32 {
 /// `mill_scale` leaves that share of it under the hot-rolled oxide
 /// (magnetite, F0 [`MILL_SCALE_F0`]), flaking at its edges.
 ///
-/// Steel rusts: see [`super::Rust`].
+/// Steel rusts: see [`super::Rust`]; and takes paint: [`super::Paint`].
 #[derive(Copy, Clone, Debug, Default)]
 pub struct Steel;
 

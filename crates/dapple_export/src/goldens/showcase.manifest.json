@@ -1,0 +1,732 @@
+{
+  "format": "dapple-material",
+  "version": 1,
+  "packing": {
+    "profile": "gltf",
+    "filter": "box",
+    "alpha_cutoff": null,
+    "fold_normal_variance": true,
+    "sixteen_bit_normals": false
+  },
+  "provenance": {
+    "subject": "showcase",
+    "instance": null,
+    "grid": {
+      "width": 4,
+      "height": 2,
+      "origin": [
+        0.0,
+        0.0
+      ],
+      "texel": [
+        0.25,
+        0.25
+      ],
+      "size": [
+        1.0,
+        0.5
+      ],
+      "edge": "wrap"
+    },
+    "tiling": {
+      "x": true,
+      "y": true
+    }
+  },
+  "conventions": {
+    "length_unit": "m",
+    "luminance_unit": "cd/m2",
+    "color_space": "lin_rec709",
+    "rows": "row 0 is the grid's minimum y"
+  },
+  "parameters": [
+    {
+      "name": "base_weight",
+      "held": {
+        "kind": "default",
+        "value": [
+          1.0
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "base_color",
+      "held": {
+        "kind": "texture",
+        "texture": "base_color",
+        "channels": {
+          "start": 0,
+          "end": 3
+        },
+        "range": [
+          0.0,
+          1.0
+        ],
+        "encoding": "value"
+      },
+      "in_profile": true
+    },
+    {
+      "name": "base_metalness",
+      "held": {
+        "kind": "texture",
+        "texture": "orm",
+        "channels": {
+          "start": 2,
+          "end": 3
+        },
+        "range": [
+          0.0,
+          1.0
+        ],
+        "encoding": "value"
+      },
+      "in_profile": true
+    },
+    {
+      "name": "base_diffuse_roughness",
+      "held": {
+        "kind": "default",
+        "value": [
+          0.0
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "specular_weight",
+      "held": {
+        "kind": "texture",
+        "texture": "specular",
+        "channels": {
+          "start": 3,
+          "end": 4
+        },
+        "range": [
+          0.0,
+          1.5
+        ],
+        "encoding": "value"
+      },
+      "in_profile": true,
+      "notes": [
+        "glTF's specularFactor is at most 1: a weight map above 1 is scaled into range and its scale moved into specularColorFactor, which keeps each texel's reflectance at normal incidence but lowers it toward grazing angles"
+      ]
+    },
+    {
+      "name": "specular_color",
+      "held": {
+        "kind": "texture",
+        "texture": "specular",
+        "channels": {
+          "start": 0,
+          "end": 3
+        },
+        "range": [
+          0.0,
+          1.0
+        ],
+        "encoding": "value"
+      },
+      "in_profile": true
+    },
+    {
+      "name": "specular_roughness",
+      "held": {
+        "kind": "texture",
+        "texture": "orm",
+        "channels": {
+          "start": 1,
+          "end": 2
+        },
+        "range": [
+          0.0,
+          1.0
+        ],
+        "encoding": "value"
+      },
+      "in_profile": true
+    },
+    {
+      "name": "specular_roughness_anisotropy",
+      "held": {
+        "kind": "texture",
+        "texture": "anisotropy",
+        "channels": {
+          "start": 2,
+          "end": 3
+        },
+        "range": [
+          0.0,
+          1.0
+        ],
+        "encoding": "gltf_anisotropy_strength"
+      },
+      "in_profile": true,
+      "notes": [
+        "glTF widens the lobe along the anisotropy direction but keeps specular_roughness across it, where OpenPBR narrows it; the strength matches the width along it"
+      ]
+    },
+    {
+      "name": "specular_ior",
+      "held": {
+        "kind": "constant",
+        "value": [
+          1.4
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "transmission_weight",
+      "held": {
+        "kind": "constant",
+        "value": [
+          0.1
+        ]
+      },
+      "in_profile": true,
+      "notes": [
+        "glTF's transmission without KHR_materials_volume is thin-walled: on a material that is not, the volume's refraction is lost"
+      ]
+    },
+    {
+      "name": "transmission_color",
+      "held": {
+        "kind": "default",
+        "value": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "transmission_depth",
+      "held": {
+        "kind": "default",
+        "value": [
+          0.0
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "transmission_scatter",
+      "held": {
+        "kind": "default",
+        "value": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "transmission_scatter_anisotropy",
+      "held": {
+        "kind": "default",
+        "value": [
+          0.0
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "transmission_dispersion_scale",
+      "held": {
+        "kind": "default",
+        "value": [
+          0.0
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "transmission_dispersion_abbe_number",
+      "held": {
+        "kind": "default",
+        "value": [
+          20.0
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "subsurface_weight",
+      "held": {
+        "kind": "constant",
+        "value": [
+          0.3
+        ]
+      },
+      "in_profile": true,
+      "notes": [
+        "glTF's diffuse transmission is thin-walled: on a material that is not, subsurface scattering through the volume becomes diffuse transmission through the surface"
+      ]
+    },
+    {
+      "name": "subsurface_color",
+      "held": {
+        "kind": "constant",
+        "value": [
+          0.9,
+          0.5,
+          0.4
+        ]
+      },
+      "in_profile": true,
+      "notes": [
+        "glTF's diffuse transmission is thin-walled: on a material that is not, subsurface scattering through the volume becomes diffuse transmission through the surface"
+      ]
+    },
+    {
+      "name": "subsurface_radius",
+      "held": {
+        "kind": "default",
+        "value": [
+          1.0
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "subsurface_radius_scale",
+      "held": {
+        "kind": "default",
+        "value": [
+          1.0,
+          0.5,
+          0.25
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "subsurface_scatter_anisotropy",
+      "held": {
+        "kind": "default",
+        "value": [
+          0.0
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "coat_weight",
+      "held": {
+        "kind": "texture",
+        "texture": "clearcoat",
+        "channels": {
+          "start": 0,
+          "end": 1
+        },
+        "range": [
+          0.0,
+          1.0
+        ],
+        "encoding": "value"
+      },
+      "in_profile": true
+    },
+    {
+      "name": "coat_color",
+      "held": {
+        "kind": "constant",
+        "value": [
+          0.9,
+          0.8,
+          0.6
+        ]
+      },
+      "in_profile": false,
+      "notes": [
+        "the glTF profile cannot carry it; the manifest keeps its value"
+      ]
+    },
+    {
+      "name": "coat_roughness",
+      "held": {
+        "kind": "texture",
+        "texture": "clearcoat",
+        "channels": {
+          "start": 1,
+          "end": 2
+        },
+        "range": [
+          0.0,
+          1.0
+        ],
+        "encoding": "value"
+      },
+      "in_profile": true
+    },
+    {
+      "name": "coat_roughness_anisotropy",
+      "held": {
+        "kind": "default",
+        "value": [
+          0.0
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "coat_ior",
+      "held": {
+        "kind": "constant",
+        "value": [
+          1.45
+        ]
+      },
+      "in_profile": false,
+      "notes": [
+        "glTF's clearcoat has an index of refraction of 1.5; the manifest keeps the material's value"
+      ]
+    },
+    {
+      "name": "coat_darkening",
+      "held": {
+        "kind": "default",
+        "value": [
+          1.0
+        ]
+      },
+      "in_profile": false,
+      "notes": [
+        "glTF's clearcoat does not darken the base below it; the manifest keeps the material's value"
+      ]
+    },
+    {
+      "name": "fuzz_weight",
+      "held": {
+        "kind": "constant",
+        "value": [
+          0.5
+        ]
+      },
+      "in_profile": true,
+      "notes": [
+        "glTF layers its clearcoat over the sheen, where OpenPBR puts the fuzz on top of the coat"
+      ]
+    },
+    {
+      "name": "fuzz_color",
+      "held": {
+        "kind": "constant",
+        "value": [
+          0.4,
+          0.6,
+          0.2
+        ]
+      },
+      "in_profile": true,
+      "notes": [
+        "glTF layers its clearcoat over the sheen, where OpenPBR puts the fuzz on top of the coat"
+      ]
+    },
+    {
+      "name": "fuzz_roughness",
+      "held": {
+        "kind": "default",
+        "value": [
+          0.5
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "emission_luminance",
+      "held": {
+        "kind": "texture",
+        "texture": "emissive",
+        "channels": {
+          "start": 0,
+          "end": 3
+        },
+        "range": [
+          0.0,
+          40.0
+        ],
+        "encoding": "product"
+      },
+      "in_profile": true
+    },
+    {
+      "name": "emission_color",
+      "held": {
+        "kind": "texture",
+        "texture": "emissive",
+        "channels": {
+          "start": 0,
+          "end": 3
+        },
+        "range": [
+          0.0,
+          1.0
+        ],
+        "encoding": "product"
+      },
+      "in_profile": true
+    },
+    {
+      "name": "thin_film_weight",
+      "held": {
+        "kind": "lost",
+        "mean": [
+          0.4375
+        ]
+      },
+      "in_profile": false,
+      "notes": [
+        "dapple_encode's maps have no field for it: its map is lost"
+      ]
+    },
+    {
+      "name": "thin_film_thickness",
+      "held": {
+        "kind": "default",
+        "value": [
+          0.5
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "thin_film_ior",
+      "held": {
+        "kind": "default",
+        "value": [
+          1.4
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "geometry_opacity",
+      "held": {
+        "kind": "default",
+        "value": [
+          1.0
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "geometry_thin_walled",
+      "held": {
+        "kind": "default",
+        "value": [
+          0.0
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "geometry_normal",
+      "held": {
+        "kind": "texture",
+        "texture": "normal",
+        "channels": {
+          "start": 0,
+          "end": 3
+        },
+        "range": [
+          -1.0,
+          1.0
+        ],
+        "encoding": "normal_y_up"
+      },
+      "in_profile": true,
+      "notes": [
+        "derived from the height"
+      ]
+    },
+    {
+      "name": "geometry_tangent",
+      "held": {
+        "kind": "texture",
+        "texture": "anisotropy",
+        "channels": {
+          "start": 0,
+          "end": 2
+        },
+        "range": [
+          -1.0,
+          1.0
+        ],
+        "encoding": "axis_y_up"
+      },
+      "in_profile": true
+    },
+    {
+      "name": "geometry_coat_normal",
+      "held": {
+        "kind": "texture",
+        "texture": "clearcoat_normal",
+        "channels": {
+          "start": 0,
+          "end": 3
+        },
+        "range": [
+          -1.0,
+          1.0
+        ],
+        "encoding": "normal_y_up"
+      },
+      "in_profile": true
+    },
+    {
+      "name": "geometry_coat_tangent",
+      "held": {
+        "kind": "default",
+        "value": [
+          1.0,
+          0.0,
+          0.0
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "occlusion",
+      "held": {
+        "kind": "default",
+        "value": [
+          1.0
+        ]
+      },
+      "in_profile": true
+    },
+    {
+      "name": "height",
+      "held": {
+        "kind": "texture",
+        "texture": "height",
+        "channels": {
+          "start": 0,
+          "end": 1
+        },
+        "range": [
+          0.0,
+          0.000875
+        ],
+        "encoding": "value"
+      },
+      "in_profile": false,
+      "notes": [
+        "the glTF profile cannot carry it; the raw profile's texture holds it"
+      ]
+    }
+  ],
+  "textures": [
+    {
+      "name": "base_color",
+      "file": "base_color.png",
+      "in_profile": true,
+      "color_space": "srgb",
+      "channels": 4,
+      "bits": 8,
+      "width": 4,
+      "height": 2
+    },
+    {
+      "name": "normal",
+      "file": "normal.png",
+      "in_profile": true,
+      "color_space": "linear",
+      "channels": 4,
+      "bits": 8,
+      "width": 4,
+      "height": 2
+    },
+    {
+      "name": "orm",
+      "file": "orm.png",
+      "in_profile": true,
+      "color_space": "linear",
+      "channels": 4,
+      "bits": 8,
+      "width": 4,
+      "height": 2
+    },
+    {
+      "name": "anisotropy",
+      "file": "anisotropy.png",
+      "in_profile": true,
+      "color_space": "linear",
+      "channels": 4,
+      "bits": 8,
+      "width": 4,
+      "height": 2
+    },
+    {
+      "name": "specular",
+      "file": "specular.png",
+      "in_profile": true,
+      "color_space": "srgb",
+      "channels": 4,
+      "bits": 8,
+      "width": 4,
+      "height": 2
+    },
+    {
+      "name": "clearcoat",
+      "file": "clearcoat.png",
+      "in_profile": true,
+      "color_space": "linear",
+      "channels": 4,
+      "bits": 8,
+      "width": 4,
+      "height": 2
+    },
+    {
+      "name": "clearcoat_normal",
+      "file": "clearcoat_normal.png",
+      "in_profile": true,
+      "color_space": "linear",
+      "channels": 4,
+      "bits": 8,
+      "width": 4,
+      "height": 2
+    },
+    {
+      "name": "emissive",
+      "file": "emissive.png",
+      "in_profile": true,
+      "color_space": "srgb",
+      "channels": 4,
+      "bits": 8,
+      "width": 4,
+      "height": 2
+    },
+    {
+      "name": "height",
+      "file": "height.png",
+      "in_profile": false,
+      "color_space": "linear",
+      "channels": 1,
+      "bits": 16,
+      "width": 4,
+      "height": 2
+    }
+  ],
+  "gltf": "material.gltf",
+  "files": [
+    {
+      "path": "material.gltf",
+      "bytes": 5620,
+      "hash": "fa1c0f6b3cc268dd11d4519c1c16cc64"
+    }
+  ],
+  "lab": {
+    "subject": "showcase",
+    "passed": false,
+    "failures": [
+      "demo.fails"
+    ]
+  }
+}

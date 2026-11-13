@@ -1557,7 +1557,11 @@ fn run_whole(
     let raster = compute()?;
     debug_assert_eq!(raster.port(), port, "a whole raster keeps its node's type");
     let data = RasterData::Typed(raster);
-    let all: Vec<u32> = (0..data.grid(tiles.size()).count()).collect();
+    let count = data.grid(tiles.size()).count();
+    // A whole computation spends its tiles from the run's budget, as a
+    // tiled node's does.
+    tiles.schedule(&mut state.pending, None, count);
+    let all: Vec<u32> = (0..count).collect();
     let changed = settle(tiles, node, state, &data, &all, true);
     let value = RasterValue {
         data,
@@ -2310,8 +2314,9 @@ impl MaterialGraph {
     /// result. Until then those nodes' rasters mix recomputed and stale
     /// tiles; [`TileReport::pending_tiles`] counts what is left. A node with
     /// no reusable output (a first run, a new grid or operation, a global
-    /// operation, or an unbounded change) still computes whole, and that
-    /// work counts against the budget.
+    /// operation, or an unbounded change) still computes whole, as do
+    /// reduce nodes and realizations of fields other than scalars, and
+    /// that work counts against the budget.
     pub fn set_tile_budget(&mut self, budget: Option<u64>) {
         self.graph.executor_mut().set_tile_budget(budget);
     }

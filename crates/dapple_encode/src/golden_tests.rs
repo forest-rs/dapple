@@ -67,6 +67,7 @@ fn material() -> MaterialMaps {
         emission_luminance: None,
         emission_color: None,
         height: None,
+        thin_walled: false,
     }
 }
 

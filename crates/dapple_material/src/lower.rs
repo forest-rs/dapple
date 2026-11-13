@@ -108,6 +108,13 @@ fn lower_param(
         Param::GeometryNormal => maps.normal = normal(m, c)?,
         Param::GeometryTangent => maps.anisotropy_direction = direction(m, c)?,
         Param::GeometryCoatNormal => maps.coat_normal = normal(m, c)?,
+        // A uniform parameter: never a map.
+        Param::GeometryThinWalled => {
+            maps.thin_walled = m
+                .constant(c)
+                .and_then(|v| v.component(0))
+                .is_some_and(|v| v != 0.0);
+        }
         _ => return Ok(false),
     }
     Ok(true)
@@ -314,18 +321,28 @@ mod tests {
             map(PortType::Scalar, |_| Value::Scalar(0.0)),
         )
         .unwrap();
-        m.set_param(Param::GeometryThinWalled, scalar(1.0)).unwrap();
+        m.set_param(Param::SubsurfaceRadius, scalar(2.0)).unwrap();
         let (maps, lowering) = maps(&m).unwrap();
         assert_eq!(
             lowering.dropped,
             [
+                Param::SubsurfaceRadius,
                 Param::CoatIor,
                 Param::ThinFilmWeight,
-                Param::GeometryThinWalled,
             ],
             "in specification order; a map is dropped even if it holds the default"
         );
         assert_eq!(maps, MaterialMaps::default());
+    }
+
+    #[test]
+    fn thin_walled_is_carried_as_a_flag() {
+        let mut m = Material::new(grid());
+        assert!(!maps(&m).unwrap().0.thin_walled);
+        m.set_param(Param::GeometryThinWalled, scalar(1.0)).unwrap();
+        let (maps, lowering) = maps(&m).unwrap();
+        assert!(maps.thin_walled);
+        assert_eq!(lowering, Lowering::default(), "nothing lost");
     }
 
     #[test]

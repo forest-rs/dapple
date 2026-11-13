@@ -1126,7 +1126,6 @@ dependencies = [
  "dapple_material",
  "dapple_package",
  "glam",
- "png",
 ]
 
 [[package]]

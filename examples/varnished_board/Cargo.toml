@@ -15,7 +15,6 @@ dapple_library.workspace = true
 dapple_material.workspace = true
 dapple_package.workspace = true
 glam.workspace = true
-png.workspace = true
 
 [lints]
 workspace = true

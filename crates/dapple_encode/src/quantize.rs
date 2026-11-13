@@ -1,7 +1,7 @@
 // Copyright 2026 the Dapple Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! 8-bit quantization.
+//! Texel formats and quantization.
 
 /// Texel formats of encoded textures.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -16,6 +16,9 @@ pub enum PixelFormat {
     Rgba8Srgb,
     /// One linear 16-bit channel, little-endian, for data such as height.
     R16Unorm,
+    /// Three linear 16-bit channels, little-endian, for normals that 8 bits
+    /// would band.
+    Rgb16Unorm,
     /// One 32-bit IEEE float channel, little-endian, for unbounded data.
     R32Float,
 }
@@ -33,6 +36,7 @@ impl PixelFormat {
         match self {
             Self::R8Unorm | Self::R16Unorm | Self::R32Float => 1,
             Self::Rg8Unorm => 2,
+            Self::Rgb16Unorm => 3,
             Self::Rgba8Unorm | Self::Rgba8Srgb => 4,
         }
     }
@@ -42,7 +46,7 @@ impl PixelFormat {
     pub const fn bytes_per_channel(self) -> usize {
         match self {
             Self::R8Unorm | Self::Rg8Unorm | Self::Rgba8Unorm | Self::Rgba8Srgb => 1,
-            Self::R16Unorm => 2,
+            Self::R16Unorm | Self::Rgb16Unorm => 2,
             Self::R32Float => 4,
         }
     }

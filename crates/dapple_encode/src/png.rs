@@ -6,8 +6,8 @@
 //! PNG holds one image, so [`write()`] stores level 0 only; use
 //! [`crate::ktx2::write`] to keep the mip chain. One-channel textures become
 //! grayscale PNG files. PNG has no two-channel color type, so two-channel textures
-//! are written as RGB with blue 0. 16-bit textures become 16-bit grayscale;
-//! PNG has no float samples, so float textures are refused. sRGB textures
+//! are written as RGB with blue 0. 16-bit textures become 16-bit grayscale
+//! or RGB; PNG has no float samples, so float textures are refused. sRGB textures
 //! carry an `sRGB` chunk; linear ones carry none, and consumers such as glTF
 //! read normal and metallic-roughness PNG files as linear data regardless.
 
@@ -58,7 +58,7 @@ pub fn write(texture: &EncodedTexture) -> Result<Vec<u8>, PngError> {
                 .collect(),
         ),
         PixelFormat::Rgba8Unorm | PixelFormat::Rgba8Srgb => (png::ColorType::Rgba, level.clone()),
-        PixelFormat::R16Unorm => {
+        PixelFormat::R16Unorm | PixelFormat::Rgb16Unorm => {
             depth = png::BitDepth::Sixteen;
             // KTX2 levels are little-endian; PNG samples are big-endian.
             let swapped = level
@@ -67,7 +67,12 @@ pub fn write(texture: &EncodedTexture) -> Result<Vec<u8>, PngError> {
                 .iter()
                 .flat_map(|b| [b[1], b[0]])
                 .collect();
-            (png::ColorType::Grayscale, swapped)
+            let color = if texture.format == PixelFormat::R16Unorm {
+                png::ColorType::Grayscale
+            } else {
+                png::ColorType::Rgb
+            };
+            (color, swapped)
         }
         PixelFormat::R32Float => return Err(PngError::UnsupportedFormat(texture.format)),
     };

@@ -830,14 +830,19 @@ mod coverage {
 }
 
 mod metals {
+    use alloc::vec::Vec;
+
     use dapple_field::Value;
     use dapple_material::module::{Bind, Context, Module};
     use dapple_material::resource::NoResources;
-    use dapple_material::{ChannelId, Material, Param, Tiling};
+    use dapple_material::{Aux, ChannelId, Material, Param, Tiling};
+    use dapple_package::Package;
     use glam::Vec3;
 
+    use crate::glazed_brick::{METAL, PATINA, RUST};
     use crate::modules::calibration::{METALS, OXIDES, fresnel_f0};
-    use crate::modules::{Copper, Steel};
+    use crate::modules::{Copper, Patina, RustedSteel, Steel, WeatheredCopper};
+    use crate::packages::{RUSTED_STEEL, WEATHERED_COPPER, registry};
 
     fn build(module: &dyn Module, n: u32, bind: Bind) -> Material {
         let mut cx = Context::new(super::glazed::tile(n), &NoResources);
@@ -845,6 +850,28 @@ mod metals {
             .unwrap_or_else(|e| panic!("{e}"))
             .take_material("material")
             .unwrap()
+    }
+
+    fn scalar(m: &Material, p: Param, i: usize) -> f32 {
+        m.value(ChannelId::Param(p), i).component(0).unwrap()
+    }
+
+    fn surface(m: &Material, i: usize) -> u32 {
+        match m.value(ChannelId::Aux(Aux::Surface), i) {
+            Value::Id(id) => id,
+            other => panic!("surface {other:?}"),
+        }
+    }
+
+    /// Means of roughness and metalness over the texels `keep` admits.
+    fn means(m: &Material, keep: impl Fn(usize) -> bool) -> (f32, f32, usize) {
+        let (mut r, mut k, mut n) = (0.0, 0.0, 0);
+        for i in (0..m.grid().len()).filter(|&i| keep(i)) {
+            r += scalar(m, Param::SpecularRoughness, i);
+            k += scalar(m, Param::BaseMetalness, i);
+            n += 1;
+        }
+        (r / n.max(1) as f32, k / n.max(1) as f32, n)
     }
 
     /// The metals' F0 is the tabulated one and passes the gate computed
@@ -904,5 +931,120 @@ mod metals {
         );
         let rolled = build(&Copper, 64, Bind::new().scalar("brushing", 0.0));
         assert!(rolled.param(Param::SpecularRoughnessAnisotropy).is_none());
+    }
+
+    /// Corrosion is a dielectric laid over the metal: where it wins the
+    /// surface, metalness is at most a half, and mostly nearly 0; it is
+    /// rougher than the fresh metal. Age 0 is the metal itself.
+    #[test]
+    fn corrosion_replaces_metal_with_a_rough_dielectric() {
+        // Copper well into verdigris with bare metal left, steel rusted
+        // through rather than flashed.
+        for (asset, product, age) in [
+            (&WeatheredCopper as &dyn Module, PATINA, 0.6),
+            (&RustedSteel as &dyn Module, RUST, 0.9),
+        ] {
+            let m = build(asset, 128, Bind::new().scalar("age", age));
+            let name = asset.interface().id.name;
+            let (covered_rough, covered_metal, covered) = means(&m, |i| surface(&m, i) == product);
+            let fresh = build(asset, 128, Bind::new().scalar("age", 0.0));
+            let (bare_rough, bare_metal, _) = means(&fresh, |_| true);
+            assert!(bare_metal > 0.999, "{name}: fresh metal {bare_metal}");
+            assert!(covered > 1000, "{name}: {covered} covered");
+            assert!(covered_metal < 0.15, "{name}: metalness {covered_metal}");
+            for i in 0..m.grid().len() {
+                if surface(&m, i) == product {
+                    assert!(scalar(&m, Param::BaseMetalness, i) <= 0.5 + 1e-5);
+                }
+            }
+            assert!(
+                covered_rough > bare_rough + 0.2,
+                "{name}: {covered_rough} vs {bare_rough}"
+            );
+        }
+        let copper = build(&Copper, 64, Bind::new());
+        let mut cx = Context::new(super::glazed::tile(64), &NoResources);
+        let unaged = cx
+            .instantiate(
+                &Patina,
+                "m",
+                Bind::new()
+                    .material("base", copper.clone())
+                    .scalar("age", 0.0),
+            )
+            .unwrap()
+            .take_material("material")
+            .unwrap();
+        assert_eq!(unaged.digest(), copper.digest());
+    }
+
+    /// Aging is monotone: as `age` rises, the surface roughens and (bare
+    /// metal) loses metalness, and copper darkens before it greens.
+    #[test]
+    fn weathering_roughens_and_dulls_with_age() {
+        for asset in [&WeatheredCopper as &dyn Module, &RustedSteel] {
+            let name = asset.interface().id.name;
+            let stats: Vec<(f32, f32)> = [0.0, 0.3, 0.6, 1.0]
+                .iter()
+                .map(|&age| {
+                    let m = build(asset, 64, Bind::new().scalar("age", age));
+                    let (r, k, _) = means(&m, |_| true);
+                    (r, k)
+                })
+                .collect();
+            for pair in stats.windows(2) {
+                assert!(pair[1].0 > pair[0].0, "{name} roughness {stats:?}");
+                assert!(pair[1].1 < pair[0].1 + 1e-4, "{name} metalness {stats:?}");
+            }
+        }
+        let luminance = |age: f32| {
+            let m = build(&WeatheredCopper, 64, Bind::new().scalar("age", age));
+            let (mut y, mut n) = (0.0, 0);
+            for i in (0..m.grid().len()).filter(|&i| surface(&m, i) == METAL) {
+                if let Value::Vector3(c) = m.value(ChannelId::Param(Param::BaseColor), i) {
+                    y += crate::modules::calibration::luminance(c);
+                    n += 1;
+                }
+            }
+            y / n as f32
+        };
+        assert!(luminance(0.5) < 0.5 * luminance(0.0), "tarnish darkens");
+    }
+
+    /// Each metal's package survives a round trip, realizes its native
+    /// asset's bits, and rebuilds every preset as the native asset does
+    /// with the preset's values bound; every preset tiles.
+    #[test]
+    fn metal_packages_match_their_native_assets_at_every_preset() {
+        let engine = registry();
+        let packages: [(&str, &dyn Module); 2] = [
+            (WEATHERED_COPPER, &WeatheredCopper),
+            (RUSTED_STEEL, &RustedSteel),
+        ];
+        for (source, native) in packages {
+            let package = Package::from_json(source).expect("reads");
+            assert_eq!(Package::from_json(&package.to_json()).unwrap(), package);
+            let compiled = engine.compile(&package).expect("compiles");
+            // The package exposes the native asset's parameters, but its seed.
+            let names = |m: &dyn Module| -> Vec<(alloc::string::String, _)> {
+                m.interface()
+                    .params
+                    .into_iter()
+                    .filter(|p| p.name != "seed")
+                    .map(|p| (p.name.into_owned(), p.default))
+                    .collect()
+            };
+            assert_eq!(names(&compiled), names(native));
+            assert!(package.presets.len() >= 3);
+            let presets = package.presets.iter().map(|p| Some(p.name.as_str()));
+            for preset in core::iter::once(None).chain(presets) {
+                let bind = preset.map_or_else(Bind::new, |p| compiled.preset(p).unwrap());
+                let packaged = build(&compiled, 64, bind.clone());
+                let built = build(native, 64, bind);
+                assert_eq!(packaged.digest(), built.digest(), "{preset:?}");
+                assert_eq!(packaged.tiling(), Tiling::BOTH, "{preset:?}");
+                assert!(packaged.range_violations().is_empty(), "{preset:?}");
+            }
+        }
     }
 }

@@ -25,9 +25,11 @@
 //!   the host's or its own ([`masonry`]), all calibrated against measured
 //!   reflectance ([`modules::calibration`]).
 //! - [`modules`] also holds metals: copper cladding and riveted steel
-//!   plate, calibrated to tabulated F0.
+//!   plate, calibrated to tabulated F0, that tarnish and grow verdigris,
+//!   or rust.
 //! - [`packages`]: those modules offered to portable packages
-//!   (`dapple_package`), and the varnished board written as one.
+//!   (`dapple_package`), and the varnished board and the weathered metals
+//!   written as packages with presets.
 
 #![no_std]
 

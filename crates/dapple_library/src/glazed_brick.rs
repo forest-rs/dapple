@@ -69,6 +69,10 @@ pub const FLINT: u32 = 10;
 pub const MARBLE: u32 = 11;
 /// Surface-material identifier of bare metal (and mill scale).
 pub const METAL: u32 = 12;
+/// Surface-material identifier of copper's verdigris patina.
+pub const PATINA: u32 = 13;
+/// Surface-material identifier of rust.
+pub const RUST: u32 = 14;
 
 /// Bricks per course and courses per 1 m tile: 250 × 71 mm courses
 /// including the joints.

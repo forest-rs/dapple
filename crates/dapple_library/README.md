@@ -15,4 +15,6 @@ graph is inspectable, fingerprinted and evaluable like any other.
   streaks, efflorescence), and assets composed of them: a glazed brick
   wall, a stone sill over brickwork, a varnished board and a threshold.
 - metals: copper cladding and riveted steel plate, calibrated to tabulated
-  F0.
+  F0, with a copper patina (tarnish and verdigris) and rust; packaged as
+  weathered copper and rusted steel, each with presets from fresh to
+  heavily weathered.

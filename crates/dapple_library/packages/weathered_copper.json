@@ -1,0 +1,84 @@
+{
+  "format": "dapple.package",
+  "version": 1,
+  "interface": {
+    "module": { "name": "dapple_library.packages.weathered_copper", "version": 1 },
+    "doc": "copper cladding, as a package: copper sheet under a patina that tarnishes it, then grows verdigris where water stays and runs",
+    "params": [
+      {
+        "name": "brushing",
+        "doc": "how deeply the copper is brushed",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.3 } }
+      },
+      {
+        "name": "age",
+        "doc": "how far it has weathered: 0 bright, 1 verdigris",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.5 } }
+      },
+      {
+        "name": "wetness",
+        "doc": "how much water's paths decide where",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.6 } }
+      }
+    ],
+    "outputs": [
+      {
+        "name": "material",
+        "doc": "the cladding",
+        "type": "material",
+        "semantics": {
+          "channels": ["base_color", "base_metalness", "specular_roughness", "height"],
+          "tiling": "both"
+        }
+      }
+    ]
+  },
+  "requires": {
+    "capabilities": [
+      { "name": "dapple.graph", "version": 1 },
+      { "name": "dapple.semantics", "version": 1 }
+    ],
+    "modules": [
+      { "name": "dapple_library.copper", "version": 1 },
+      { "name": "dapple_library.patina", "version": 1 }
+    ]
+  },
+  "presets": [
+    {
+      "name": "bright",
+      "doc": "newly installed, brushed copper",
+      "values": { "brushing": { "scalar": 0.45 }, "age": { "scalar": 0.0 } }
+    },
+    {
+      "name": "tarnished",
+      "doc": "a few years out: brown tarnish, darkest where it stays wet",
+      "values": { "age": { "scalar": 0.3 } }
+    },
+    {
+      "name": "streaked",
+      "doc": "dark copper with verdigris in its crevices, washed down in streaks",
+      "values": { "age": { "scalar": 0.62 }, "wetness": { "scalar": 0.8 } }
+    },
+    {
+      "name": "verdigris",
+      "doc": "decades out: a blue-green crust over nearly everything",
+      "values": { "age": { "scalar": 1.0 } }
+    }
+  ],
+  "body": {
+    "steps": [
+      {
+        "name": "copper",
+        "module": { "name": "dapple_library.copper", "version": 1 },
+        "params": { "brushing": { "param": "brushing" } }
+      },
+      {
+        "name": "patina",
+        "module": { "name": "dapple_library.patina", "version": 1 },
+        "params": { "age": { "param": "age" }, "wetness": { "param": "wetness" } },
+        "inputs": { "base": { "output": { "step": "copper", "output": "material" } } }
+      }
+    ],
+    "outputs": { "material": { "step": "patina", "output": "material" } }
+  }
+}

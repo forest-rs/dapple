@@ -140,6 +140,7 @@ impl Metal {
 /// between its seams (oil canning, `waviness`). `brushing` scores it along
 /// `x`, from a rolled mill finish (0) to a heavy brush (1).
 ///
+/// Copper tarnishes and weathers to verdigris: see [`super::Patina`].
 #[derive(Copy, Clone, Debug, Default)]
 pub struct Copper;
 
@@ -280,6 +281,8 @@ fn canning(w: f32) -> f32 {
 /// F0 is iron's ([`IRON_F0`]); `brushing` grinds it along `x`, and
 /// `mill_scale` leaves that share of it under the hot-rolled oxide
 /// (magnetite, F0 [`MILL_SCALE_F0`]), flaking at its edges.
+///
+/// Steel rusts: see [`super::Rust`].
 #[derive(Copy, Clone, Debug, Default)]
 pub struct Steel;
 

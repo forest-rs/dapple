@@ -17,7 +17,10 @@ use dapple_material::{Channel, Grid, Material, Param};
 use glam::{Vec2, Vec3};
 
 use crate::source::{InterfaceSource, PresetSet};
-use crate::{Capability, FORMAT_VERSION, Package, PackageError, Preset, Registry, ValueSource};
+use crate::{
+    Capability, CompiledPackage, FORMAT_VERSION, Package, PackageError, Preset, Registry,
+    ValueSource,
+};
 
 fn grid() -> Grid {
     Grid {
@@ -472,4 +475,72 @@ fn interfaces_and_presets_serialize_for_native_modules() {
         again.check(&Paint.interface()),
         Err(PackageError::WrongModule { .. })
     ));
+}
+
+/// A package that runs the dirty paint package as its one step.
+const OUTER: &str = r#"{
+  "format": "dapple.package",
+  "version": 1,
+  "interface": {
+    "module": { "name": "test.outer", "version": 1 },
+    "doc": "the dirty paint package, inside another",
+    "outputs": [{ "name": "material", "type": "material" }]
+  },
+  "requires": {
+    "capabilities": [{ "name": "dapple.graph", "version": 1 }],
+    "modules": [{ "name": "test.dirty_paint_package", "version": 1 }]
+  },
+  "body": {
+    "steps": [{ "name": "inner", "module": { "name": "test.dirty_paint_package", "version": 1 } }],
+    "outputs": { "material": { "step": "inner", "output": "material" } }
+  }
+}"#;
+
+/// Two definitions under one name and version build different results, so
+/// their instances must not share a fingerprint: nothing that reuses
+/// results by fingerprint could tell them apart. Nor may packages that run
+/// them as steps.
+#[test]
+fn fingerprints_cover_a_package_definition_not_only_its_name() {
+    let fingerprint = |module: &dyn Module| {
+        let mut cx = Context::new(grid(), &NoResources);
+        let m = cx
+            .instantiate(module, "wall", Bind::new())
+            .expect("instantiates")
+            .take_material("material")
+            .expect("a material");
+        (m, cx.diagnostics().fingerprint_at("wall").expect("built"))
+    };
+    let original = Package::from_json(&source()).expect("reads");
+    let mut edited = original.clone();
+    // The same name and version, another paint color.
+    edited.body.steps[0].params.insert(
+        "color".into(),
+        crate::source::ParamBinding::Value(ValueSource::Color([0.2, 0.6, 0.4])),
+    );
+    assert_eq!(edited.interface.module, original.interface.module);
+    let (a, b) = (
+        registry().compile(&original).expect("compiles"),
+        registry().compile(&edited).expect("compiles"),
+    );
+    assert_ne!(a.fingerprint(), b.fingerprint());
+    let ((ma, fa), (mb, fb)) = (fingerprint(&a), fingerprint(&b));
+    assert_ne!(ma, mb, "the definitions build different materials");
+    assert_ne!(fa, fb, "so their instances' fingerprints differ");
+    assert_eq!(fa, fingerprint(&a).1, "stable");
+
+    let outer = Package::from_json(OUTER).expect("reads");
+    let around = |inner: CompiledPackage| {
+        #[expect(
+            clippy::arc_with_non_send_sync,
+            reason = "registries hold their modules as `Arc<dyn Module>`"
+        )]
+        let inner = Arc::new(inner);
+        registry().with(inner).compile(&outer).expect("compiles")
+    };
+    let (oa, ob) = (around(a), around(b));
+    assert_ne!(oa.fingerprint(), ob.fingerprint());
+    let ((ma, fa), (mb, fb)) = (fingerprint(&oa), fingerprint(&ob));
+    assert_ne!(ma, mb);
+    assert_ne!(fa, fb, "an outer package covers its steps' definitions");
 }

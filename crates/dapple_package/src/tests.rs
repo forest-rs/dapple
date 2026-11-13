@@ -1,6 +1,7 @@
 // Copyright 2026 the Dapple Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
@@ -355,6 +356,29 @@ fn capabilities_and_modules_are_checked_against_the_engine() {
         registry().compile(&p),
         Err(PackageError::UndeclaredDependency(_))
     ));
+}
+
+/// A package pins modules at exact versions: an engine holding another
+/// version of a pinned module refuses the package, rather than realizing it
+/// with a module it was not written against.
+#[test]
+fn a_pinned_module_version_must_match_exactly() {
+    let pinned = r#"{ "name": "test.paint", "version": 1 }"#;
+    for other in [0, 2] {
+        let moved = source().replace(
+            pinned,
+            &format!(r#"{{ "name": "test.paint", "version": {other} }}"#),
+        );
+        assert_ne!(moved, source(), "the pin is rewritten");
+        let package = Package::from_json(&moved).expect("reads");
+        assert!(
+            matches!(
+                registry().compile(&package),
+                Err(PackageError::UnknownModule(m)) if m.name == "test.paint" && m.version == other
+            ),
+            "version {other} of a module the engine holds at 1"
+        );
+    }
 }
 
 #[test]

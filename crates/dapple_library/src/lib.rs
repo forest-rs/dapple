@@ -43,6 +43,8 @@ pub mod packages;
 pub mod parquet;
 
 #[cfg(test)]
+mod golden_tests;
+#[cfg(test)]
 mod tests;
 
 /// `input` remapped from `from` to `to`, clamped to `to`.

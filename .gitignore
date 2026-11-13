@@ -8,6 +8,9 @@
 # Rust
 target/
 
+# Python bytecode from the Blender scripts
+__pycache__/
+
 # Local review output (galleries, bakes); survives cargo clean
 .local/
 

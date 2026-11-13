@@ -1890,3 +1890,46 @@ fn global_nodes_see_changes_a_failed_run_kept_from_them() {
         assert_eq!(digest(&g, node), digest(&fresh, fresh_node));
     }
 }
+
+#[test]
+fn grids_that_shrink_and_grow_back_keep_their_dependents_wired() {
+    // In the bottom half, whose blur tiles the smaller grid does not have.
+    let low = |x: f32| Op::Disk {
+        domain: domain(),
+        center: [x, 0.8],
+        radius: 0.05,
+        softness: 0.01,
+    };
+    let build = |x: f32| {
+        let mut g = MaterialGraph::with_tile_size(16);
+        let disk = g.field("disk", low(x), &[]).unwrap();
+        let map = g.realize("map", disk, 64, 64).unwrap();
+        let soft = g
+            .raster(
+                "soft",
+                RasterParams::Blur(GaussianBlur { sigma: 0.01 }),
+                map,
+            )
+            .unwrap();
+        let mip = g.mip("mip", soft, Filter::Box).unwrap();
+        (g, disk, map, soft, mip)
+    };
+    let (mut g, disk, map, soft, mip) = build(0.2);
+    g.run().unwrap();
+    // The blur takes the smaller grid and fails, so the mip does not run and
+    // keeps its wiring to the blur's 16 tiles.
+    g.set_resolution(map, 32, 32).unwrap();
+    g.set_raster_params(soft, RasterParams::Blur(GaussianBlur { sigma: -1.0 }))
+        .unwrap();
+    assert!(g.run().is_err());
+    // Back to 16 tiles: the mip sees the grid it was wired for.
+    g.set_resolution(map, 64, 64).unwrap();
+    g.set_raster_params(soft, RasterParams::Blur(GaussianBlur { sigma: 0.01 }))
+        .unwrap();
+    g.set_field_op(disk, low(0.6)).unwrap();
+    g.run().unwrap();
+
+    let (mut fresh, _, _, _, fresh_mip) = build(0.6);
+    fresh.run().unwrap();
+    assert_eq!(scalar(&g, mip).digest(), scalar(&fresh, fresh_mip).digest());
+}

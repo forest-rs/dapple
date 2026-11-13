@@ -1,0 +1,29 @@
+[package]
+name = "dapple_wind_tunnel"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Criterion benchmarks for dapple: field evaluation, rasters, graph edits and materials"
+publish = false
+
+[dependencies]
+dapple_field.workspace = true
+dapple_library.workspace = true
+glam.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[lib]
+# The library only holds shared fixtures; keeping it out of `cargo bench`
+# stops libtest from rejecting Criterion flags such as `--save-baseline`.
+bench = false
+
+[[bench]]
+name = "field"
+harness = false
+
+[lints]
+workspace = true

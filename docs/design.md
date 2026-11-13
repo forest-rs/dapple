@@ -668,10 +668,10 @@ starts.
 | `dapple_compress` | Block compression and Zstandard supercompression of encoded textures, through `ctt` | std |
 | `tools/dapple_bake` | Bakes the recipes a TOML manifest lists | std |
 | `examples/*` | Material gallery (plane, sphere and draped-cloth previews through lightweald and Blender), wood/stone/brick/bark studies | std |
+| `benchmarks/dapple_wind_tunnel` | Criterion wind tunnels over deterministic fixtures; its README lists the benchmarks | std |
 
 Plus the shared `openpbr` crate outside dapple (see above). Not yet built: a
-leaf-only `dapple` facade crate, and `benchmarks/*` wind tunnels (samples per
-second per op, tile realize and cache, incremental edit latency).
+leaf-only `dapple` facade crate.
 
 **Dependencies:**
 - `glam`, for math;

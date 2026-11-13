@@ -1383,9 +1383,6 @@ fn run_raster(
             (RasterData::Scalar(r), t)
         }
     };
-    if !same {
-        state.output = None;
-    }
     let changed = settle(tiles, node, state, &data, &recomputed, dirty.is_none());
     let out = RasterValue {
         data,
@@ -1484,9 +1481,6 @@ fn run_mip(
         next.values().to_vec(),
     )
     .map_err(NodeError::Raster)?;
-    if !same {
-        state.output = None;
-    }
     let data = RasterData::Scalar(level);
     let changed = settle(tiles, node, state, &data, &recomputed, dirty.is_none());
     let out = RasterValue {

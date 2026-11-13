@@ -1933,3 +1933,36 @@ fn grids_that_shrink_and_grow_back_keep_their_dependents_wired() {
     fresh.run().unwrap();
     assert_eq!(scalar(&g, mip).digest(), scalar(&fresh, fresh_mip).digest());
 }
+
+#[test]
+fn whole_recomputes_mark_only_the_tiles_that_changed() {
+    let mut g = MaterialGraph::with_tile_size(16);
+    let disk = g.field("disk", disk_op(0.2), &[]).unwrap();
+    let map = g.realize("map", disk, 64, 64).unwrap();
+    let dilate = |radius| {
+        RasterParams::Morphology(Morphology {
+            op: MorphologyOp::Dilate,
+            radius,
+        })
+    };
+    let grown = g.raster("grown", dilate(0.0), map).unwrap();
+    g.raster(
+        "soft",
+        RasterParams::Blur(GaussianBlur { sigma: 0.01 }),
+        grown,
+    )
+    .unwrap();
+    g.run().unwrap();
+    // A disk far narrower than a texel is still the identity: the dilation
+    // recomputes whole for its new operation, but no tile's bits change, so
+    // the blur reuses every tile.
+    g.set_raster_params(grown, dilate(0.001)).unwrap();
+    let summary = g.run().unwrap();
+    assert_eq!(summary.executed_nodes, 2, "{summary:?}");
+    let report = g.tile_report();
+    assert_eq!(
+        (report.tiles_recomputed, report.tiles_changed),
+        (16, 0),
+        "{report:?}"
+    );
+}

@@ -2237,7 +2237,7 @@ impl FieldProgram {
                 let (value, gradient) = self.gradient_at(input, q, moved);
                 (value, warp_chain(gradient, [gx, gy], amount))
             }
-            ref kernel => {
+            _ => {
                 let mut values = [Value::Scalar(0.0); 3];
                 let mut gradients = [Vec3::ZERO; 3];
                 let mut count = 0;
@@ -2245,25 +2245,37 @@ impl FieldProgram {
                     (values[count], gradients[count]) = self.gradient_at(input, p, footprint);
                     count += 1;
                 }
-                let value = kernel.combine(p, footprint, &values[..count]);
-                let gradient = kernel
-                    .gradient(p, footprint, &values[..count], &gradients[..count])
-                    .unwrap_or_else(|| self.numeric_gradient(id, value, p, footprint));
-                (value, gradient)
+                self.pure_gradient(id, p, footprint, &values[..count], &gradients[..count])
             }
         }
+    }
+
+    /// Pure node `id`'s value and gradient at `p` from its operands' values
+    /// and gradients: a leaf kernel evaluated once for both where it can be,
+    /// otherwise [`Kernel::combine`] and the closed-form or numeric gradient.
+    pub(super) fn pure_gradient(
+        &self,
+        id: NodeId,
+        p: Vec3,
+        footprint: Footprint,
+        values: &[Value],
+        gradients: &[Vec3],
+    ) -> (Value, Vec3) {
+        let kernel = &self.nodes[id.0 as usize].kernel;
+        if let Some((value, gradient)) = kernel.value_and_gradient(p, footprint) {
+            return (Value::Scalar(value), gradient);
+        }
+        let value = kernel.combine(p, footprint, values);
+        let gradient = kernel
+            .gradient(p, footprint, values, gradients)
+            .unwrap_or_else(|| self.numeric_gradient(id, value, p, footprint));
+        (value, gradient)
     }
 
     /// Central differences of node `id` around `p`, zero for vector values.
     ///
     /// Planar nodes step along `x` and `y` only.
-    pub(super) fn numeric_gradient(
-        &self,
-        id: NodeId,
-        value: Value,
-        p: Vec3,
-        footprint: Footprint,
-    ) -> Vec3 {
+    fn numeric_gradient(&self, id: NodeId, value: Value, p: Vec3, footprint: Footprint) -> Vec3 {
         if value.scalar().is_none() {
             return Vec3::ZERO;
         }
@@ -2424,6 +2436,31 @@ impl Kernel {
                 let (a, b, t) = (s(0)?, s(1)?, s(2)?);
                 gradients[0] + (gradients[1] - gradients[0]) * t + gradients[2] * (b - a)
             }
+            _ => return None,
+        })
+    }
+
+    /// A leaf kernel's value and gradient from one evaluation, or `None` for
+    /// the other kernels.
+    ///
+    /// Only kernels whose `eval_gradient` runs `eval`'s arithmetic for the
+    /// value, one generic body with the gradient as a side output, answer:
+    /// their value is the bits [`Self::combine`] gives, so an instance that
+    /// needs both does not evaluate the kernel twice. Scatters and image
+    /// samples read images through different paths for the value and the
+    /// gradient, so they are evaluated as before.
+    fn value_and_gradient(&self, p: Vec3, footprint: Footprint) -> Option<(f32, Vec3)> {
+        let q = p.truncate();
+        let planar = |(value, gradient): (f32, Vec2)| (value, gradient.extend(0.0));
+        Some(match *self {
+            Self::Noise(ref noise) => planar(noise.eval_gradient(q, footprint)),
+            Self::Fractal(ref fractal) => planar(fractal.eval_gradient(q, footprint)),
+            Self::Cellular(ref cellular) => planar(cellular.eval_gradient(q, footprint)),
+            Self::Tiling(ref tiling) => planar(tiling.eval_gradient(q, footprint)),
+            Self::Disk(ref disk) => planar(disk.eval_gradient(q, footprint)),
+            Self::Noise3(ref noise) => noise.eval_gradient(p, footprint),
+            Self::Fractal3(ref fractal) => fractal.eval_gradient(p, footprint),
+            Self::Cellular3(ref cellular) => cellular.eval_gradient(p, footprint),
             _ => return None,
         })
     }
@@ -4327,6 +4364,160 @@ mod tests {
                     "at {p}: {analytic} vs {numeric}"
                 );
                 assert!(gradient.is_finite());
+            }
+        }
+    }
+
+    /// Points that reach every branch of a lattice kernel: random points
+    /// near and far from the origin on both signs, period and cell
+    /// boundaries, and NaN coordinates. (Infinite coordinates overflow the
+    /// lattice's cell arithmetic, which debug builds reject.)
+    fn awkward_points() -> Vec<Vec3> {
+        let mut points = Vec::new();
+        for i in 0..200_u64 {
+            let h = hash(0x7465_7374, &[i]);
+            let unit = |shift: u32| crate::hash::unit_f32(h.rotate_left(shift)) * 2.0 - 1.0;
+            let scale = [1.0, 4.0, 1e3, 1e6][(i % 4) as usize];
+            points.push(Vec3::new(unit(0), unit(21), unit(42)) * scale);
+        }
+        let below_one = 1.0 - f32::EPSILON;
+        let edges = [0.0, -0.0, 1.0, -1.0, 0.5, 2.0, 1e-30, -1e-30, below_one];
+        for v in edges {
+            points.push(Vec3::splat(v));
+            points.push(Vec3::new(v, -v, 0.25));
+        }
+        for v in [f32::NAN, 1e15, -1e15] {
+            points.push(Vec3::splat(v));
+            points.push(Vec3::new(0.3, v, 0.7));
+            points.push(Vec3::new(v, 0.3, 0.7));
+        }
+        points
+    }
+
+    /// A leaf evaluated once for its value and gradient gives the bits its
+    /// plain evaluation gives, for every kernel that does it, so gradient
+    /// instances (warp displacements, normals) are not evaluated twice and
+    /// lose nothing by it.
+    #[test]
+    fn leaves_evaluated_with_their_gradient_keep_their_value_bits() {
+        let plane = Domain::Plane;
+        let torus = torus();
+        let space = Domain3::Space;
+        let solid = Domain3::periodic(1, 1, 2).unwrap();
+        let fractal = |kind, octaves| FractalParams {
+            kind,
+            octaves,
+            ..FractalParams::default()
+        };
+        let mut ops = Vec::new();
+        for (domain, domain3) in [(plane, space), (torus, solid)] {
+            for basis in [Basis::Value, Basis::Gradient] {
+                ops.push(Op::Noise {
+                    basis,
+                    domain,
+                    frequency: [4.0, 6.0],
+                    seed: 3,
+                });
+                ops.push(Op::Noise3 {
+                    basis,
+                    domain: domain3,
+                    frequency: [2.0, 3.0, 4.0],
+                    seed: 3,
+                });
+                for kind in [FractalKind::Fbm, FractalKind::Ridged] {
+                    ops.push(Op::Fractal {
+                        basis,
+                        domain,
+                        frequency: [2.0, 3.0],
+                        seed: 4,
+                        params: fractal(kind, 6),
+                    });
+                    ops.push(Op::Fractal3 {
+                        basis,
+                        domain: domain3,
+                        frequency: [2.0, 1.0, 2.0],
+                        seed: 4,
+                        params: fractal(kind, 4),
+                    });
+                }
+            }
+            for output in [
+                CellOutput::F1,
+                CellOutput::F2,
+                CellOutput::F2MinusF1,
+                CellOutput::Border,
+                CellOutput::CellValue,
+            ] {
+                ops.push(Op::Cellular {
+                    domain,
+                    frequency: [4.0, 2.0],
+                    jitter: 0.8,
+                    seed: 5,
+                    output,
+                });
+                ops.push(Op::Cellular3 {
+                    domain: domain3,
+                    frequency: [2.0, 2.0, 4.0],
+                    jitter: 0.8,
+                    seed: 5,
+                    output,
+                });
+            }
+            for pattern in [
+                Pattern::Bond {
+                    frequency: [4.0, 8.0],
+                    shift: 0.5,
+                },
+                Pattern::Herringbone {
+                    frequency: 4.0,
+                    ratio: 2,
+                },
+            ] {
+                for output in [
+                    TileOutput::Edge,
+                    TileOutput::U,
+                    TileOutput::V,
+                    TileOutput::Vertical,
+                    TileOutput::TileValue,
+                ] {
+                    ops.push(Op::Tiling {
+                        domain,
+                        pattern,
+                        seed: 6,
+                        output,
+                    });
+                }
+            }
+            for softness in [0.0, 0.1] {
+                ops.push(Op::Disk {
+                    domain,
+                    center: [1.0, 0.5],
+                    radius: 0.25,
+                    softness,
+                });
+            }
+        }
+        let footprints =
+            [0.0, 1e-6, 1.0 / 256.0, 0.02, 0.07, 0.3, 1e6].map(|w| Footprint::new(w).unwrap());
+        let points = awkward_points();
+        for op in ops {
+            let mut b = ProgramBuilder::new();
+            let id = b.add(op.clone()).unwrap();
+            let kernel = &b.nodes[id.0 as usize].kernel;
+            for footprint in footprints {
+                for &p in &points {
+                    let (value, _) = kernel
+                        .value_and_gradient(p, footprint)
+                        .unwrap_or_else(|| panic!("{op:?} is evaluated with its gradient"));
+                    let Value::Scalar(plain) = kernel.combine(p, footprint, &[]) else {
+                        panic!("{op:?} is scalar");
+                    };
+                    assert_eq!(
+                        value.to_bits(),
+                        plain.to_bits(),
+                        "{op:?} at {p} with {footprint:?}"
+                    );
+                }
             }
         }
     }

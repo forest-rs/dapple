@@ -385,7 +385,9 @@ impl Lattice3 {
         }
     }
 
-    /// Wraps a cell index onto the period, for hashing.
+    /// Wraps a cell index onto the period, for hashing: the kernels'
+    /// reference implementations, which wrap every cell of a block.
+    #[cfg(test)]
     pub(crate) fn wrap_cell(self, cell: [i64; 3]) -> [i64; 3] {
         match self.wrap {
             None => cell,
@@ -397,9 +399,9 @@ impl Lattice3 {
         }
     }
 
-    /// Wraps one coordinate of a cell index on `axis` onto the period, as
-    /// [`Self::wrap_cell`] does, for kernels that wrap a row, column or
-    /// layer of cells once rather than every cell of a block.
+    /// Wraps one coordinate of a cell index on `axis` onto the period, for
+    /// kernels that wrap a row, column or layer of cells once rather than
+    /// every cell of a block.
     pub(crate) fn wrap_axis(self, axis: usize, index: i64) -> i64 {
         match self.wrap {
             None => index,

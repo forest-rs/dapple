@@ -794,13 +794,9 @@ impl Cellular3 {
         }
     }
 
-    fn feature(&self, cell: [i64; 3], offset: [i8; 3]) -> (Vec3, u64) {
-        let [wx, wy, wz] = self.lattice.wrap_cell([
-            cell[0] + i64::from(offset[0]),
-            cell[1] + i64::from(offset[1]),
-            cell[2] + i64::from(offset[2]),
-        ]);
-        let id = hash(self.seed, &[FEATURE_TAG, key(wx), key(wy), key(wz)]);
+    /// Feature point of the cell `offset` steps from the query cell, whose
+    /// id (its hash) is `id`, relative to the query cell's corner.
+    fn feature(&self, id: u64, offset: [i8; 3]) -> Vec3 {
         let jitter = Vec3::new(
             unit_f32(hash(id, &[0])) - 0.5,
             unit_f32(hash(id, &[1])) - 0.5,
@@ -811,7 +807,58 @@ impl Cellular3 {
             f32::from(offset[1]),
             f32::from(offset[2]),
         );
-        (corner + Vec3::splat(0.5) + jitter, id)
+        corner + Vec3::splat(0.5) + jitter
+    }
+
+    /// The feature points and ids of the 7 × 7 × 7 cells around `cell`,
+    /// rows within layers from the bottom, relative to `cell`'s corner.
+    ///
+    /// Inlined, so that the 8 KiB result is built in place rather than
+    /// copied out.
+    #[inline]
+    fn neighborhood(&self, cell: [i64; 3]) -> [(Vec3, u64); 343] {
+        // A cell's id is `hash(seed, [FEATURE_TAG, x, y, z])` of its wrapped
+        // index. The hash folds its keys from the left, so the seed-and-tag
+        // prefix is mixed once, each column's `x` once, each column and
+        // row's `y` once, and each cell's `z` last: one mix per cell instead
+        // of four for the same bits, and one wrap per column, row and layer
+        // rather than three per cell.
+        let prefix = mix(self.seed, FEATURE_TAG);
+        let offsets = [-3, -2, -1, 0, 1, 2, 3_i8];
+        let wrap =
+            |axis: usize, d: i8| key(self.lattice.wrap_axis(axis, cell[axis] + i64::from(d)));
+        let mut columns = [0_u64; 7];
+        let mut rows = [0_u64; 7];
+        let mut layers = [0_u64; 7];
+        for (i, d) in offsets.into_iter().enumerate() {
+            columns[i] = mix(prefix, wrap(0, d));
+            rows[i] = wrap(1, d);
+            layers[i] = wrap(2, d);
+        }
+        let mut lines = [[0_u64; 7]; 7];
+        for (strip, row) in lines.iter_mut().zip(rows) {
+            for (line, column) in strip.iter_mut().zip(columns) {
+                *line = mix(column, row);
+            }
+        }
+        let mut points = [(Vec3::ZERO, 0_u64); 343];
+        for ((dz, layer), block) in offsets
+            .into_iter()
+            .zip(layers)
+            .zip(points.as_chunks_mut::<49>().0)
+        {
+            for ((dy, strip), slots) in offsets
+                .into_iter()
+                .zip(&lines)
+                .zip(block.as_chunks_mut::<7>().0)
+            {
+                for ((dx, &line), slot) in offsets.into_iter().zip(strip).zip(slots) {
+                    let id = mix(line, layer);
+                    *slot = (self.feature(id, [dx, dy, dz]), id);
+                }
+            }
+        }
+        points
     }
 
     /// The lookup at `p` and, when `GRADIENT`, the in-cell gradients of
@@ -819,16 +866,7 @@ impl Cellular3 {
     fn sample<const GRADIENT: bool>(&self, p: Vec3) -> (CellSample3, [Vec3; 3]) {
         let at = self.lattice.locate(p);
         let q = at.frac;
-        let mut points = [(Vec3::ZERO, 0_u64); 343];
-        let mut slot = 0;
-        for dz in -3..=3_i8 {
-            for dy in -3..=3_i8 {
-                for dx in -3..=3_i8 {
-                    points[slot] = self.feature(at.cell, [dx, dy, dz]);
-                    slot += 1;
-                }
-            }
-        }
+        let points = self.neighborhood(at.cell);
         let mut nearest = (f32::INFINITY, 0);
         let mut second = (f32::INFINITY, 0);
         for (index, (point, _)) in points.iter().enumerate() {
@@ -1089,6 +1127,29 @@ mod tests {
         )
     }
 
+    /// [`Cellular3`]'s feature point of the cell `offset` steps from `cell`
+    /// as first written, hashing the cell in full: the reference its
+    /// hoisted neighborhoods must match bit for bit.
+    fn reference_feature(cellular: &Cellular3, cell: [i64; 3], offset: [i8; 3]) -> (Vec3, u64) {
+        let [wx, wy, wz] = cellular.lattice.wrap_cell([
+            cell[0] + i64::from(offset[0]),
+            cell[1] + i64::from(offset[1]),
+            cell[2] + i64::from(offset[2]),
+        ]);
+        let id = hash(cellular.seed, &[FEATURE_TAG, key(wx), key(wy), key(wz)]);
+        let jitter = Vec3::new(
+            unit_f32(hash(id, &[0])) - 0.5,
+            unit_f32(hash(id, &[1])) - 0.5,
+            unit_f32(hash(id, &[2])) - 0.5,
+        ) * cellular.jitter;
+        let corner = Vec3::new(
+            f32::from(offset[0]),
+            f32::from(offset[1]),
+            f32::from(offset[2]),
+        );
+        (corner + Vec3::splat(0.5) + jitter, id)
+    }
+
     /// Lattices for the bit-identity tests: unwrapped, one cell per period
     /// on every axis or on one, and several cells per period.
     fn test_lattices() -> [(Domain3, Vec3); 5] {
@@ -1234,6 +1295,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn neighborhoods_match_cells_hashed_one_by_one() {
+        for (domain, frequency) in test_lattices() {
+            for (seed, jitter) in [(9, 0.8), (0, 1.0), (u64::MAX, 0.0)] {
+                let cellular = Cellular3::new(domain, frequency, jitter, seed).unwrap();
+                for i in 0..96_u64 {
+                    let h = hash(0x0063_656c_6c33, &[i]);
+                    let scale = [4_i64, 1 << 20, 1 << 40, 1 << 61][(i % 4) as usize];
+                    let cell = [
+                        h.cast_signed() % scale,
+                        (h >> 3).cast_signed() % scale,
+                        h.rotate_left(17).cast_signed() % scale,
+                    ];
+                    let points = cellular.neighborhood(cell);
+                    let mut slot = 0;
+                    for dz in -3..=3_i8 {
+                        for dy in -3..=3_i8 {
+                            for dx in -3..=3_i8 {
+                                let (point, id) = reference_feature(&cellular, cell, [dx, dy, dz]);
+                                assert_eq!(points[slot].1, id, "{domain:?} cell {cell:?}");
+                                assert_eq!(
+                                    points[slot].0.to_array().map(f32::to_bits),
+                                    point.to_array().map(f32::to_bits),
+                                    "{domain:?} cell {cell:?}"
+                                );
+                                slot += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn points(count: usize, scale: f32, seed: u64) -> Vec<Vec3> {
         (0..count)
             .map(|i| {
@@ -1330,7 +1425,7 @@ mod tests {
             for dz in -5..=5_i8 {
                 for dy in -5..=5_i8 {
                     for dx in -5..=5_i8 {
-                        let (point, _) = cellular.feature(at.cell, [dx, dy, dz]);
+                        let (point, _) = reference_feature(&cellular, at.cell, [dx, dy, dz]);
                         d.push((point - at.frac).length_squared());
                     }
                 }

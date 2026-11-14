@@ -443,3 +443,38 @@ fn scalar_batches_need_a_scalar_output() {
         .evaluator()
         .eval_batch(&[Vec2::ZERO], Footprint::POINT, &mut out);
 }
+
+#[test]
+fn values_independent_of_the_point_are_computed_once() {
+    let domain = Domain::periodic(1, 1).unwrap();
+    let mut b = ProgramBuilder::new();
+    let x = b
+        .add(Op::Constant {
+            domain,
+            value: 0.25,
+        })
+        .unwrap();
+    let y = b.add(Op::Constant { domain, value: 0.5 }).unwrap();
+    let sum = b.add(Op::Add { a: x, b: y }).unwrap();
+    let square = b.add(Op::Mul { a: sum, b: sum }).unwrap();
+    let total = b.add(Op::Add { a: square, b: sum }).unwrap();
+    let constant = b.clone().finish(total).unwrap();
+    assert_eq!(constant.plan.steps(), 0, "nothing is left per point");
+    assert_eq!(constant.evaluation_stats().instances, 5);
+    let p = Vec2::new(0.3, 0.6);
+    assert_eq!(
+        constant.evaluator().eval(p, Footprint::POINT).to_bits(),
+        constant.eval_node(total, p, Footprint::POINT).to_bits()
+    );
+    // Arithmetic reading the point stays, constants feeding it do not.
+    let noise = b
+        .add(Op::Noise {
+            basis: Basis::Gradient,
+            domain,
+            frequency: [2.0, 2.0],
+            seed: 1,
+        })
+        .unwrap();
+    let scaled = b.add(Op::Mul { a: noise, b: total }).unwrap();
+    assert_eq!(b.finish(scaled).unwrap().plan.steps(), 2);
+}

@@ -2467,6 +2467,47 @@ impl Kernel {
         })
     }
 
+    /// Whether [`Self::combine`] reads only the operands, not the point or
+    /// the footprint.
+    const fn is_pointwise(&self) -> bool {
+        match self {
+            Self::Constant(_)
+            | Self::Length(_)
+            | Self::Fract(_)
+            | Self::Atan2(..)
+            | Self::Binary(..)
+            | Self::Abs(_)
+            | Self::Clamp(..)
+            | Self::Remap { .. }
+            | Self::Mix(..)
+            | Self::Vector2(..)
+            | Self::Vector3(..)
+            | Self::Component(..)
+            | Self::AsMask(_)
+            | Self::ToId(..)
+            | Self::Normalize(_)
+            | Self::Direction(_)
+            | Self::Angle(_)
+            | Self::Coherence(_) => true,
+            Self::Noise(_)
+            | Self::Fractal(_)
+            | Self::Cellular(_)
+            | Self::Tiling(_)
+            | Self::Scatter(_)
+            | Self::Disk(_)
+            | Self::Sample(_)
+            | Self::Noise3(_)
+            | Self::Fractal3(_)
+            | Self::Cellular3(_)
+            | Self::Position3
+            | Self::Transform { .. }
+            | Self::Transform3 { .. }
+            | Self::Slice { .. }
+            | Self::Pass(_)
+            | Self::Warp { .. } => false,
+        }
+    }
+
     /// Evaluates a pure kernel from its operands' values, in operand order.
     fn combine(&self, p: Vec3, footprint: Footprint, args: &[Value]) -> Value {
         let scalar = |i: usize| args[i].scalar().expect("operand types were checked");

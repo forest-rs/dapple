@@ -7,7 +7,7 @@ use glam::Vec2;
 
 use crate::domain::{Domain, DomainError, Footprint, Lattice};
 use crate::field::ScalarField;
-use crate::hash::{hash, key, unit_f32};
+use crate::hash::{key, mix, unit_f32};
 
 /// Purpose tag for lattice-corner hashes.
 const LATTICE_TAG: u64 = 0x006c_6174_7469_6365; // "lattice"
@@ -380,15 +380,21 @@ fn lattice_eval<const GRADIENT: bool>(
         f.y -= 1.0;
         cell[1] += 1;
     }
-    let corner = |dx: i64, dy: i64| -> u64 {
-        let [x, y] = lattice.wrap_cell([cell[0] + dx, cell[1] + dy]);
-        hash(seed, &[LATTICE_TAG, key(x), key(y)])
-    };
+    // A corner's hash is `hash(seed, [LATTICE_TAG, x, y])` of its wrapped
+    // cell. The hash folds its keys from the left, so every corner shares
+    // the seed-and-tag prefix and every corner of a column its `x` prefix:
+    // mixing those once per octave and per column leaves one mix per corner
+    // instead of three, for the same bits, and wraps each row and column
+    // once rather than at every corner.
+    let prefix = mix(seed, LATTICE_TAG);
+    let column = |dx: i64| mix(prefix, key(lattice.wrap_axis(0, cell[0] + dx)));
+    let row = |dy: i64| key(lattice.wrap_axis(1, cell[1] + dy));
     // Gradients below are per cell; the in-cell position moves `frequency`
     // cells per domain unit.
     match basis {
         Basis::Value => {
-            let [h00, h10, h01, h11] = [corner(0, 0), corner(1, 0), corner(0, 1), corner(1, 1)];
+            let (x0, x1, y0, y1) = (column(0), column(1), row(0), row(1));
+            let [h00, h10, h01, h11] = [mix(x0, y0), mix(x1, y0), mix(x0, y1), mix(x1, y1)];
             let (u, v) = (fade(f.x), fade(f.y));
             let value = |h: u64| unit_f32(h) * 2.0 - 1.0;
             let (a, b, c, d) = (value(h00), value(h10), value(h01), value(h11));
@@ -405,15 +411,23 @@ fn lattice_eval<const GRADIENT: bool>(
         Basis::Gradient => {
             let mut sum = 0.0;
             let mut gradient = Vec2::ZERO;
-            for dy in -1..=2_i64 {
-                for dx in -1..=2_i64 {
+            // Written out rather than `array::map`, which is not always inlined.
+            let columns = [column(-1), column(0), column(1), column(2)];
+            let rows = [row(-1), row(0), row(1), row(2)];
+            for (dy, row) in (-1..=2_i64).zip(rows) {
+                for (dx, column) in (-1..=2_i64).zip(columns) {
                     #[expect(clippy::cast_precision_loss, reason = "offsets are small integers")]
                     let d = Vec2::new(f.x - dx as f32, f.y - dy as f32);
                     let r2 = d.length_squared();
-                    if r2 >= KERNEL_RADIUS_SQ {
-                        continue;
-                    }
-                    let h = corner(dx, dy);
+                    // Corners outside the kernel add nothing. Which those are
+                    // changes from point to point, so every corner is computed
+                    // and the outside ones' terms are dropped by a select, not
+                    // skipped by a branch that mispredicts. Adding zero keeps
+                    // the sums' bits: they start at +0, and a float sum is −0
+                    // only when both terms are. A NaN distance is not
+                    // outside, as it was not when this was a `continue`.
+                    let outside = r2 >= KERNEL_RADIUS_SQ;
+                    let h = mix(column, row);
                     // The top byte picks the gradient; the next 24 bits give
                     // the corner's value.
                     let [gx, gy] = GRADIENTS[(h >> 56) as usize];
@@ -425,11 +439,12 @@ fn lattice_eval<const GRADIENT: bool>(
                     let t = 1.0 - r2 / KERNEL_RADIUS_SQ;
                     let t2 = t * t;
                     let term = gx * d.x + gy * d.y + VALUE_WEIGHT * value;
-                    sum += t2 * t2 * term;
+                    sum += if outside { 0.0 } else { t2 * t2 * term };
                     if GRADIENT {
                         // d/dd of t⁴·term: 4t³·(−2d/R²)·term + t⁴·g.
                         let dk = -8.0 * t2 * t / KERNEL_RADIUS_SQ;
-                        gradient += d * (dk * term) + Vec2::new(gx, gy) * (t2 * t2);
+                        let g = d * (dk * term) + Vec2::new(gx, gy) * (t2 * t2);
+                        gradient += if outside { Vec2::ZERO } else { g };
                     }
                 }
             }
@@ -516,6 +531,127 @@ impl ScalarField for Noise {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hash::hash;
+    use alloc::vec::Vec;
+
+    /// [`lattice_eval`] as first written, hashing every corner in full:
+    /// the reference its hoisted hashing must match bit for bit.
+    fn reference_eval<const GRADIENT: bool>(
+        basis: Basis,
+        lattice: Lattice,
+        seed: u64,
+        offset: Vec2,
+        p: Vec2,
+    ) -> (f32, Vec2) {
+        let at = lattice.locate(p);
+        let mut cell = at.cell;
+        let mut f = at.frac + offset;
+        if f.x >= 1.0 {
+            f.x -= 1.0;
+            cell[0] += 1;
+        }
+        if f.y >= 1.0 {
+            f.y -= 1.0;
+            cell[1] += 1;
+        }
+        let corner = |dx: i64, dy: i64| -> u64 {
+            let [x, y] = lattice.wrap_cell([cell[0] + dx, cell[1] + dy]);
+            hash(seed, &[LATTICE_TAG, key(x), key(y)])
+        };
+        match basis {
+            Basis::Value => {
+                let [h00, h10, h01, h11] = [corner(0, 0), corner(1, 0), corner(0, 1), corner(1, 1)];
+                let (u, v) = (fade(f.x), fade(f.y));
+                let value = |h: u64| unit_f32(h) * 2.0 - 1.0;
+                let (a, b, c, d) = (value(h00), value(h10), value(h01), value(h11));
+                let bottom = lerp(a, b, u);
+                let top = lerp(c, d, u);
+                let result = lerp(bottom, top, v);
+                if !GRADIENT {
+                    return (result, Vec2::ZERO);
+                }
+                let dfx = ((b - a) + ((d - c) - (b - a)) * v) * fade_derivative(f.x);
+                let dfy = (top - bottom) * fade_derivative(f.y);
+                (result, Vec2::new(dfx, dfy) * lattice.frequency)
+            }
+            Basis::Gradient => {
+                let mut sum = 0.0;
+                let mut gradient = Vec2::ZERO;
+                for dy in -1..=2_i64 {
+                    for dx in -1..=2_i64 {
+                        let d = Vec2::new(f.x - dx as f32, f.y - dy as f32);
+                        let r2 = d.length_squared();
+                        if r2 >= KERNEL_RADIUS_SQ {
+                            continue;
+                        }
+                        let h = corner(dx, dy);
+                        let [gx, gy] = GRADIENTS[(h >> 56) as usize];
+                        let value =
+                            ((h >> 32) & 0xFF_FFFF) as f32 * (1.0 / 16_777_216.0) * 2.0 - 1.0;
+                        let t = 1.0 - r2 / KERNEL_RADIUS_SQ;
+                        let t2 = t * t;
+                        let term = gx * d.x + gy * d.y + VALUE_WEIGHT * value;
+                        sum += t2 * t2 * term;
+                        if GRADIENT {
+                            let dk = -8.0 * t2 * t / KERNEL_RADIUS_SQ;
+                            gradient += d * (dk * term) + Vec2::new(gx, gy) * (t2 * t2);
+                        }
+                    }
+                }
+                (
+                    sum * GRADIENT_SCALE,
+                    gradient * GRADIENT_SCALE * lattice.frequency,
+                )
+            }
+        }
+    }
+
+    #[test]
+    fn hoisted_corner_hashes_match_the_reference_bit_for_bit() {
+        let lattices = [
+            (Domain::Plane, Vec2::new(0.37, 5.0)),
+            (Domain::periodic(1, 1).unwrap(), Vec2::ONE),
+            (Domain::periodic(1, 1).unwrap(), Vec2::new(8.0, 3.0)),
+            (Domain::periodic(2, 3).unwrap(), Vec2::new(1.5, 2.0)),
+        ]
+        .map(|(domain, frequency)| Lattice::new(domain, frequency).unwrap());
+        let mut points = Vec::new();
+        for i in 0..512_u64 {
+            let h = hash(0x6e_6f69_7365, &[i]);
+            let unit = |shift: u32| unit_f32(h.rotate_left(shift)) * 2.0 - 1.0;
+            let scale = [1.0, 3.0, 1e3, 1e6][(i % 4) as usize];
+            points.push(Vec2::new(unit(0), unit(32)) * scale);
+        }
+        let below_one = 1.0 - f32::EPSILON;
+        let edges = [0.0, -0.0, 1.0, -1.0, 0.5, below_one, 1e-30, f32::NAN, 1e12];
+        for v in edges {
+            points.extend([Vec2::splat(v), Vec2::new(v, 0.3), Vec2::new(-0.7, v)]);
+        }
+        let offsets = [
+            Vec2::ZERO,
+            Vec2::new(0.5, 0.25),
+            Vec2::splat(1.0 - f32::EPSILON),
+        ];
+        let bits = |(v, g): (f32, Vec2)| [v.to_bits(), g.x.to_bits(), g.y.to_bits()];
+        for basis in [Basis::Value, Basis::Gradient] {
+            for lattice in lattices {
+                for (seed, offset) in [0, 7, u64::MAX].into_iter().zip(offsets) {
+                    for &p in &points {
+                        assert_eq!(
+                            bits(lattice_eval::<false>(basis, lattice, seed, offset, p)),
+                            bits(reference_eval::<false>(basis, lattice, seed, offset, p)),
+                            "{basis:?} {lattice:?} seed {seed} at {p}"
+                        );
+                        assert_eq!(
+                            bits(lattice_eval::<true>(basis, lattice, seed, offset, p)),
+                            bits(reference_eval::<true>(basis, lattice, seed, offset, p)),
+                            "{basis:?} {lattice:?} seed {seed} at {p}, with gradient"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn gradients_are_unit_length() {

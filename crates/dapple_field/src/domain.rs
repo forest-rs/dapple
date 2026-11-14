@@ -298,6 +298,16 @@ impl Lattice {
             Some(n) => [cell[0].rem_euclid(n[0]), cell[1].rem_euclid(n[1])],
         }
     }
+
+    /// Wraps one coordinate of a cell index on `axis` onto the period, as
+    /// [`Self::wrap_cell`] does, for kernels that wrap a row or column of
+    /// cells once rather than every cell of a block.
+    pub(crate) fn wrap_axis(self, axis: usize, index: i64) -> i64 {
+        match self.wrap {
+            None => index,
+            Some(n) => index.rem_euclid(n[axis]),
+        }
+    }
 }
 
 /// A scaled 3D integer lattice, wrapped on periodic domains.

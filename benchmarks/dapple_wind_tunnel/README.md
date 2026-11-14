@@ -35,7 +35,14 @@ unit period, at the footprint of one texel of a 256 texel raster, and reports
 elements per second, so the numbers are per sample.
 
 - `field/raw/*`: `Noise`, five-octave `Fractal` and `Cellular` called
-  directly, the floor the programs are built on.
+  directly, the floor the programs are built on; and their solid
+  counterparts, `noise3_*`, `fractal3_5_octaves` and `cellular3_f1`, on
+  the same grid lifted onto the plane `z = (x + y) / 2` through the unit
+  cube. `noise3_gradient_with_gradient` is `eval_gradient`, the path a
+  gradient instance takes.
+- `field/solid/oak_wood/eval_chart`: the library's solid oak wood (its red
+  channel) by `SolidProgram::eval_chart` at points on the wood module's
+  board face, the path a chart bake takes.
 - `field/program/<program>/*`: scalar programs. `eval` is
   `ScalarField::eval`, one call per point; `evaluator` keeps one
   `Evaluator` across the points; `batch` is `ScalarField::eval_batch`;
@@ -47,7 +54,9 @@ The programs: `trivial` is a few constants with a shared subgraph, so nearly
 all of its cost is per-call setup, which isolates what a per-call evaluator
 costs; `small` is a fractal with an abs and a remap; `small_color` mixes two
 colors by a fractal; `bark_height` and `bark_color` are the library's oak
-bark, cellular plates under warps, a realistically deep program.
+bark, cellular plates under warps, a realistically deep program;
+`oak_board` is the library's solid oak wood sliced as the wood module cuts
+its board, the solid path of `material/instantiate/varnished_board`.
 
 ## `build`
 

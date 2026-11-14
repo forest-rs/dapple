@@ -141,6 +141,12 @@ impl TypedRaster {
         &self.storage
     }
 
+    /// The texels, taken.
+    #[must_use]
+    pub fn into_storage(self) -> Storage {
+        self.storage
+    }
+
     /// Texels per row.
     #[must_use]
     pub fn width(&self) -> u32 {
@@ -449,27 +455,14 @@ pub fn realize_value(
         return Err(RasterError::InvalidRegion.into());
     }
     let footprint = Footprint::new(texel.max_element()).ok_or(RasterError::InvalidRegion)?;
-    let count = check_size(realization.width, realization.height)?;
+    check_size(realization.width, realization.height)?;
     let port = program.output_type();
-    let point = |i: usize| {
-        let (x, y) = (
-            i % realization.width as usize,
-            i / realization.width as usize,
-        );
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "realizations are far below f32's exact integer range"
-        )]
-        let center = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
-        realization.region.origin + center * texel
-    };
     let (w, h, origin, edge) = (
         realization.width,
         realization.height,
         realization.region.origin,
         realization.edge,
     );
-    let eval = |i| program.eval(point(i), footprint);
     let storage = match Storage::kind_for(port) {
         StorageKind::F32 => Storage::F32(Raster::from_values(
             w,
@@ -477,9 +470,9 @@ pub fn realize_value(
             origin,
             texel,
             edge,
-            (0..count)
-                .map(|i| eval(i).scalar().unwrap_or(0.0))
-                .collect(),
+            texel_values(program, &realization, footprint, |v| {
+                v.scalar().unwrap_or(0.0)
+            }),
         )?),
         StorageKind::U32 => Storage::U32(Raster::from_values(
             w,
@@ -487,12 +480,10 @@ pub fn realize_value(
             origin,
             texel,
             edge,
-            (0..count)
-                .map(|i| match eval(i) {
-                    Value::Id(id) => id,
-                    _ => 0,
-                })
-                .collect(),
+            texel_values(program, &realization, footprint, |v| match v {
+                Value::Id(id) => id,
+                _ => 0,
+            }),
         )?),
         StorageKind::F32x2 => Storage::F32x2(Raster::from_values(
             w,
@@ -500,12 +491,10 @@ pub fn realize_value(
             origin,
             texel,
             edge,
-            (0..count)
-                .map(|i| match eval(i) {
-                    Value::Vector2(v) => v.to_array(),
-                    _ => [0.0; 2],
-                })
-                .collect(),
+            texel_values(program, &realization, footprint, |v| match v {
+                Value::Vector2(v) => v.to_array(),
+                _ => [0.0; 2],
+            }),
         )?),
         StorageKind::F32x3 => Storage::F32x3(Raster::from_values(
             w,
@@ -513,15 +502,43 @@ pub fn realize_value(
             origin,
             texel,
             edge,
-            (0..count)
-                .map(|i| match eval(i) {
-                    Value::Vector3(v) => v.to_array(),
-                    _ => [0.0; 3],
-                })
-                .collect(),
+            texel_values(program, &realization, footprint, |v| match v {
+                Value::Vector3(v) => v.to_array(),
+                _ => [0.0; 3],
+            }),
         )?),
     };
     TypedRaster::new(port, storage)
+}
+
+/// `program` at every texel center of `realization`, row by row through
+/// one evaluator, each value kept as `store` makes it.
+fn texel_values<T>(
+    program: &ValueProgram,
+    realization: &Realization,
+    footprint: Footprint,
+    store: impl Fn(Value) -> T,
+) -> Vec<T> {
+    let (w, h) = (realization.width as usize, realization.height as usize);
+    let texel = realization.texel();
+    let mut evaluator = program.evaluator();
+    let mut points = Vec::with_capacity(w);
+    let mut row = alloc::vec![Value::Scalar(0.0); w];
+    let mut texels = Vec::with_capacity(w * h);
+    for y in 0..h {
+        points.clear();
+        for x in 0..w {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "realizations are far below f32's exact integer range"
+            )]
+            let center = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+            points.push(realization.region.origin + center * texel);
+        }
+        evaluator.eval_value_batch(&points, footprint, &mut row);
+        texels.extend(row.iter().map(|&v| store(v)));
+    }
+    texels
 }
 
 /// The size of mip level `level` of an `n`-texel axis: halved and rounded
@@ -1058,6 +1075,86 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    /// Every texel of a typed realization is the program at the texel's
+    /// center, as a point evaluation gives it, for every storage kind, for
+    /// rasters of one texel, one row or one column, and on the plane.
+    #[test]
+    fn typed_realizations_evaluate_every_texel_center() {
+        use dapple_field::raster::Region;
+        use dapple_field::{Basis, FractalParams};
+
+        let domain = Domain::periodic(2, 1).unwrap();
+        let mut b = ProgramBuilder::new();
+        let fbm = b
+            .add(Op::Fractal {
+                basis: Basis::Gradient,
+                domain,
+                frequency: [3.0, 5.0],
+                seed: 4,
+                params: FractalParams::default(),
+            })
+            .unwrap();
+        let half = b.add(Op::Constant { domain, value: 0.5 }).unwrap();
+        let t = b
+            .add(Op::Remap {
+                input: fbm,
+                from: [-1.0, 1.0],
+                to: [0.0, 1.0],
+            })
+            .unwrap();
+        let id = b
+            .add(Op::ToId {
+                input: t,
+                levels: 5,
+            })
+            .unwrap();
+        let pair = b.add(Op::Vector2 { x: t, y: half }).unwrap();
+        let color = b
+            .add(Op::Color {
+                r: t,
+                g: half,
+                b: fbm,
+            })
+            .unwrap();
+        let outputs = [fbm, id, pair, color];
+        let realizations = [
+            Realization::period(domain, 40, 23).unwrap(),
+            Realization::period(domain, 1, 1).unwrap(),
+            Realization::period(domain, 64, 1).unwrap(),
+            Realization::period(domain, 1, 48).unwrap(),
+            Realization::region(
+                Region {
+                    origin: Vec2::new(-3.7, 1e3),
+                    size: Vec2::new(2.5, 0.75),
+                },
+                80,
+                30,
+            )
+            .unwrap(),
+        ];
+        for output in outputs {
+            let program = b.clone().finish_value(output).unwrap();
+            for realization in realizations {
+                let raster = realize_value(&program, realization).unwrap();
+                let texel = realization.texel();
+                let footprint = Footprint::new(texel.max_element()).unwrap();
+                for y in 0..realization.height() {
+                    for x in 0..realization.width() {
+                        let center = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+                        let p = realization.origin() + center * texel;
+                        let expected = program.eval(p, footprint);
+                        let found = raster.value_at(i64::from(x), i64::from(y));
+                        assert_eq!(
+                            alloc::format!("{found:?}"),
+                            alloc::format!("{expected:?}"),
+                            "texel ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

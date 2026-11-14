@@ -1061,6 +1061,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "material_wall"
+version = "0.0.0"
+dependencies = [
+ "dapple_export",
+ "dapple_field",
+ "dapple_lab",
+ "dapple_library",
+ "dapple_material",
+ "dapple_package",
+ "glam",
+ "serde_json",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -21,6 +21,7 @@ members = [
     "examples/library_swatches",
     "examples/material_fit",
     "examples/material_lab",
+    "examples/material_wall",
     "examples/timber_bake",
     "examples/varnished_board",
     "examples/weathered_metal",

@@ -1,0 +1,22 @@
+[package]
+name = "material_wall"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bakes every dapple_library material and package preset as a swatch for one labeled contact sheet"
+publish = false
+
+[dependencies]
+dapple_export = { features = ["std"], workspace = true }
+dapple_field.workspace = true
+dapple_lab.workspace = true
+dapple_library.workspace = true
+dapple_material.workspace = true
+dapple_package.workspace = true
+glam.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

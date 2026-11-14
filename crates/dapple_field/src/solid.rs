@@ -15,7 +15,7 @@ use glam::Vec3;
 
 use crate::domain::{Domain3, DomainError, Footprint, Lattice3};
 use crate::fractal::{FractalKind, FractalParams, MAX_OCTAVES};
-use crate::hash::{hash, key, unit_f32};
+use crate::hash::{hash, key, mix, unit_f32};
 use crate::noise::Basis;
 
 /// Purpose tag for 3D lattice-corner hashes.
@@ -391,17 +391,26 @@ fn lattice_eval3<const GRADIENT: bool>(
             cell[axis] += 1;
         }
     }
-    let corner = |dx: i64, dy: i64, dz: i64| -> u64 {
-        let [x, y, z] = lattice.wrap_cell([cell[0] + dx, cell[1] + dy, cell[2] + dz]);
-        hash(seed, &[LATTICE_TAG, key(x), key(y), key(z)])
-    };
+    // A corner's hash is `hash(seed, [LATTICE_TAG, x, y, z])` of its
+    // wrapped cell. The hash folds its keys from the left, so every corner
+    // shares the seed-and-tag prefix, every corner of a column its `x`
+    // prefix and every corner of a column and row its `x, y` prefix: mixing
+    // those once leaves one mix per corner instead of four, for the same
+    // bits, and wraps each column, row and layer once rather than at every
+    // corner.
+    let prefix = mix(seed, LATTICE_TAG);
+    let column = |dx: i64| mix(prefix, key(lattice.wrap_axis(0, cell[0] + dx)));
+    let row = |dy: i64| key(lattice.wrap_axis(1, cell[1] + dy));
+    let layer = |dz: i64| key(lattice.wrap_axis(2, cell[2] + dz));
     match basis {
         Basis::Value => {
-            let value = |h: u64| unit_f32(h) * 2.0 - 1.0;
-            let c = |dx, dy, dz| value(corner(dx, dy, dz));
+            let (x0, x1, y0, y1) = (column(0), column(1), row(0), row(1));
+            let [x0y0, x1y0, x0y1, x1y1] = [mix(x0, y0), mix(x1, y0), mix(x0, y1), mix(x1, y1)];
+            let (z0, z1) = (layer(0), layer(1));
+            let c = |xy: u64, z: u64| unit_f32(mix(xy, z)) * 2.0 - 1.0;
             let (u, v, w) = (fade(f.x), fade(f.y), fade(f.z));
-            let (c000, c100, c010, c110) = (c(0, 0, 0), c(1, 0, 0), c(0, 1, 0), c(1, 1, 0));
-            let (c001, c101, c011, c111) = (c(0, 0, 1), c(1, 0, 1), c(0, 1, 1), c(1, 1, 1));
+            let (c000, c100, c010, c110) = (c(x0y0, z0), c(x1y0, z0), c(x0y1, z0), c(x1y1, z0));
+            let (c001, c101, c011, c111) = (c(x0y0, z1), c(x1y0, z1), c(x0y1, z1), c(x1y1, z1));
             let x00 = lerp(c000, c100, u);
             let x10 = lerp(c010, c110, u);
             let x01 = lerp(c001, c101, u);
@@ -426,37 +435,64 @@ fn lattice_eval3<const GRADIENT: bool>(
             (result, Vec3::new(dfx, dfy, dfz) * lattice.frequency)
         }
         Basis::Gradient => {
+            // Written out rather than `array::map`, which is not always inlined.
+            let columns = [column(-1), column(0), column(1), column(2)];
+            let rows = [row(-1), row(0), row(1), row(2)];
+            let layers = [layer(-1), layer(0), layer(1), layer(2)];
+            // The point's offset from the corners on each axis, and its square.
+            let offsets = |f: f32| [f - -1.0, f - 0.0, f - 1.0, f - 2.0];
+            let (ox, oy, oz) = (offsets(f.x), offsets(f.y), offsets(f.z));
+            let squares = |o: [f32; 4]| [o[0] * o[0], o[1] * o[1], o[2] * o[2], o[3] * o[3]];
+            let (sx, sy, sz) = (squares(ox), squares(oy), squares(oz));
+            // Corner `(i, j, k)` is bit `i + 4j + 16k`, so rising bits run
+            // along rows within layers, the order the sums take. About 14
+            // of the 64 corners fall inside the kernel, and which ones
+            // changes from point to point: a branch per corner mispredicts.
+            // The inside corners are marked without branching and visited
+            // by their bits, a loop whose only unpredictable branch is its
+            // end. A NaN distance is not outside, so its corner counts, as
+            // it did when this was a `continue`.
+            let mut inside = 0_u64;
+            for (k, z2) in sz.into_iter().enumerate() {
+                for (j, y2) in sy.into_iter().enumerate() {
+                    for (i, x2) in sx.into_iter().enumerate() {
+                        let outside = x2 + y2 + z2 >= KERNEL_RADIUS_SQ;
+                        inside |= u64::from(!outside) << (i + 4 * j + 16 * k);
+                    }
+                }
+            }
+            // The `x, y` prefix of the 16 lines of corners along `z`.
+            let mut lines = [0_u64; 16];
+            for (j, row) in rows.into_iter().enumerate() {
+                for (i, column) in columns.into_iter().enumerate() {
+                    lines[i + 4 * j] = mix(column, row);
+                }
+            }
             let mut sum = 0.0;
             let mut gradient = Vec3::ZERO;
-            for dz in -1..=2_i64 {
-                for dy in -1..=2_i64 {
-                    for dx in -1..=2_i64 {
-                        #[expect(
-                            clippy::cast_precision_loss,
-                            reason = "offsets are small integers"
-                        )]
-                        let d = Vec3::new(f.x - dx as f32, f.y - dy as f32, f.z - dz as f32);
-                        let r2 = d.length_squared();
-                        if r2 >= KERNEL_RADIUS_SQ {
-                            continue;
-                        }
-                        let h = corner(dx, dy, dz);
-                        let [gx, gy, gz] = GRADIENTS[(h >> 56) as usize];
-                        #[expect(
-                            clippy::cast_precision_loss,
-                            reason = "a 24-bit integer is exact in f32"
-                        )]
-                        let value =
-                            ((h >> 32) & 0xFF_FFFF) as f32 * (1.0 / 16_777_216.0) * 2.0 - 1.0;
-                        let t = 1.0 - r2 / KERNEL_RADIUS_SQ;
-                        let t2 = t * t;
-                        let term = gx * d.x + gy * d.y + gz * d.z + VALUE_WEIGHT * value;
-                        sum += t2 * t2 * term;
-                        if GRADIENT {
-                            let dk = -8.0 * t2 * t / KERNEL_RADIUS_SQ;
-                            gradient += d * (dk * term) + Vec3::new(gx, gy, gz) * (t2 * t2);
-                        }
-                    }
+            while inside != 0 {
+                let index = inside.trailing_zeros() as usize;
+                inside &= inside - 1;
+                let (i, j, k) = (index & 3, (index >> 2) & 3, index >> 4);
+                let d = Vec3::new(ox[i], oy[j], oz[k]);
+                let r2 = sx[i] + sy[j] + sz[k];
+                let h = mix(lines[index & 15], layers[k]);
+                // The top byte picks the gradient; the next 24 bits give the
+                // corner's value.
+                let [gx, gy, gz] = GRADIENTS[(h >> 56) as usize];
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "a 24-bit integer is exact in f32"
+                )]
+                let value = ((h >> 32) & 0xFF_FFFF) as f32 * (1.0 / 16_777_216.0) * 2.0 - 1.0;
+                let t = 1.0 - r2 / KERNEL_RADIUS_SQ;
+                let t2 = t * t;
+                let term = gx * d.x + gy * d.y + gz * d.z + VALUE_WEIGHT * value;
+                sum += t2 * t2 * term;
+                if GRADIENT {
+                    // d/dd of t⁴·term: 4t³·(−2d/R²)·term + t⁴·g.
+                    let dk = -8.0 * t2 * t / KERNEL_RADIUS_SQ;
+                    gradient += d * (dk * term) + Vec3::new(gx, gy, gz) * (t2 * t2);
                 }
             }
             (
@@ -925,6 +961,278 @@ mod tests {
     use super::*;
     use crate::CellOutput;
     use crate::hash::hash;
+
+    /// [`lattice_eval3`] as first written, hashing every corner in full and
+    /// skipping the corners outside the kernel by a branch: the reference
+    /// its hoisted hashing and gathered corners must match bit for bit.
+    fn reference_eval3<const GRADIENT: bool>(
+        basis: Basis,
+        lattice: Lattice3,
+        seed: u64,
+        offset: Vec3,
+        p: Vec3,
+    ) -> (f32, Vec3) {
+        let at = lattice.locate(p);
+        let mut cell = at.cell;
+        let mut f = at.frac + offset;
+        for axis in 0..3 {
+            if f[axis] >= 1.0 {
+                f[axis] -= 1.0;
+                cell[axis] += 1;
+            }
+        }
+        let corner = |dx: i64, dy: i64, dz: i64| -> u64 {
+            let [x, y, z] = lattice.wrap_cell([cell[0] + dx, cell[1] + dy, cell[2] + dz]);
+            hash(seed, &[LATTICE_TAG, key(x), key(y), key(z)])
+        };
+        match basis {
+            Basis::Value => {
+                let value = |h: u64| unit_f32(h) * 2.0 - 1.0;
+                let c = |dx, dy, dz| value(corner(dx, dy, dz));
+                let (u, v, w) = (fade(f.x), fade(f.y), fade(f.z));
+                let (c000, c100, c010, c110) = (c(0, 0, 0), c(1, 0, 0), c(0, 1, 0), c(1, 1, 0));
+                let (c001, c101, c011, c111) = (c(0, 0, 1), c(1, 0, 1), c(0, 1, 1), c(1, 1, 1));
+                let x00 = lerp(c000, c100, u);
+                let x10 = lerp(c010, c110, u);
+                let x01 = lerp(c001, c101, u);
+                let x11 = lerp(c011, c111, u);
+                let y0 = lerp(x00, x10, v);
+                let y1 = lerp(x01, x11, v);
+                let result = lerp(y0, y1, w);
+                if !GRADIENT {
+                    return (result, Vec3::ZERO);
+                }
+                let (du, dv, dw) = (
+                    fade_derivative(f.x),
+                    fade_derivative(f.y),
+                    fade_derivative(f.z),
+                );
+                let dx0 = lerp(c100 - c000, c110 - c010, v);
+                let dx1 = lerp(c101 - c001, c111 - c011, v);
+                let dfx = lerp(dx0, dx1, w) * du;
+                let dfy = lerp(x10 - x00, x11 - x01, w) * dv;
+                let dfz = (y1 - y0) * dw;
+                (result, Vec3::new(dfx, dfy, dfz) * lattice.frequency)
+            }
+            Basis::Gradient => {
+                let mut sum = 0.0;
+                let mut gradient = Vec3::ZERO;
+                for dz in -1..=2_i64 {
+                    for dy in -1..=2_i64 {
+                        for dx in -1..=2_i64 {
+                            let d = Vec3::new(f.x - dx as f32, f.y - dy as f32, f.z - dz as f32);
+                            let r2 = d.length_squared();
+                            if r2 >= KERNEL_RADIUS_SQ {
+                                continue;
+                            }
+                            let h = corner(dx, dy, dz);
+                            let [gx, gy, gz] = GRADIENTS[(h >> 56) as usize];
+                            let value =
+                                ((h >> 32) & 0xFF_FFFF) as f32 * (1.0 / 16_777_216.0) * 2.0 - 1.0;
+                            let t = 1.0 - r2 / KERNEL_RADIUS_SQ;
+                            let t2 = t * t;
+                            let term = gx * d.x + gy * d.y + gz * d.z + VALUE_WEIGHT * value;
+                            sum += t2 * t2 * term;
+                            if GRADIENT {
+                                let dk = -8.0 * t2 * t / KERNEL_RADIUS_SQ;
+                                gradient += d * (dk * term) + Vec3::new(gx, gy, gz) * (t2 * t2);
+                            }
+                        }
+                    }
+                }
+                (
+                    sum * GRADIENT_SCALE,
+                    gradient * GRADIENT_SCALE * lattice.frequency,
+                )
+            }
+        }
+    }
+
+    /// [`Fractal3`]'s sum over [`reference_eval3`].
+    fn reference_sum<const GRADIENT: bool>(
+        fractal: &Fractal3,
+        p: Vec3,
+        footprint: Footprint,
+    ) -> (f32, Vec3) {
+        let mean = fractal.mean();
+        let mut sum = 0.0;
+        let mut gradient = Vec3::ZERO;
+        for octave in &fractal.octaves {
+            let weight = footprint.band_weight(octave.lattice.max_frequency());
+            let value = if weight == 0.0 {
+                mean
+            } else {
+                let (n, dn) = reference_eval3::<GRADIENT>(
+                    fractal.basis,
+                    octave.lattice,
+                    octave.seed,
+                    octave.offset,
+                    p,
+                );
+                let (detail, d_detail) = match fractal.kind {
+                    FractalKind::Fbm => (n, dn),
+                    FractalKind::Ridged => {
+                        let r = 1.0 - n.abs();
+                        (r * r, dn * (-2.0 * r * n.signum()))
+                    }
+                };
+                if GRADIENT {
+                    gradient += d_detail * (weight * octave.amplitude);
+                }
+                mean + (detail - mean) * weight
+            };
+            sum += value * octave.amplitude;
+        }
+        (
+            sum / fractal.total_amplitude,
+            gradient / fractal.total_amplitude,
+        )
+    }
+
+    /// Lattices for the bit-identity tests: unwrapped, one cell per period
+    /// on every axis or on one, and several cells per period.
+    fn test_lattices() -> [(Domain3, Vec3); 5] {
+        [
+            (Domain3::Space, Vec3::new(0.37, 5.0, 2.0)),
+            (Domain3::Space, Vec3::splat(8.0)),
+            (Domain3::periodic(1, 1, 1).unwrap(), Vec3::ONE),
+            (
+                Domain3::periodic(1, 1, 1).unwrap(),
+                Vec3::new(8.0, 3.0, 1.0),
+            ),
+            (
+                Domain3::periodic(2, 3, 1).unwrap(),
+                Vec3::new(1.5, 2.0, 4.0),
+            ),
+        ]
+    }
+
+    /// Points that reach every branch of the lattice kernels on a lattice of
+    /// `frequency`: random points near and far on both signs, points on
+    /// cell boundaries and on the kernel's edge (in cells, so exact on the
+    /// lattice), signed zeros, tiny and NaN coordinates, and coordinates up
+    /// to 2^56 cells, inside the range where the cell arithmetic is defined.
+    fn awkward_points(frequency: Vec3) -> Vec<Vec3> {
+        let mut points = Vec::new();
+        for i in 0..400_u64 {
+            let h = hash(0x0073_6f6c_6964, &[i]);
+            let unit = |shift: u32| unit_f32(h.rotate_left(shift)) * 2.0 - 1.0;
+            let scale = [1.0, 3.0, 1e3, 1e6][(i % 4) as usize];
+            points.push(Vec3::new(unit(0), unit(21), unit(42)) * scale);
+        }
+        // In cells: boundaries, halves (a corner two cells away is then on
+        // the kernel's edge, 1.5 cells off), and just below a boundary.
+        let below_one = 1.0 - f32::EPSILON;
+        let cells = [0.0, 1.0, -1.0, 0.5, -0.5, 1.5, below_one, -below_one, 2.0];
+        for &a in &cells {
+            for &b in &cells[..5] {
+                points.push(Vec3::new(a, b, 0.0) / frequency);
+                points.push(Vec3::new(b, 0.0, a) / frequency);
+            }
+        }
+        let far = 2.0_f32.powi(56);
+        let edges = [0.0, -0.0, 1e-30, -1e-30, f32::NAN, 1e12, -1e12];
+        for v in edges {
+            points.extend([
+                Vec3::splat(v),
+                Vec3::new(v, 0.3, -0.7),
+                Vec3::new(-0.7, v, 0.3),
+                Vec3::new(0.3, -0.7, v),
+            ]);
+        }
+        for v in [far, -far] {
+            points.push(Vec3::new(v, 0.25, -0.25) / frequency.x);
+            points.push(Vec3::splat(v) / frequency.max_element());
+        }
+        points
+    }
+
+    #[test]
+    fn hoisted_corner_hashes_match_the_reference_bit_for_bit() {
+        let offsets = [
+            Vec3::ZERO,
+            Vec3::new(0.5, 0.25, 0.75),
+            Vec3::splat(1.0 - f32::EPSILON),
+        ];
+        let bits = |(v, g): (f32, Vec3)| [v.to_bits(), g.x.to_bits(), g.y.to_bits(), g.z.to_bits()];
+        for (domain, frequency) in test_lattices() {
+            let lattice = Lattice3::new(domain, frequency).unwrap();
+            let points = awkward_points(frequency);
+            for basis in [Basis::Value, Basis::Gradient] {
+                for (seed, offset) in [0, 7, u64::MAX].into_iter().zip(offsets) {
+                    for &p in &points {
+                        assert_eq!(
+                            bits(lattice_eval3::<false>(basis, lattice, seed, offset, p)),
+                            bits(reference_eval3::<false>(basis, lattice, seed, offset, p)),
+                            "{basis:?} {lattice:?} seed {seed} at {p}"
+                        );
+                        assert_eq!(
+                            bits(lattice_eval3::<true>(basis, lattice, seed, offset, p)),
+                            bits(reference_eval3::<true>(basis, lattice, seed, offset, p)),
+                            "{basis:?} {lattice:?} seed {seed} at {p}, with gradient"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn solid_noise_and_fractals_match_the_reference_bit_for_bit() {
+        let footprints =
+            [0.0, 1e-6, 1.0 / 256.0, 0.02, 0.07, 0.3, 1e6].map(|w| Footprint::new(w).unwrap());
+        let bits = |(v, g): (f32, Vec3)| [v.to_bits(), g.x.to_bits(), g.y.to_bits(), g.z.to_bits()];
+        for (domain, frequency) in test_lattices() {
+            let points = awkward_points(frequency);
+            for basis in [Basis::Value, Basis::Gradient] {
+                let noise = Noise3::new(basis, domain, frequency, 3).unwrap();
+                let fractals = [FractalKind::Fbm, FractalKind::Ridged].map(|kind| {
+                    let params = FractalParams {
+                        kind,
+                        octaves: 4,
+                        ..FractalParams::default()
+                    };
+                    Fractal3::new(basis, domain, frequency, 11, params).unwrap()
+                });
+                for footprint in footprints {
+                    let weight = footprint.band_weight(noise.lattice.max_frequency());
+                    for &p in &points {
+                        let reference = if weight == 0.0 {
+                            (0.0, Vec3::ZERO)
+                        } else {
+                            let (n, g) =
+                                reference_eval3::<true>(basis, noise.lattice, 3, Vec3::ZERO, p);
+                            (n * weight, g * weight)
+                        };
+                        assert_eq!(
+                            bits(noise.eval_gradient(p, footprint)),
+                            bits(reference),
+                            "{noise:?} at {p} with {footprint:?}"
+                        );
+                        assert_eq!(
+                            noise.eval(p, footprint).to_bits(),
+                            reference.0.to_bits(),
+                            "{noise:?} at {p} with {footprint:?}"
+                        );
+                        for fractal in &fractals {
+                            assert_eq!(
+                                fractal.eval(p, footprint).to_bits(),
+                                reference_sum::<false>(fractal, p, footprint).0.to_bits(),
+                                "{basis:?} {:?} at {p} with {footprint:?}",
+                                fractal.kind
+                            );
+                            assert_eq!(
+                                bits(fractal.eval_gradient(p, footprint)),
+                                bits(reference_sum::<true>(fractal, p, footprint)),
+                                "{basis:?} {:?} at {p} with {footprint:?}",
+                                fractal.kind
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fn points(count: usize, scale: f32, seed: u64) -> Vec<Vec3> {
         (0..count)

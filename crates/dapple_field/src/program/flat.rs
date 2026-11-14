@@ -430,12 +430,14 @@ impl<'a> Evaluator<'a> {
                 } => {
                     let (p, footprint) = self.points[ctx];
                     let mut values = [Value::Scalar(0.0); 3];
-                    let mut gradients = [Vec3::ZERO; 3];
                     for (i, &arg) in args[..count].iter().enumerate() {
                         values[i] = self.registers[arg];
-                        gradients[i] = self.gradients[arg];
                     }
                     if gradient {
+                        let mut gradients = [Vec3::ZERO; 3];
+                        for (i, &arg) in args[..count].iter().enumerate() {
+                            gradients[i] = self.gradients[arg];
+                        }
                         (self.registers[reg], self.gradients[reg]) = self.program.pure_gradient(
                             node,
                             p,

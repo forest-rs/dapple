@@ -435,15 +435,17 @@ impl<'a> Evaluator<'a> {
                         values[i] = self.registers[arg];
                         gradients[i] = self.gradients[arg];
                     }
-                    let kernel = &self.program.nodes[node.0 as usize].kernel;
-                    let value = kernel.combine(p, footprint, &values[..count]);
-                    self.registers[reg] = value;
                     if gradient {
-                        self.gradients[reg] = kernel
-                            .gradient(p, footprint, &values[..count], &gradients[..count])
-                            .unwrap_or_else(|| {
-                                self.program.numeric_gradient(node, value, p, footprint)
-                            });
+                        (self.registers[reg], self.gradients[reg]) = self.program.pure_gradient(
+                            node,
+                            p,
+                            footprint,
+                            &values[..count],
+                            &gradients[..count],
+                        );
+                    } else {
+                        let kernel = &self.program.nodes[node.0 as usize].kernel;
+                        self.registers[reg] = kernel.combine(p, footprint, &values[..count]);
                     }
                 }
                 Step::Chain { reg, from, ref by } => {

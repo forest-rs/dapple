@@ -477,4 +477,46 @@ impl<'a> Evaluator<'a> {
             .scalar()
             .expect("the output is a scalar or mask")
     }
+
+    /// The output's values at `points`, all with `footprint`, into the
+    /// first `points.len()` slots of `out`.
+    ///
+    /// Each value is the one [`Self::eval_value`] gives at its point, bit
+    /// for bit. This is the entry point for a run of points, such as a
+    /// raster row: keep one evaluator for every run, and the work that does
+    /// not depend on the point is done once per run rather than per point.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `out` is shorter than `points`.
+    pub fn eval_value_batch(&mut self, points: &[Vec2], footprint: Footprint, out: &mut [Value]) {
+        assert!(out.len() >= points.len(), "output shorter than the points");
+        for (value, &p) in out.iter_mut().zip(points) {
+            *value = self.eval_value_at(p.extend(0.0), footprint);
+        }
+    }
+
+    /// The output's scalar values at `points`, all with `footprint`, into
+    /// the first `points.len()` slots of `out`: [`Self::eval_value_batch`]
+    /// for a scalar or mask output.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `out` is shorter than `points`, or if the output is not a
+    /// scalar or mask.
+    pub fn eval_batch(&mut self, points: &[Vec2], footprint: Footprint, out: &mut [f32]) {
+        assert!(out.len() >= points.len(), "output shorter than the points");
+        assert!(
+            self.program.nodes[self.program.output.0 as usize]
+                .port
+                .is_scalar(),
+            "the output is a scalar or mask"
+        );
+        for (value, &p) in out.iter_mut().zip(points) {
+            *value = match self.eval_value_at(p.extend(0.0), footprint) {
+                Value::Scalar(v) => v,
+                _ => unreachable!("a scalar node's values are scalars"),
+            };
+        }
+    }
 }

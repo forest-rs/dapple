@@ -410,6 +410,13 @@ impl<T: Copy> Raster<T> {
         &self.texels.values
     }
 
+    /// The row-major values, taken without a copy unless another clone
+    /// shares them.
+    #[must_use]
+    pub fn into_values(self) -> Vec<T> {
+        Arc::try_unwrap(self.texels).map_or_else(|shared| shared.values.clone(), |t| t.values)
+    }
+
     /// The value at `(x, y)`, continued past the border by the edge policy.
     #[must_use]
     pub fn at(&self, x: i64, y: i64) -> T {

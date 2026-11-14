@@ -44,7 +44,6 @@
 //! their noise uses whole lattice cells per period, so they tile.
 
 use alloc::borrow::Cow;
-use alloc::vec::Vec;
 
 use dapple_field::program::{NodeId, Op, ProgramBuilder, ProgramError};
 use dapple_field::raster::Region;
@@ -148,9 +147,15 @@ pub(crate) fn realize(
         Realization::period(program.domain(), grid.width, grid.height)?
     };
     let raster = realize_value(&program, realization)?;
-    // Keep the grid's own placement and edge policy.
-    let values: Vec<Value> = (0..raster.len()).map(|i| raster.value(i)).collect();
-    Ok(grid.typed(raster.port(), values)?)
+    // The same texels with the grid's own placement and edge policy.
+    let port = raster.port();
+    let storage = match raster.into_storage() {
+        Storage::F32(r) => Storage::F32(grid.raster(r.into_values())?),
+        Storage::U32(r) => Storage::U32(grid.raster(r.into_values())?),
+        Storage::F32x2(r) => Storage::F32x2(grid.raster(r.into_values())?),
+        Storage::F32x3(r) => Storage::F32x3(grid.raster(r.into_values())?),
+    };
+    Ok(TypedRaster::new(port, storage)?)
 }
 
 /// As [`realize`], for a scalar program.

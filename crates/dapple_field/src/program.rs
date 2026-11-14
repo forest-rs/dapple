@@ -70,6 +70,8 @@ use crate::solid::{Cellular3, CellularField3, Fractal3, Noise3, SolidField};
 use crate::tiling::{Pattern, TileOutput, Tiling, TilingField};
 use crate::types::{NormalFrame, PortType, Primaries, Value};
 
+#[cfg(test)]
+mod batch_tests;
 mod bounds;
 mod flat;
 pub mod sampling;
@@ -2610,10 +2612,7 @@ impl ScalarField for FieldProgram {
         assert!(out.len() >= points.len(), "output shorter than the points");
         let stats = self.plan.stats();
         if stats.instances < stats.tree_evaluations {
-            let mut evaluator = self.evaluator();
-            for (value, &p) in out.iter_mut().zip(points) {
-                *value = evaluator.eval(p, footprint);
-            }
+            self.evaluator().eval_batch(points, footprint, out);
         } else {
             for (value, &p) in out.iter_mut().zip(points) {
                 *value = self.eval_node(self.output, p, footprint);
@@ -2675,6 +2674,21 @@ impl ValueProgram {
     #[must_use]
     pub fn evaluator(&self) -> Evaluator<'_> {
         self.program.evaluator()
+    }
+
+    /// Evaluates the output at each of `points`, all with `footprint`, into
+    /// the first `points.len()` slots of `out`, bit-identical to
+    /// [`Self::eval`] at each point.
+    ///
+    /// One [`Evaluator`] serves the whole batch; to evaluate many batches,
+    /// such as the rows of a raster, keep one and call
+    /// [`Evaluator::eval_value_batch`] for each.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `out` is shorter than `points`.
+    pub fn eval_batch(&self, points: &[Vec2], footprint: Footprint, out: &mut [Value]) {
+        self.evaluator().eval_value_batch(points, footprint, out);
     }
 
     /// Component `index` of the output as a scalar program: the output

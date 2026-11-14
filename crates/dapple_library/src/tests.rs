@@ -223,6 +223,47 @@ mod glazed {
     }
 }
 
+mod sill {
+    use dapple_material::module::{Bind, Context};
+    use dapple_material::resource::NoResources;
+    use dapple_material::{ChannelId, Material, Param};
+
+    use crate::modules::StoneSill;
+
+    /// Rain runs off a stone sill and down the wall from under it, and
+    /// nothing runs down the sill's own face: the tile's top, where the
+    /// sill's top meets the wall's foot only across a wrap the sill does
+    /// not tile across, sheds no streaks (it did, as dark drips from the
+    /// top of the tile).
+    #[test]
+    fn streaks_run_from_under_the_sill_not_down_its_face() {
+        let grid = super::glazed::tile(128);
+        let build = |streaks: f32| -> Material {
+            let mut cx = Context::new(grid, &NoResources);
+            cx.instantiate(&StoneSill, "sill", Bind::new().scalar("streaks", streaks))
+                .unwrap()
+                .take_material("material")
+                .unwrap()
+        };
+        let (streaked, clean) = (build(0.22), build(0.0));
+        let color = ChannelId::Param(Param::BaseColor);
+        // The sill's default height on the face is 0.15 m.
+        let bottom = 1.0 - 0.15;
+        let (mut face, mut below) = (0, 0);
+        for i in 0..grid.len() {
+            let y = grid.center(i).y;
+            let streak = streaked.value(color, i) != clean.value(color, i);
+            if y > bottom + 0.01 {
+                face += usize::from(streak);
+            } else if y > bottom - 0.2 {
+                below += usize::from(streak);
+            }
+        }
+        assert_eq!(face, 0, "texels streaked on the sill's face");
+        assert!(below > 500, "{below} texels streaked under the sill");
+    }
+}
+
 mod gate {
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -276,10 +317,16 @@ mod gate {
         assert!(count("dapple_library.finish") >= 3, "{used:?}");
         assert!(count("dapple_library.mortar") >= 1, "{used:?}");
         // One module, one definition: every instance of a module names the
-        // same versioned identity, whichever asset instantiated it.
+        // same versioned identity, whichever asset instantiated it: the one
+        // the library registers.
+        let registry = crate::packages::registry();
         for d in [&sill_d, &board_d, &threshold_d] {
             for (path, id) in d.instances() {
-                assert_eq!(id.version, 1, "{path}");
+                let registered = registry
+                    .modules()
+                    .map(|m| m.interface().id)
+                    .find(|r| r.name == id.name);
+                assert_eq!(registered.as_ref(), Some(id), "{path}");
             }
         }
         // Reports stay with the instances that made them, and partial

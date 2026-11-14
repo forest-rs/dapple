@@ -15,18 +15,18 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use dapple_field::scoped::{CompareOp, Node, Scope, ScopedBuilder};
-use dapple_field::{PortType, Value};
+use dapple_field::{Edge, PortType, Value};
 use dapple_material::module::{
     Args, Context, InputDecl, InputKind, Interface, Module, ModuleError, ModuleId, Output,
     OutputDecl, OutputKind, Outputs,
 };
 use dapple_material::ops::{self, Deposit};
 use dapple_material::program::{MapBinding, evaluate_mask};
-use dapple_material::{Aux, Channel, ChannelId, Grid, Material, Param};
+use dapple_material::{Aux, Channel, ChannelId, Grid, Material, Param, Tiling};
 use dapple_raster::{
     Advect, AmbientOcclusion, Flow, GaussianBlur, HeightToNormal, Raster, RasterOp, Streak,
 };
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
 use super::{
     color, coverage, fail, fbm, fraction, integer, mask_map, meters, realize_scalar, scalar,
@@ -253,13 +253,89 @@ impl Module for Grime {
     }
 }
 
+/// How far [`extend`] carries a raster past each edge of `grid` so that an
+/// operation reading up to `reach` texels away stops at the edges `tiling`
+/// does not cross: `reach` along those axes of a wrapping grid, nothing
+/// along the rest (a clamping grid stops at every edge already).
+fn apron(grid: Grid, tiling: Tiling, reach: u32) -> [u32; 2] {
+    if grid.edge != Edge::Wrap {
+        return [0, 0];
+    }
+    [
+        if tiling.x { 0 } else { reach },
+        if tiling.y { 0 } else { reach },
+    ]
+}
+
+/// `r` carried `apron` texels past each edge, each new texel a copy of the
+/// nearest edge texel, still wrapping: an operation reading at most `apron`
+/// texels away sees `r` clamp across those edges and wrap across the rest.
+/// [`trim`] takes the original texels back.
+fn extend<T: Copy>(r: &Raster<T>, apron: [u32; 2]) -> Result<Raster<T>, ModuleError> {
+    let [ax, ay] = apron;
+    if ax == 0 && ay == 0 {
+        return Ok(r.clone());
+    }
+    let (w, h) = (r.width() as usize, r.height() as usize);
+    let (ax, ay) = (ax as usize, ay as usize);
+    let mut values = Vec::with_capacity((w + 2 * ax) * (h + 2 * ay));
+    for y in 0..h + 2 * ay {
+        let row = y.saturating_sub(ay).min(h - 1) * w;
+        for x in 0..w + 2 * ax {
+            values.push(r.values()[row + x.saturating_sub(ax).min(w - 1)]);
+        }
+    }
+    #[expect(clippy::cast_precision_loss, reason = "aprons are small")]
+    let shift = r.texel() * Vec2::new(ax as f32, ay as f32);
+    Ok(Raster::from_values(
+        r.width() + 2 * apron[0],
+        r.height() + 2 * apron[1],
+        r.origin() - shift,
+        r.texel(),
+        r.edge(),
+        values,
+    )?)
+}
+
+/// The texels of `grid` within `r`, a raster [`extend`] carried `apron`
+/// past them.
+fn trim<T: Copy>(grid: Grid, r: &Raster<T>, apron: [u32; 2]) -> Result<Raster<T>, ModuleError> {
+    let (w, ax, ay) = (r.width() as usize, apron[0] as usize, apron[1] as usize);
+    let width = grid.width as usize;
+    let values = (0..grid.height as usize)
+        .flat_map(|y| {
+            let start = (y + ay) * w + ax;
+            r.values()[start..start + width].iter().copied()
+        })
+        .collect();
+    Ok(grid.raster(values)?)
+}
+
 /// How strongly each texel is a ledge that sheds water: the surface faces
 /// up (its normal's `+y`, the domain's up) at the scale of units, sills and
 /// laps, not of tooling or grain; in `[0, 1]`.
+///
+/// Past an edge the base does not tile across ([`Material::tiling`]) the
+/// face ends: its height is taken to run on flat there rather than wrap to
+/// the far edge, so the step between a sill's top and a wall's foot that
+/// only the wrap puts side by side is no ledge.
 pub(crate) fn ledges(base: &Material) -> Result<Raster, ModuleError> {
-    let smooth = GaussianBlur { sigma: 0.003 }.apply(&base.height()?)?;
-    let normals = HeightToNormal { scale: 1.0 }.apply(&smooth)?;
-    Ok(base.grid().raster(
+    let grid = base.grid();
+    let blur = GaussianBlur { sigma: 0.003 };
+    let normal = HeightToNormal { scale: 1.0 };
+    let reach = |footprint: Option<[u32; 2]>| {
+        footprint
+            .map(|[x, y]| x.max(y))
+            .ok_or_else(|| fail("a ledge's footprint is unbounded"))
+    };
+    let apron = apron(
+        grid,
+        base.tiling(),
+        reach(blur.footprint(grid.texel))? + reach(normal.footprint(grid.texel))?,
+    );
+    let smooth = blur.apply(&extend(&base.height()?, apron)?)?;
+    let normals = trim(grid, &normal.apply(&smooth)?, apron)?;
+    Ok(grid.raster(
         normals
             .values()
             .iter()
@@ -274,17 +350,36 @@ pub(crate) fn ledges(base: &Material) -> Result<Raster, ModuleError> {
 /// ([`Advect`]) so trails bend and soften. A trail is as strong as its
 /// source, so what runs off is what was there to run off; the seeds are
 /// `args`' `runs` and `wander`.
+///
+/// Water crosses only the edges `tiling` (the face's [`Material::tiling`])
+/// tiles across: on a face that does not tile up it, a trail leaves at the
+/// foot and none comes in over the top.
 pub(crate) fn runoff(
     grid: Grid,
     args: &Args,
     sources: &Raster,
     length: f32,
+    tiling: Tiling,
 ) -> Result<Raster, ModuleError> {
-    let trails = Streak {
+    let streak = Streak {
         flow: Flow::NegativeY,
         length,
-    }
-    .apply(sources)?;
+    };
+    // A streak scans along y alone, so clamping is all it needs to stop at
+    // the top and foot.
+    let trails = if tiling.y {
+        streak.apply(sources)?
+    } else {
+        let clamped = Raster::from_values(
+            sources.width(),
+            sources.height(),
+            sources.origin(),
+            sources.texel(),
+            Edge::Clamp,
+            sources.values().to_vec(),
+        )?;
+        streak.apply(&clamped)?
+    };
     let runs = realize_scalar(grid, |b, d| fbm(b, d, [70.0, 2.0], args.seed("runs"), 3))?;
     let score: Vec<f32> = trails
         .values()
@@ -296,11 +391,26 @@ pub(crate) fn runoff(
     // down the face and wanders sideways, so they bend and soften.
     let wander = realize_scalar(grid, |b, d| fbm(b, d, [12.0, 6.0], args.seed("wander"), 3))?;
     let flow = grid.raster(wander.values().iter().map(|w| [0.6 * w, -1.0]).collect())?;
-    Ok(Advect {
+    let advect = Advect {
         step: 2.0 * grid.texel.y,
         steps: 6,
-    }
-    .apply(&grid.raster(score)?, &flow)?)
+    };
+    // A path runs at most `steps · step` (the flow is clamped to unit
+    // length), and its last sample reads one texel further.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "a reach of a few texels"
+    )]
+    let reach =
+        libm::ceilf(advect.steps as f32 * advect.step / grid.texel.min_element()) as u32 + 1;
+    let apron = apron(grid, tiling, reach);
+    let carried = advect.apply(
+        &extend(&grid.raster(score)?, apron)?,
+        &extend(&flow, apron)?,
+    )?;
+    trim(grid, &carried, apron)
 }
 
 /// Grime washed down a face from its ledges: upward-facing surfaces (the
@@ -308,7 +418,9 @@ pub(crate) fn runoff(
 /// the face and fade, some ledges more than others, in vertical runs,
 /// carried along a wandering downward flow ([`Advect`]) so they bend;
 /// `coverage` of the surface at most `strength` thick. A `sources` mask
-/// adds ledges the height does not show.
+/// adds ledges the height does not show. On a base that tiles along the
+/// face but not up it, water neither sheds from nor runs across the tile's
+/// top and foot.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct Streaks;
 
@@ -355,7 +467,13 @@ impl Module for Streaks {
             let more = extra.map_or(0.0, |m| m.value(i).component(0).unwrap_or(0.0));
             sources.push((ledge * shed).max(more));
         }
-        let score = runoff(grid, args, &grid.raster(sources)?, args.scalar("length"))?;
+        let score = runoff(
+            grid,
+            args,
+            &grid.raster(sources)?,
+            args.scalar("length"),
+            base.tiling(),
+        )?;
         let covered = coverage(&score, args.scalar("coverage"), 0.1)?;
         let covered = scaled(grid, &covered, args.scalar("strength"))?;
         let grime = deposit_material(grid, args, args.color("color"), 0.85, DIRT)?;
@@ -493,5 +611,117 @@ impl Module for Efflorescence {
         // as evaluating its score across the wrap finds.
         m.set_tiling(m.tiling().and(score_tiling));
         Ok(Outputs::new().with("material", Output::Material(m)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dapple_material::module::{Bind, Context, Output};
+    use dapple_material::resource::NoResources;
+
+    use super::*;
+
+    /// 32² texels over a meter, wrapping.
+    fn grid() -> Grid {
+        Grid {
+            width: 32,
+            height: 32,
+            origin: Vec2::ZERO,
+            texel: Vec2::splat(1.0 / 32.0),
+            edge: Edge::Wrap,
+        }
+    }
+
+    /// The rows of `r` from `rows`, flattened.
+    fn rows(r: &Raster, rows: core::ops::Range<u32>) -> Vec<f32> {
+        let w = r.width() as usize;
+        r.values()[rows.start as usize * w..rows.end as usize * w].to_vec()
+    }
+
+    /// Runs [`runoff`] from `sources` on a face that tiles along `tiling`.
+    struct Trails {
+        sources: Raster,
+        tiling: Tiling,
+    }
+
+    impl Module for Trails {
+        fn interface(&self) -> Interface {
+            Interface {
+                id: ModuleId::new("test.trails", 1),
+                doc: "runoff's trails".into(),
+                params: vec![seed()],
+                inputs: vec![],
+                outputs: vec![OutputDecl {
+                    name: "trails".into(),
+                    kind: OutputKind::Map(PortType::Scalar),
+                    doc: "the trails".into(),
+                }],
+            }
+        }
+
+        fn build(&self, cx: &mut Context<'_>, args: &Args) -> Result<Outputs, ModuleError> {
+            let grid = cx.grid();
+            let trails = runoff(grid, args, &self.sources, 0.3, self.tiling)?;
+            Ok(Outputs::new().with("trails", Output::Map(scalar_map(grid, &trails)?)))
+        }
+    }
+
+    fn trails(sources: &Raster, tiling: Tiling) -> Raster {
+        let module = Trails {
+            sources: sources.clone(),
+            tiling,
+        };
+        let mut cx = Context::new(grid(), &NoResources);
+        let out = cx.instantiate(&module, "trails", Bind::new()).unwrap();
+        let Some(Output::Map(m)) = out.get("trails") else {
+            panic!("a map");
+        };
+        super::super::scalar_of(m).unwrap()
+    }
+
+    /// Water runs on past the foot of a face that tiles up it, into the
+    /// top of the next repeat; on one that tiles only along it, a trail
+    /// leaves at the foot and none comes in over the top.
+    #[test]
+    fn runoff_crosses_only_the_edges_the_face_tiles_across() {
+        let g = grid();
+        let sources = g
+            .raster((0..g.len()).map(|i| f32::from(u8::from(i < 64))).collect())
+            .unwrap();
+        let wrapped = trails(&sources, Tiling::BOTH);
+        let bounded = trails(&sources, Tiling::X);
+        let top = |r: &Raster| rows(r, 24..32).into_iter().fold(0.0, f32::max);
+        assert!(top(&wrapped) > 0.2, "tiling up it: {}", top(&wrapped));
+        assert_eq!(top(&bounded), 0.0, "tiling only along it");
+        assert!(rows(&bounded, 3..32).iter().all(|&t| t == 0.0), "or above");
+        assert!(rows(&bounded, 0..2).iter().all(|&t| t > 0.0), "at the foot");
+    }
+
+    /// The top of a sill meets the foot of the wall below it only across
+    /// the wrap: a ledge there on a face that tiles up it, none on one
+    /// that tiles only along it (the stone sill's dark drips that ran down
+    /// its face from the top of the tile).
+    #[test]
+    fn ledges_stop_at_the_edges_the_face_does_not_tile_across() {
+        let g = grid();
+        let sill = |tiling: Tiling| {
+            let mut m = Material::new(g);
+            let h = (0..g.len()).map(|i| Value::Scalar(if i >= 24 * 32 { 0.02 } else { 0.0 }));
+            m.set_aux(
+                Aux::Height,
+                Channel::Map(g.typed(PortType::Scalar, h).unwrap()),
+            )
+            .unwrap();
+            m.set_tiling(tiling);
+            ledges(&m).unwrap()
+        };
+        let most = |r: &Raster| r.values().iter().copied().fold(0.0, f32::max);
+        let wrapped = sill(Tiling::BOTH);
+        assert!(
+            rows(&wrapped, 30..32).iter().any(|&l| l > 0.5),
+            "across the wrap, the sill's top is a ledge"
+        );
+        // The sill's lower edge faces down: no ledge anywhere.
+        assert_eq!(most(&sill(Tiling::X)), 0.0, "the face ends at its top");
     }
 }

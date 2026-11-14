@@ -101,7 +101,7 @@ impl Wetness {
                 .map(|(l, g)| l * smoothstep(-0.15, 0.45, *g))
                 .collect(),
         )?;
-        let trails = runoff(grid, args, &shed, args.scalar("runoff"))?;
+        let trails = runoff(grid, args, &shed, args.scalar("runoff"), base.tiling())?;
         // Water gathers as it runs down a sheet and hangs above a drip
         // edge before it falls: wettest just above a downward-facing edge,
         // drying up the face from it.
@@ -411,7 +411,7 @@ impl Module for Patina {
                 .collect(),
         )?;
         let sources = GaussianBlur { sigma: 0.002 }.apply(&sources)?;
-        let trails = runoff(grid, args, &sources, args.scalar("runoff"))?;
+        let trails = runoff(grid, args, &sources, args.scalar("runoff"), base.tiling())?;
         let carried = smoothstep(0.3, 0.75, age);
         let wash: Vec<f32> = (0..n)
             .map(|i| {
@@ -670,7 +670,7 @@ impl Module for Rust {
         // A chip's worth of rust stains less than a rivet head's.
         let sources = GaussianBlur { sigma: 0.003 }.apply(&sources)?;
         let length = args.scalar("runoff") * (0.4 + 0.8 * wetness);
-        let trails = runoff(grid, args, &sources, length)?;
+        let trails = runoff(grid, args, &sources, length, base.tiling())?;
         let bleed: Vec<f32> = (0..n)
             .map(|i| {
                 let t = trails.values()[i].min(1.0);

@@ -71,7 +71,7 @@ impl Module for GlazedBrickWall {
     fn interface(&self) -> Interface {
         let d = Palette::default();
         Interface {
-            id: ModuleId::new("dapple_library.glazed_brick_wall", 1),
+            id: ModuleId::new("dapple_library.glazed_brick_wall", 2),
             doc: "Victorian glazed brickwork on a 1 m tile".into(),
             params: vec![
                 color("field", d.field, "the field's glaze, above the band"),

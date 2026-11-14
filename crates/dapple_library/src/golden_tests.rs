@@ -86,7 +86,7 @@ const GOLDEN: &[(&str, u32, &str, u64)] = &[
     ),
     (
         "dapple_library.glazed_brick_wall",
-        1,
+        2,
         "defaults",
         0xa4db69f4cfb93dfa,
     ),

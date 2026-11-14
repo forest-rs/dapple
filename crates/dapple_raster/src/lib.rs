@@ -426,6 +426,13 @@ impl<T: Copy> Raster<T> {
 
     fn resolve(&self, x: i64, y: i64) -> (usize, usize) {
         let (w, h) = (i64::from(self.width), i64::from(self.height));
+        // Inside, both policies leave the coordinates; most reads are.
+        if let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y))
+            && x < self.width as usize
+            && y < self.height as usize
+        {
+            return (x, y);
+        }
         let (x, y) = match self.edge {
             Edge::Wrap => (x.rem_euclid(w), y.rem_euclid(h)),
             Edge::Clamp => (x.clamp(0, w - 1), y.clamp(0, h - 1)),
@@ -1080,3 +1087,42 @@ impl ScalarField for SampledField {
 mod golden_tests;
 #[cfg(test)]
 mod rect_tests;
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+
+    use glam::Vec2;
+
+    use crate::{Edge, Raster};
+
+    /// Reads inside a raster, at its borders, past them by a little and by
+    /// a lot, follow the edge policy.
+    #[test]
+    fn reads_follow_the_edge_policy_everywhere() {
+        let (w, h) = (5_i64, 3_i64);
+        let values: Vec<u32> = (0..15).collect();
+        let far = [
+            i64::MIN,
+            i64::MIN + 1,
+            -(1 << 40),
+            1 << 40,
+            i64::MAX - 1,
+            i64::MAX,
+        ];
+        let coordinates: Vec<i64> = (-12..12).chain(far).collect();
+        for edge in [Edge::Wrap, Edge::Clamp] {
+            let r = Raster::from_values(5, 3, Vec2::ZERO, Vec2::ONE, edge, values.clone()).unwrap();
+            for &x in &coordinates {
+                for &y in &coordinates {
+                    let (rx, ry) = match edge {
+                        Edge::Wrap => (x.rem_euclid(w), y.rem_euclid(h)),
+                        Edge::Clamp => (x.clamp(0, w - 1), y.clamp(0, h - 1)),
+                    };
+                    let expected = u32::try_from(ry * w + rx).unwrap();
+                    assert_eq!(r.at(x, y), expected, "{edge:?} ({x}, {y})");
+                }
+            }
+        }
+    }
+}

@@ -9,21 +9,37 @@
 //! frequency does not divide the period, a gradient from the foot of a wall
 //! to its top) makes it stand out.
 //!
-//! [`seam`] measures, along one axis and averaged over every line, the step
-//! between each pair of neighbors and the change of step at each texel (a
-//! kink, as where a wave's phase jumps), and compares those across the wrap
-//! with the **roughest** position inside. Periodic features that happen to
-//! line up with the wrap (a mortar joint on the tile's edge, cell borders
-//! crowding a lattice line) line up with interior positions as well, so the
+//! [`seam`] measures, along one axis and on every line, the step between
+//! each pair of neighbors and the change of step at each texel (a kink, as
+//! where a wave's phase jumps), and compares those across the wrap with the
+//! **roughest** position inside. Periodic features that happen to line up
+//! with the wrap (a mortar joint on the tile's edge, cell borders crowding
+//! a lattice line) line up with interior positions as well, so the
 //! comparison does not mistake them for seams; a seam is a wrap rougher
-//! than anything in the interior. [`Seam::is_seamless`] allows up to
-//! [`SEAM_TOLERANCE`] times the roughest interior position.
+//! than anything in the interior.
 //!
-//! This is a raster-only test: it catches gross seams and never cries wolf
-//! on periodic content, but a subtle seam no rougher than the interior
-//! passes. Where the content is a formula, evaluating it across the wrap is
-//! exact; see `dapple_material::program`. Values are compared per component
-//! by absolute difference; identifiers by whether they differ.
+//! Each position is summed up over the lines twice: by the mean, and by
+//! the median line. A seam runs the length of the wrap, so it shows in
+//! both. A feature that merely lies on the wrap (a paint chip, a fleck of
+//! bare metal, a streak) crosses only some lines: it can make the wrap the
+//! roughest position on average, since a sparse feature may have no twin
+//! inside and one a texel wide changes the step at its texel by twice its
+//! height, but it cannot move the median line. So the wrap counts as only
+//! as much rougher as both comparisons agree, the smaller of the two, and
+//! [`Seam::is_seamless`] allows up to [`SEAM_TOLERANCE`].
+//!
+//! This is a raster-only test: it catches gross seams that run along most
+//! of the wrap and never cries wolf on features that cross under half of
+//! its lines, but a subtle seam no rougher than the interior passes, as
+//! does one confined to a minority of lines. A lone feature that crosses
+//! most of the lines and is rougher than anything inside (a crease the
+//! height of the tile, or the only high-contrast course boundary in it) is
+//! indistinguishable from a seam when it lies on the wrap. Where the
+//! content is a formula, evaluating it across the wrap is exact; see
+//! `dapple_material::program`. Values are compared per component by
+//! absolute difference; identifiers by whether they differ.
+
+use alloc::vec::Vec;
 
 use crate::Raster;
 
@@ -49,8 +65,12 @@ pub struct Seam {
     pub wrap_step: f32,
     /// The mean step at the roughest interior position.
     pub interior_step: f32,
-    /// The larger of the wrap's step and change of step over those of the
-    /// roughest interior positions; 1 where all are zero.
+    /// How many times rougher the wrap is than the roughest interior
+    /// position; 1 means no rougher, and 1 where all are zero.
+    ///
+    /// The step and the change of step are each compared twice, by the
+    /// mean over lines and by the median line, and count as far as both
+    /// agree (the smaller ratio); this is the larger of the two measures.
     pub ratio: f32,
 }
 
@@ -126,25 +146,69 @@ pub fn seam<T: SeamValue>(r: &Raster<T>, axis: Axis) -> Seam {
             ratio: 1.0,
         };
     }
-    // Per position, averaged over the lines: the step to the next texel
-    // (position `len − 1` is the wrap) and the change of step at the texel
-    // (positions 0 and `len − 1` straddle the wrap).
+    // Per position, over the lines: the step to the next texel (position
+    // `len − 1` is the wrap) and the change of step at the texel (positions
+    // 0 and `len − 1` straddle the wrap).
     let size = usize::try_from(len).expect("raster sizes fit usize");
-    let mut step = alloc::vec![0.0_f64; size];
-    let mut bend = alloc::vec![0.0_f64; size];
-    for line in 0..lines {
-        for (k, (s, b2)) in (0..len).zip(step.iter_mut().zip(bend.iter_mut())) {
+    let count = usize::try_from(lines).expect("raster sizes fit usize");
+    let (mut steps, mut bends) = (Vec::with_capacity(count), Vec::with_capacity(count));
+    let (mut step, mut bend) = (Vec::with_capacity(size), Vec::with_capacity(size));
+    for k in 0..len {
+        steps.clear();
+        bends.clear();
+        for line in 0..lines {
             let (a, b, c) = (at(line, k - 1), at(line, k), at(line, k + 1));
-            *s += f64::from(b.distance(c));
-            *b2 += f64::from(T::bend(a, b, c));
+            steps.push(b.distance(c));
+            bends.push(T::bend(a, b, c));
         }
+        step.push(Lines::of(&mut steps));
+        bend.push(Lines::of(&mut bends));
     }
     let last = size - 1;
-    let wrap = step[last];
-    let wrap2 = bend[0].max(bend[last]);
-    let interior = step[..last].iter().copied().fold(0.0, f64::max);
-    let interior2 = bend[1..last].iter().copied().fold(0.0, f64::max);
-    let ratio_of = |w: f64, i: f64| -> f32 {
+    let roughest = |p: &[Lines]| p.iter().map(|l| l.sum).fold(0.0, f64::max);
+    let (wrap, interior) = (step[last].sum, roughest(&step[..last]));
+    let ratio =
+        compare(&step[last..], &step[..last]).max(compare(&[bend[0], bend[last]], &bend[1..last]));
+    #[expect(clippy::cast_precision_loss, reason = "line counts fit f64")]
+    let n = lines as f64;
+    #[expect(clippy::cast_possible_truncation, reason = "means of f32 steps")]
+    Seam {
+        axis,
+        wrap_step: (wrap / n) as f32,
+        interior_step: (interior / n) as f32,
+        ratio,
+    }
+}
+
+/// One measure at one position, summed up over the lines.
+#[derive(Copy, Clone, Debug)]
+struct Lines {
+    /// The sum over the lines, in line order: the mean, times the count.
+    sum: f64,
+    /// The median line: what more than half of the lines reach.
+    median: f64,
+}
+
+impl Lines {
+    /// Sums up `values`, one per line (reordering them).
+    fn of(values: &mut [f32]) -> Self {
+        let sum = values.iter().fold(0.0, |s, v| s + f64::from(*v));
+        let middle = (values.len() - 1) / 2;
+        let (_, median, _) = values.select_nth_unstable_by(middle, f32::total_cmp);
+        Self {
+            sum,
+            median: f64::from(*median),
+        }
+    }
+}
+
+/// How many times rougher the roughest of the `wrap` positions is than the
+/// roughest of the `interior` ones, as far as the mean over lines and the
+/// median line agree.
+fn compare(wrap: &[Lines], interior: &[Lines]) -> f32 {
+    let by = |stat: fn(&Lines) -> f64| {
+        let roughest = |p: &[Lines]| p.iter().map(stat).fold(0.0, f64::max);
+        let (w, i) = (roughest(wrap), roughest(interior));
         #[expect(clippy::cast_possible_truncation, reason = "a ratio of sums")]
         if i > 1e-12 {
             (w / i) as f32
@@ -154,15 +218,7 @@ pub fn seam<T: SeamValue>(r: &Raster<T>, axis: Axis) -> Seam {
             1.0
         }
     };
-    #[expect(clippy::cast_precision_loss, reason = "line counts fit f64")]
-    let n = lines as f64;
-    #[expect(clippy::cast_possible_truncation, reason = "means of f32 steps")]
-    Seam {
-        axis,
-        wrap_step: (wrap / n) as f32,
-        interior_step: (interior / n) as f32,
-        ratio: ratio_of(wrap, interior).max(ratio_of(wrap2, interior2)),
-    }
+    by(|l| l.sum).min(by(|l| l.median))
 }
 
 #[cfg(test)]
@@ -505,5 +561,63 @@ mod tests {
         reported("chips8", 32, &[(Ramp, 0.75), (Faded, 0.75)]);
         reported("cells12", 32, &[(Ramp, 0.5), (Faded, 0.5)]);
         reported("mask50", 32, &[(Ramp, 1.5), (Faded, 1.5)]);
+    }
+
+    /// Periodic content is seamless under every cyclic shift along either
+    /// axis: periodic content is the same content wherever the period
+    /// starts, so no choice of start may fail it. Among the shifts are the
+    /// ones that put a chip's edge, a fleck one texel wide or a streak's
+    /// center on the wrap, which the mean over lines alone took for seams.
+    ///
+    /// Hard-edged cells are checked at 32 texels and up: on coarser grids,
+    /// or with denser cells, borders can bunch along the texels beside the
+    /// wrap across more than half the lines, which the kink measure cannot
+    /// tell from a crease.
+    #[test]
+    fn periodic_content_is_seamless_under_every_cyclic_shift() {
+        let holds = |name: &str, n: u32, seed: u64| {
+            let r = sampled(n, family(name, n as f32, seed));
+            for s in 0..i64::from(n) {
+                for (axis, rolled) in [(Axis::X, r.rolled(s, 0)), (Axis::Y, r.rolled(0, s))] {
+                    let m = seam(&rolled, axis);
+                    assert!(
+                        m.is_seamless(),
+                        "{name} #{seed} at {n}, started {s} texels on along {axis:?}: {m:?}"
+                    );
+                }
+            }
+        };
+        let local = [
+            "chips1", "chips2", "chips4", "specks1", "specks2", "specks6",
+        ];
+        let single = ["dot", "rect", "blobs1", "blobs6", "streaks1"];
+        let periodic = [
+            "smooth",
+            "value",
+            "waves",
+            "stripes_x",
+            "stripes_y",
+            "stripes_diag",
+        ];
+        let masks = ["mask20", "mask50", "mask70"];
+        for n in [16, 24, 32, 48, 64] {
+            for name in local.iter().chain(&single).chain(&periodic).chain(&masks) {
+                for seed in 1..=3 {
+                    holds(name, n, seed);
+                }
+            }
+        }
+        for n in [24, 32, 48, 64] {
+            for seed in 1..=3 {
+                holds("streaks3", n, seed);
+            }
+        }
+        for n in [32, 48, 64] {
+            for name in ["cells4", "cells12"] {
+                for seed in [1, 3] {
+                    holds(name, n, seed);
+                }
+            }
+        }
     }
 }

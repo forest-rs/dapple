@@ -396,6 +396,16 @@ impl Lattice3 {
             ],
         }
     }
+
+    /// Wraps one coordinate of a cell index on `axis` onto the period, as
+    /// [`Self::wrap_cell`] does, for kernels that wrap a row, column or
+    /// layer of cells once rather than every cell of a block.
+    pub(crate) fn wrap_axis(self, axis: usize, index: i64) -> i64 {
+        match self.wrap {
+            None => index,
+            Some(n) => index.rem_euclid(n[axis]),
+        }
+    }
 }
 
 /// Whether `x`, a product of `f32` parameters, is a whole number.

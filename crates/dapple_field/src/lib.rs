@@ -117,3 +117,5 @@ pub use types::{NormalFrame, PortType, Primaries, Value};
 mod golden_tests;
 #[cfg(test)]
 mod image_tests;
+#[cfg(test)]
+mod scoped_tests;

@@ -1154,3 +1154,193 @@ mod metals {
         }
     }
 }
+
+/// The library's programs evaluated in runs, through the batch entry
+/// points rasters and materials use, give each point's bits.
+mod rows {
+    use alloc::format;
+    use alloc::string::String;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use dapple_field::program::{ChartSample, Op, ProgramBuilder, ValueProgram};
+    use dapple_field::scoped::{Scope, Shape};
+    use dapple_field::{Domain, Footprint, ScalarField, SolidField, Value};
+    use glam::{Vec2, Vec3};
+
+    use crate::{brick, glazed_brick, gravel, oak, parquet};
+
+    fn bits(v: Value) -> String {
+        // NaN is NaN, whatever its payload.
+        let f = |x: f32| if x.is_nan() { u32::MAX } else { x.to_bits() };
+        match v {
+            Value::Scalar(x) => format!("s{}", f(x)),
+            Value::Id(x) => format!("i{x}"),
+            Value::Vector2(x) => format!("v{:?}", x.to_array().map(f)),
+            Value::Vector3(x) => format!("c{:?}", x.to_array().map(f)),
+        }
+    }
+
+    /// Random points near and far on both signs, then signed zeros, NaN
+    /// and huge coordinates.
+    fn points() -> Vec<Vec2> {
+        let mut state = 0x726f_7773_u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 40) as f32 / (1_u64 << 24) as f32 * 2.0 - 1.0
+        };
+        let mut points: Vec<Vec2> = (0..90)
+            .map(|i| Vec2::new(next(), next()) * [1.0, 3.0, 1e4][i % 3])
+            .collect();
+        for v in [0.0, -0.0, f32::NAN, 1e12, -1e12] {
+            points.push(Vec2::new(v, 0.3));
+            points.push(Vec2::new(0.7, v));
+        }
+        points
+    }
+
+    fn footprints() -> [Footprint; 4] {
+        [0.0, 1.0 / 256.0, 0.03, 1e6].map(|w| Footprint::new(w).unwrap())
+    }
+
+    fn assert_rows(name: &str, program: &ValueProgram) {
+        let points = points();
+        let output = program.program().output();
+        let mut kept = program.evaluator();
+        for footprint in footprints() {
+            let mut runs = vec![Value::Id(u32::MAX); points.len()];
+            for (run, out) in points.chunks(37).zip(runs.chunks_mut(37)) {
+                kept.eval_value_batch(run, footprint, out);
+            }
+            let mut whole = vec![Value::Id(u32::MAX); points.len()];
+            program.eval_batch(&points, footprint, &mut whole);
+            for (i, &p) in points.iter().enumerate() {
+                let alone = bits(program.eval(p, footprint));
+                let recursive = bits(program.program().eval_value(output, p, footprint));
+                assert_eq!(alone, recursive, "{name} at {p}");
+                assert_eq!(bits(runs[i]), alone, "{name} run at {p}");
+                assert_eq!(bits(whole[i]), alone, "{name} batch at {p}");
+            }
+            if program.output_type().is_scalar() {
+                let mut scalars = vec![0.0; points.len()];
+                program
+                    .program()
+                    .eval_batch(&points, footprint, &mut scalars);
+                for (&v, &p) in scalars.iter().zip(&points) {
+                    let alone = bits(Value::Scalar(program.program().eval(p, footprint)));
+                    assert_eq!(bits(Value::Scalar(v)), alone, "{name} scalar at {p}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn library_programs_evaluate_in_runs_as_alone() {
+        for domain in [Domain::periodic(1, 1).unwrap(), Domain::Plane] {
+            let height = oak::bark_height(domain).unwrap();
+            let as_value = |b: &mut ProgramBuilder, program| b.import(program).unwrap();
+            let mut b = ProgramBuilder::new();
+            let out = as_value(&mut b, &height);
+            assert_rows("bark height", &b.finish_value(out).unwrap());
+            assert_rows("bark color", &oak::bark_color(domain, &height).unwrap());
+            assert_rows("brick color", &brick::color(domain).unwrap());
+            assert_rows("gravel color", &gravel::color(domain).unwrap());
+            assert_rows("parquet color", &parquet::color(domain).unwrap());
+        }
+        // The solid oak as the wood module cuts its board.
+        let mut b = ProgramBuilder::new();
+        let solid = oak::wood_color(&mut b).unwrap();
+        let board = b
+            .add(Op::Slice {
+                input: solid,
+                origin: [0.14, 0.0, 0.0],
+                u: [0.0, 0.0, 1.0],
+                v: [0.0, 1.0, 0.0],
+                domain: Domain::Plane,
+            })
+            .unwrap();
+        assert_rows("oak board", &b.finish_value(board).unwrap());
+    }
+
+    #[test]
+    fn oak_charts_evaluate_each_sample_as_alone() {
+        let points: Vec<Vec3> = points()
+            .into_iter()
+            .map(|p| Vec3::new(0.14, p.y, p.x))
+            .collect();
+        for channel in oak::wood_channels().unwrap() {
+            for footprint in footprints() {
+                let samples: Vec<ChartSample> = points
+                    .iter()
+                    .map(|&p| ChartSample::isotropic(p, footprint))
+                    .collect();
+                let mut out = vec![0.0; samples.len()];
+                channel.eval_chart(&samples, &mut out);
+                for (&v, &p) in out.iter().zip(&points) {
+                    assert_eq!(
+                        bits(Value::Scalar(v)),
+                        bits(Value::Scalar(channel.eval(p, footprint))),
+                        "oak at {p}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_glazed_brick_program_evaluates_in_runs_as_alone() {
+        let program = glazed_brick::program().unwrap();
+        let input = |i: u32, lane: usize| {
+            let decl = &program.inputs()[i as usize];
+            let lane = if decl.scope.within(Scope::Element) {
+                0
+            } else {
+                lane
+            };
+            let h = |axis: usize| {
+                let x = ((lane * 7 + axis * 13 + i as usize * 29) % 101) as f32 / 50.0 - 1.0;
+                if lane % 17 == 5 { x * 1e4 } else { x }
+            };
+            match Shape::of(decl.port) {
+                Shape::Scalar => Value::Scalar(h(0)),
+                Shape::Id => Value::Id(u32::try_from(lane % 4).unwrap()),
+                Shape::Vector2 => Value::Vector2(Vec2::new(h(0), h(1))),
+                Shape::Vector3 => Value::Vector3(Vec3::new(h(0), h(1), h(2))),
+            }
+        };
+        let footprint = Footprint::new(1.0 / 512.0).unwrap();
+        let hoist = |s: Scope| s.within(Scope::Element);
+        let mut hoisted = vec![None; program.nodes().len()];
+        program.evaluate(&mut hoisted, hoist, &mut |i| input(i, 0), Footprint::POINT);
+        let mut kept = program.evaluator();
+        kept.hoist(hoist, &mut |i| input(i, 0), Footprint::POINT);
+        let mut first = 0;
+        for len in [1, 64, 0, 200] {
+            kept.eval_batch(
+                len,
+                &mut |i, values| {
+                    for (lane, value) in values.iter_mut().enumerate() {
+                        *value = input(i, first + lane);
+                    }
+                },
+                footprint,
+            );
+            for lane in 0..len {
+                let mut values = hoisted.clone();
+                program.evaluate(
+                    &mut values,
+                    |_| true,
+                    &mut |i| input(i, first + lane),
+                    footprint,
+                );
+                for (o, decl) in program.outputs().iter().enumerate() {
+                    let alone = values[decl.node.index()].unwrap();
+                    assert_eq!(bits(kept.output(o)[lane]), bits(alone), "{}", decl.name);
+                }
+            }
+            first += len;
+        }
+    }
+}

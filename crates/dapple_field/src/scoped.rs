@@ -41,7 +41,7 @@ use core::fmt;
 use glam::{Vec2, Vec3};
 
 use crate::hash::hash;
-use crate::program::{ValueProgram, fract};
+use crate::program::{Evaluator, ValueProgram, fract};
 use crate::shaping::{ColorRamp, ToneCurve};
 use crate::{Footprint, PortType, Value};
 
@@ -598,7 +598,6 @@ impl ScopedProgram {
         let v = |r: &NodeRef| values[r.index()].expect("operands precede their nodes");
         match &self.nodes[n] {
             Node::Input(i) => inputs(*i),
-            Node::Constant(value) => *value,
             Node::Sample { resource, at } => {
                 let Value::Vector2(at) = v(at) else {
                     unreachable!("checked: sample positions are 2D")
@@ -607,80 +606,6 @@ impl ScopedProgram {
                     .program
                     .eval(at, footprint)
             }
-            Node::Add(a, b) => zip(v(a), v(b), |x, y| x + y),
-            Node::Sub(a, b) => zip(v(a), v(b), |x, y| x - y),
-            Node::Mul(a, b) => zip(v(a), v(b), |x, y| x * y),
-            Node::Div(a, b) => zip(v(a), v(b), |x, y| x / y),
-            Node::Min(a, b) => zip(v(a), v(b), f32::min),
-            Node::Max(a, b) => zip(v(a), v(b), f32::max),
-            Node::Pow(a, b) => zip(v(a), v(b), |x, y| libm::powf(x.max(0.0), y)),
-            Node::Unary(op, a) => map(v(a), |x| op.apply(x)),
-            Node::Compare(op, a, b) => {
-                let (a, b) = (v(a), v(b));
-                let holds = match (a, b) {
-                    (Value::Id(a), Value::Id(b)) => match op {
-                        CompareOp::Equal => a == b,
-                        CompareOp::NotEqual => a != b,
-                        _ => unreachable!("checked: identifiers only compare for equality"),
-                    },
-                    _ => {
-                        let (a, b) = (scalar(a), scalar(b));
-                        match op {
-                            CompareOp::Less => a < b,
-                            CompareOp::LessEqual => a <= b,
-                            CompareOp::Greater => a > b,
-                            CompareOp::GreaterEqual => a >= b,
-                            CompareOp::Equal => a == b,
-                            CompareOp::NotEqual => a != b,
-                        }
-                    }
-                };
-                Value::Scalar(if holds { 1.0 } else { 0.0 })
-            }
-            Node::Mix { a, b, t } => {
-                let t = scalar(v(t));
-                zip(v(a), v(b), |x, y| x + (y - x) * t)
-            }
-            Node::Clamp { x, lo, hi } => zip(zip(v(x), v(lo), f32::max), v(hi), f32::min),
-            Node::SmoothStep { edge0, edge1, x } => {
-                Value::Scalar(smoothstep(scalar(v(edge0)), scalar(v(edge1)), scalar(v(x))))
-            }
-            Node::Select { condition, a, b } => {
-                if scalar(v(condition)) >= 0.5 {
-                    v(a)
-                } else {
-                    v(b)
-                }
-            }
-            Node::Component { input, index } => {
-                Value::Scalar(v(input).component(*index as usize).unwrap_or(0.0))
-            }
-            Node::Vector2(a, b) => Value::Vector2(Vec2::new(scalar(v(a)), scalar(v(b)))),
-            Node::Vector3(a, b, c) => {
-                Value::Vector3(Vec3::new(scalar(v(a)), scalar(v(b)), scalar(v(c))))
-            }
-            Node::Length(a) => Value::Scalar(match v(a) {
-                Value::Scalar(x) => x.abs(),
-                Value::Vector2(x) => x.length(),
-                Value::Vector3(x) => x.length(),
-                Value::Id(_) => 0.0,
-            }),
-            Node::Dot(a, b) => Value::Scalar(match (v(a), v(b)) {
-                (Value::Vector2(a), Value::Vector2(b)) => a.dot(b),
-                (Value::Vector3(a), Value::Vector3(b)) => a.dot(b),
-                _ => unreachable!("checked: dot products take two vectors of one shape"),
-            }),
-            Node::Cross(a, b) => match (v(a), v(b)) {
-                (Value::Vector3(a), Value::Vector3(b)) => Value::Vector3(a.cross(b)),
-                _ => unreachable!("checked: cross products take 3D vectors"),
-            },
-            Node::Normalize(a) => match v(a) {
-                Value::Vector2(x) => Value::Vector2(x.normalize_or_zero()),
-                Value::Vector3(x) => Value::Vector3(x.normalize_or_zero()),
-                other => other,
-            },
-            Node::Curve(x, curve) => Value::Scalar(curve.eval(scalar(v(x)))),
-            Node::Ramp(t, ramp) => Value::Vector3(ramp.eval(scalar(v(t)))),
             Node::Call {
                 function,
                 output,
@@ -692,6 +617,24 @@ impl ScopedProgram {
                 f.evaluate(&mut slots, |_| true, &mut |i| args[i as usize], footprint);
                 slots[f.outputs[*output as usize].node.index()].expect("every node evaluated")
             }
+            node => pure(node, v),
+        }
+    }
+
+    /// An evaluator of the program over runs of samples; see
+    /// [`ScopedEvaluator`].
+    #[must_use]
+    pub fn evaluator(&self) -> ScopedEvaluator<'_> {
+        ScopedEvaluator {
+            program: self,
+            fixed: vec![None; self.nodes.len()],
+            columns: Vec::new(),
+            stride: 0,
+            len: 0,
+            broadcast: 0,
+            resources: self.resources.iter().map(|_| None).collect(),
+            functions: self.functions.iter().map(|_| None).collect(),
+            points: Vec::new(),
         }
     }
 
@@ -719,6 +662,139 @@ impl ScopedProgram {
             scopes.push(scope);
         }
         scopes
+    }
+}
+
+/// Evaluates a [`ScopedProgram`] over runs of samples, such as the texels
+/// of a raster row, reusing its buffers from run to run.
+///
+/// Nodes [hoisted](Self::hoist) are evaluated once and kept;
+/// [`Self::eval_batch`] evaluates the rest node by node over a whole run,
+/// sampling each resource for the run at once through one kept
+/// [`Evaluator`] and calling each function for the run at once through
+/// one kept evaluator of its own. Every value is the bits
+/// [`ScopedProgram::evaluate`] gives the same sample, with the same nodes
+/// hoisted.
+#[derive(Clone, Debug)]
+pub struct ScopedEvaluator<'a> {
+    program: &'a ScopedProgram,
+    /// Hoisted values, by node.
+    fixed: Vec<Option<Value>>,
+    /// One column of `stride` lanes per node, node after node.
+    columns: Vec<Value>,
+    stride: usize,
+    /// Lanes in the last run.
+    len: usize,
+    /// Lanes of the hoisted nodes' columns that hold their values.
+    broadcast: usize,
+    resources: Vec<Option<Evaluator<'a>>>,
+    functions: Vec<Option<Self>>,
+    points: Vec<Vec2>,
+}
+
+impl ScopedEvaluator<'_> {
+    /// Evaluates once, and keeps for every later run, the nodes not yet
+    /// hoisted whose scope `include` accepts, reading input `i` from
+    /// `inputs(i)` and sampling resources with `footprint`, as
+    /// [`ScopedProgram::evaluate`] does.
+    ///
+    /// # Panics
+    ///
+    /// When an operand of an included node is neither included nor
+    /// hoisted already.
+    pub fn hoist(
+        &mut self,
+        include: impl Fn(Scope) -> bool,
+        inputs: &mut dyn FnMut(u32) -> Value,
+        footprint: Footprint,
+    ) {
+        self.program
+            .evaluate(&mut self.fixed, include, inputs, footprint);
+        self.broadcast = 0;
+    }
+
+    /// Evaluates every node not hoisted at `len` samples, sampling
+    /// resources with `footprint`; [`Self::output`] then reads the results.
+    ///
+    /// `inputs(i, values)` fills `values`, one slot per sample, with input
+    /// `i`; it is asked only for inputs not hoisted.
+    pub fn eval_batch(
+        &mut self,
+        len: usize,
+        inputs: &mut dyn FnMut(u32, &mut [Value]),
+        footprint: Footprint,
+    ) {
+        let program = self.program;
+        if len > self.stride {
+            self.stride = len;
+            self.columns = vec![Value::Scalar(0.0); program.nodes.len() * len];
+            self.broadcast = 0;
+        }
+        self.len = len;
+        let stride = self.stride;
+        if len > self.broadcast {
+            for (n, value) in self.fixed.iter().enumerate() {
+                if let Some(value) = *value {
+                    self.columns[n * stride..][..len].fill(value);
+                }
+            }
+            self.broadcast = len;
+        }
+        for (n, node) in program.nodes.iter().enumerate() {
+            if self.fixed[n].is_some() {
+                continue;
+            }
+            let (done, rest) = self.columns.split_at_mut(n * stride);
+            let out = &mut rest[..len];
+            let column = |r: &NodeRef| &done[r.index() * stride..][..len];
+            match node {
+                Node::Input(i) => inputs(*i, out),
+                Node::Sample { resource, at } => {
+                    self.points.clear();
+                    self.points.extend(column(at).iter().map(|&at| {
+                        let Value::Vector2(at) = at else {
+                            unreachable!("checked: sample positions are 2D")
+                        };
+                        at
+                    }));
+                    let program = &program.resources[*resource as usize].program;
+                    self.resources[*resource as usize]
+                        .get_or_insert_with(|| program.evaluator())
+                        .eval_value_batch(&self.points, footprint, out);
+                }
+                Node::Call {
+                    function,
+                    output,
+                    args,
+                } => {
+                    let f = &program.functions[*function as usize].program;
+                    let called =
+                        self.functions[*function as usize].get_or_insert_with(|| f.evaluator());
+                    called.eval_batch(
+                        len,
+                        &mut |i, values| values.copy_from_slice(column(&args[i as usize])),
+                        footprint,
+                    );
+                    out.copy_from_slice(called.output(*output as usize));
+                }
+                node => {
+                    for (lane, value) in out.iter_mut().enumerate() {
+                        *value = pure(node, |r| done[r.index() * stride + lane]);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Output `index`'s values at the samples of the last run.
+    ///
+    /// # Panics
+    ///
+    /// When there is no output `index`.
+    #[must_use]
+    pub fn output(&self, index: usize) -> &[Value] {
+        let node = self.program.outputs[index].node.index();
+        &self.columns[node * self.stride..][..self.len]
     }
 }
 
@@ -1292,6 +1368,92 @@ impl ScopedBuilder {
     /// As [`Self::node`].
     pub fn sample(&mut self, resource: u32, at: NodeRef) -> Result<NodeRef, ContractError> {
         self.node(Node::Sample { resource, at })
+    }
+}
+
+/// The value of `node` from its operands' values `v`, for every node but
+/// inputs, resource samples and calls, which read outside the body.
+#[inline]
+fn pure(node: &Node, v: impl Fn(&NodeRef) -> Value) -> Value {
+    match node {
+        Node::Constant(value) => *value,
+        Node::Add(a, b) => zip(v(a), v(b), |x, y| x + y),
+        Node::Sub(a, b) => zip(v(a), v(b), |x, y| x - y),
+        Node::Mul(a, b) => zip(v(a), v(b), |x, y| x * y),
+        Node::Div(a, b) => zip(v(a), v(b), |x, y| x / y),
+        Node::Min(a, b) => zip(v(a), v(b), f32::min),
+        Node::Max(a, b) => zip(v(a), v(b), f32::max),
+        Node::Pow(a, b) => zip(v(a), v(b), |x, y| libm::powf(x.max(0.0), y)),
+        Node::Unary(op, a) => map(v(a), |x| op.apply(x)),
+        Node::Compare(op, a, b) => {
+            let (a, b) = (v(a), v(b));
+            let holds = match (a, b) {
+                (Value::Id(a), Value::Id(b)) => match op {
+                    CompareOp::Equal => a == b,
+                    CompareOp::NotEqual => a != b,
+                    _ => unreachable!("checked: identifiers only compare for equality"),
+                },
+                _ => {
+                    let (a, b) = (scalar(a), scalar(b));
+                    match op {
+                        CompareOp::Less => a < b,
+                        CompareOp::LessEqual => a <= b,
+                        CompareOp::Greater => a > b,
+                        CompareOp::GreaterEqual => a >= b,
+                        CompareOp::Equal => a == b,
+                        CompareOp::NotEqual => a != b,
+                    }
+                }
+            };
+            Value::Scalar(if holds { 1.0 } else { 0.0 })
+        }
+        Node::Mix { a, b, t } => {
+            let t = scalar(v(t));
+            zip(v(a), v(b), |x, y| x + (y - x) * t)
+        }
+        Node::Clamp { x, lo, hi } => zip(zip(v(x), v(lo), f32::max), v(hi), f32::min),
+        Node::SmoothStep { edge0, edge1, x } => {
+            Value::Scalar(smoothstep(scalar(v(edge0)), scalar(v(edge1)), scalar(v(x))))
+        }
+        Node::Select { condition, a, b } => {
+            if scalar(v(condition)) >= 0.5 {
+                v(a)
+            } else {
+                v(b)
+            }
+        }
+        Node::Component { input, index } => {
+            Value::Scalar(v(input).component(*index as usize).unwrap_or(0.0))
+        }
+        Node::Vector2(a, b) => Value::Vector2(Vec2::new(scalar(v(a)), scalar(v(b)))),
+        Node::Vector3(a, b, c) => {
+            Value::Vector3(Vec3::new(scalar(v(a)), scalar(v(b)), scalar(v(c))))
+        }
+        Node::Length(a) => Value::Scalar(match v(a) {
+            Value::Scalar(x) => x.abs(),
+            Value::Vector2(x) => x.length(),
+            Value::Vector3(x) => x.length(),
+            Value::Id(_) => 0.0,
+        }),
+        Node::Dot(a, b) => Value::Scalar(match (v(a), v(b)) {
+            (Value::Vector2(a), Value::Vector2(b)) => a.dot(b),
+            (Value::Vector3(a), Value::Vector3(b)) => a.dot(b),
+            _ => unreachable!("checked: dot products take two vectors of one shape"),
+        }),
+        Node::Cross(a, b) => match (v(a), v(b)) {
+            (Value::Vector3(a), Value::Vector3(b)) => Value::Vector3(a.cross(b)),
+            _ => unreachable!("checked: cross products take 3D vectors"),
+        },
+        Node::Normalize(a) => match v(a) {
+            Value::Vector2(x) => Value::Vector2(x.normalize_or_zero()),
+            Value::Vector3(x) => Value::Vector3(x.normalize_or_zero()),
+            other => other,
+        },
+        Node::Curve(x, curve) => Value::Scalar(curve.eval(scalar(v(x)))),
+        Node::Ramp(t, ramp) => Value::Vector3(ramp.eval(scalar(v(t)))),
+        Node::Input(_) | Node::Sample { .. } | Node::Call { .. } => {
+            unreachable!("inputs, samples and calls read outside the body")
+        }
     }
 }
 

@@ -92,9 +92,9 @@ const GOLDEN: &[(&str, u32, &str, u64)] = &[
     ),
     (
         "dapple_library.stone_sill",
-        1,
+        2,
         "defaults",
-        0x90cdbe5c58a67cc0,
+        0xa877a1bfb523886e,
     ),
     (
         "dapple_library.varnished_board",

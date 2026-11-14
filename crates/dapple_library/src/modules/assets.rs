@@ -299,7 +299,7 @@ pub struct StoneSill;
 impl Module for StoneSill {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId::new("dapple_library.stone_sill", 1),
+            id: ModuleId::new("dapple_library.stone_sill", 2),
             doc: "a stone sill bedded over glazed brickwork".into(),
             params: vec![
                 meters("sill", [0.05, 0.4], 0.15, "the sill's height on the face"),

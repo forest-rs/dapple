@@ -81,6 +81,10 @@ enum Step {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Plan {
     steps: Vec<Step>,
+    /// Registers whose values do not depend on the point, with those
+    /// values: constants, and arithmetic on constants alone. An evaluator
+    /// holds them from its construction; no step writes them.
+    constants: Vec<(usize, Value)>,
     registers: usize,
     contexts: usize,
     output: usize,
@@ -281,6 +285,50 @@ impl Compiler<'_> {
     }
 }
 
+/// Takes out of `steps` the evaluations whose values do not depend on the
+/// point: constant leaves, with or without their (zero) gradient, and
+/// pointwise kernels of such values alone without a gradient, evaluated
+/// here by the same [`Kernel::combine`] a step would run, so they are the
+/// same bits.
+fn fold(nodes: &[Node], steps: Vec<Step>, registers: usize) -> (Vec<Step>, Vec<(usize, Value)>) {
+    let mut known: Vec<Option<Value>> = alloc::vec![None; registers];
+    let mut constants = Vec::new();
+    let mut kept = Vec::with_capacity(steps.len());
+    for step in steps {
+        if let Step::Eval {
+            reg,
+            node,
+            ref args,
+            count,
+            gradient,
+            ..
+        } = step
+        {
+            let kernel = &nodes[node.0 as usize].kernel;
+            let mut values = [Value::Scalar(0.0); 3];
+            let operands = args[..count]
+                .iter()
+                .zip(&mut values)
+                .all(|(&arg, value)| known[arg].map(|known| *value = known).is_some());
+            let value = match kernel {
+                // A constant's gradient is zero, as the registers start.
+                Kernel::Constant(value) => Some(Value::Scalar(*value)),
+                _ if !gradient && operands && kernel.is_pointwise() => {
+                    Some(kernel.combine(Vec3::ZERO, Footprint::POINT, &values[..count]))
+                }
+                _ => None,
+            };
+            if let Some(value) = value {
+                known[reg] = Some(value);
+                constants.push((reg, value));
+                continue;
+            }
+        }
+        kept.push(step);
+    }
+    (kept, constants)
+}
+
 impl Plan {
     pub(super) fn new(nodes: &[Node], output: NodeId) -> Self {
         let mut compiler = Compiler {
@@ -294,13 +342,21 @@ impl Plan {
         };
         let register = compiler.compile(output, 0, false);
         let tree_evaluations = compiler.tree_count(output, 0);
+        let (steps, constants) = fold(nodes, compiler.steps, compiler.registers);
         Self {
-            steps: compiler.steps,
+            steps,
+            constants,
             registers: compiler.registers,
             contexts: compiler.context_count,
             output: register,
             tree_evaluations,
         }
+    }
+
+    /// Steps evaluated per point.
+    #[cfg(test)]
+    pub(super) fn steps(&self) -> usize {
+        self.steps.len()
     }
 
     pub(super) fn stats(&self) -> EvaluationStats {
@@ -317,6 +373,8 @@ impl Plan {
 ///
 /// Results are bit-identical to [`FieldProgram::eval_value`] on the output:
 /// the same operations run on the same operands, only without repetition.
+/// What does not depend on the point (constants, and arithmetic on
+/// constants alone) is computed once, when the plan is built.
 /// Obtain one from [`FieldProgram::evaluator`] and keep it for a batch of
 /// points, such as a raster.
 #[derive(Clone, Debug)]
@@ -372,9 +430,13 @@ impl<T, const N: usize> core::ops::DerefMut for Slots<T, N> {
 
 impl<'a> Evaluator<'a> {
     pub(super) fn new(program: &'a FieldProgram) -> Self {
+        let mut registers = Slots::filled(Value::Scalar(0.0), program.plan.registers);
+        for &(reg, value) in &program.plan.constants {
+            registers[reg] = value;
+        }
         Self {
             program,
-            registers: Slots::filled(Value::Scalar(0.0), program.plan.registers),
+            registers,
             gradients: Slots::filled(Vec3::ZERO, program.plan.registers),
             points: Slots::filled((Vec3::ZERO, Footprint::POINT), program.plan.contexts),
         }

@@ -23,8 +23,9 @@ The mapping onto Principled is approximate where the models differ:
 `specular_weight` w is "Specular IOR Level" w / 2 (0.5 leaves the
 reflectance alone); `emission_luminance` in cd/m² becomes "Emission
 Strength" through 683 lm/W; glTF's anisotropy strength and fuzz as sheen
-are passed through. The anisotropy direction is not wired: Blender
-stretches along the UV tangent.
+are passed through. The anisotropy direction (`geometry_tangent`) becomes
+"Anisotropic Rotation" about the UV map's tangent, read from a texture
+in the frame its encoding names or from a constant in the domain frame.
 
 Run directly, it checks Blender's own glTF importer instead:
 
@@ -175,6 +176,56 @@ class _Builder:
         else:
             self.bsdf.inputs[socket].default_value = fn(self.value(name)[0])
 
+    def anisotropy_direction(self):
+        """Wires `geometry_tangent` as the rotation of the anisotropy axis
+        from the UV map's tangent, counterclockwise toward the image top:
+        a turn of 1 is 360 degrees."""
+        if self.parameters["specular_roughness_anisotropy"]["held"]["kind"] == "default":
+            return
+        tangent = self.nodes.new("ShaderNodeTangent")
+        tangent.direction_type = "UV_MAP"
+        tangent.uv_map = self.uv_map
+        self.links.new(tangent.outputs["Tangent"], self.bsdf.inputs["Tangent"])
+        held = self.parameters["geometry_tangent"]["held"]
+        socket = self.bsdf.inputs["Anisotropic Rotation"]
+        if held["kind"] != "texture":
+            # A constant is the tangent in the domain frame, whose +Y runs
+            # down the image.
+            x, y = self.value("geometry_tangent")[:2]
+            socket.default_value = (math.atan2(-y, x) / (2.0 * math.pi)) % 1.0
+            return
+        if held["encoding"] not in ("axis_y_up", "axis_y_down"):
+            raise ValueError(f"cannot read an anisotropy axis encoded {held['encoding']}")
+        # (cos θ, sin θ), decoded over the location's range.
+        node = self.image(held["texture"])
+        split = self.nodes.new("ShaderNodeSeparateColor")
+        self.links.new(node.outputs["Color"], split.inputs["Color"])
+        start = held["channels"]["start"]
+        lo, hi = held["range"]
+        cos_sin = []
+        for channel in ("Red", "Green", "Blue")[start : start + 2]:
+            decode = self.nodes.new("ShaderNodeMath")
+            decode.operation = "MULTIPLY_ADD"
+            self.links.new(split.outputs[channel], decode.inputs[0])
+            decode.inputs[1].default_value = hi - lo
+            decode.inputs[2].default_value = lo
+            cos_sin.append(decode.outputs["Value"])
+        if held["encoding"] == "axis_y_down":
+            flip = self.nodes.new("ShaderNodeMath")
+            flip.operation = "MULTIPLY"
+            self.links.new(cos_sin[1], flip.inputs[0])
+            flip.inputs[1].default_value = -1.0
+            cos_sin[1] = flip.outputs["Value"]
+        angle = self.nodes.new("ShaderNodeMath")
+        angle.operation = "ARCTAN2"
+        self.links.new(cos_sin[1], angle.inputs[0])
+        self.links.new(cos_sin[0], angle.inputs[1])
+        turns = self.nodes.new("ShaderNodeMath")
+        turns.operation = "DIVIDE"
+        self.links.new(angle.outputs["Value"], turns.inputs[0])
+        turns.inputs[1].default_value = 2.0 * math.pi
+        self.links.new(turns.outputs["Value"], socket)
+
     def normal(self, name, socket):
         held = self.parameters[name]["held"]
         if held["kind"] != "texture":
@@ -244,9 +295,10 @@ class _Builder:
             "specular_weight",
             (lambda v: v * 0.5, "MULTIPLY", 0.5),
         )
-        if normal_maps:
-            self.normal("geometry_normal", "Normal")
-            self.normal("geometry_coat_normal", "Coat Normal")
+        self.anisotropy_direction()
+        for name, socket in (("geometry_normal", "Normal"), ("geometry_coat_normal", "Coat Normal")):
+            if normal_maps is True or (normal_maps and name in normal_maps):
+                self.normal(name, socket)
         height = self.parameters["height"]["held"]
         if displacement and height["kind"] == "texture":
             # Height in meters: lo + t (hi - lo) = (t - midlevel) scale.
@@ -263,7 +315,7 @@ class _Builder:
             self.mat.displacement_method = "BOTH"
         if self.parameters["geometry_thin_walled"]["held"]["value"] != [0.0]:
             self.mat.use_backface_culling = False
-        for name in ("occlusion", "coat_darkening", "subsurface_color", "geometry_tangent"):
+        for name in ("occlusion", "coat_darkening", "subsurface_color"):
             if self.parameters[name]["held"]["kind"] != "default":
                 self.unused.append(name)
         if self.unused:
@@ -282,7 +334,9 @@ def material(
     `displacement` wires the height, when the export holds one as a
     texture, into true displacement in meters; `normal_maps=False` leaves
     the base and coat normal maps out, for geometry that is displaced by
-    the same relief.
+    the same relief, and a collection of parameter names wires only
+    those (`("geometry_coat_normal",)` keeps a coat's own ripple on
+    displaced geometry).
     """
     return _Builder(directory, name, uv_map, extension).build(displacement, normal_maps)
 

@@ -126,22 +126,29 @@ pub fn evaluate(
             MapBinding::Position => Value::Vector2(grid.center(texel) + shift),
         }
     };
-    let read = |i: u32, texel: usize| read_shifted(i, texel, Vec2::ZERO);
-    let mut hoisted = vec![None; program.nodes().len()];
-    program.evaluate(
-        &mut hoisted,
+    let mut evaluator = program.evaluator();
+    evaluator.hoist(
         |s| s == Scope::Material,
-        &mut |i| read(i, 0),
+        &mut |i| read_shifted(i, 0, Vec2::ZERO),
         Footprint::POINT,
     );
     let footprint = Footprint::new(grid.texel.max_element()).unwrap_or(Footprint::POINT);
     let outputs = program.outputs();
     let mut columns: Vec<Vec<Value>> = vec![Vec::with_capacity(grid.len()); outputs.len()];
-    for texel in 0..grid.len() {
-        let mut values = hoisted.clone();
-        program.evaluate(&mut values, |_| true, &mut |i| read(i, texel), footprint);
-        for (column, o) in columns.iter_mut().zip(outputs) {
-            column.push(values[o.node.index()].expect("every node evaluated"));
+    // Row by row: every input of a row, then every node over the row.
+    let width = grid.width as usize;
+    for first in (0..grid.len()).step_by(width.max(1)) {
+        evaluator.eval_batch(
+            width,
+            &mut |i, values| {
+                for (lane, value) in values.iter_mut().enumerate() {
+                    *value = read_shifted(i, first + lane, Vec2::ZERO);
+                }
+            },
+            footprint,
+        );
+        for (o, column) in columns.iter_mut().enumerate() {
+            column.extend_from_slice(evaluator.output(o));
         }
     }
     // Across the wrap: the same texels, one period away.
@@ -151,21 +158,24 @@ pub fn evaluate(
         #[expect(clippy::cast_precision_loss, reason = "grid sizes are small")]
         let period = grid.texel * Vec2::new(grid.width as f32, grid.height as f32);
         let stride = (grid.len() / 64).max(1) | 1;
+        let probes: Vec<usize> = (0..grid.len()).step_by(stride).collect();
         for (axis, shift) in [(0, Vec2::new(period.x, 0.0)), (1, Vec2::new(0.0, period.y))] {
-            let periodic = (0..grid.len()).step_by(stride).all(|texel| {
-                let mut values = hoisted.clone();
-                program.evaluate(
-                    &mut values,
-                    |_| true,
-                    &mut |i| read_shifted(i, texel, shift),
-                    footprint,
-                );
-                outputs.iter().zip(&columns).all(|(o, column)| {
-                    same(
-                        values[o.node.index()].expect("every node evaluated"),
-                        column[texel],
-                    )
-                })
+            evaluator.eval_batch(
+                probes.len(),
+                &mut |i, values| {
+                    for (value, &texel) in values.iter_mut().zip(&probes) {
+                        *value = read_shifted(i, texel, shift);
+                    }
+                },
+                footprint,
+            );
+            let periodic = (0..outputs.len()).all(|o| {
+                let column = &columns[o];
+                evaluator
+                    .output(o)
+                    .iter()
+                    .zip(&probes)
+                    .all(|(&value, &texel)| same(value, column[texel]))
             });
             if !periodic {
                 if axis == 0 {

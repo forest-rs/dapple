@@ -7,7 +7,7 @@ use glam::Vec2;
 
 use crate::domain::{Domain, DomainError, Footprint, Lattice};
 use crate::field::ScalarField;
-use crate::hash::{hash, key, unit_f32};
+use crate::hash::{hash, key, mix, unit_f32};
 
 /// Purpose tag for feature-point hashes.
 const FEATURE_TAG: u64 = 0x0066_6561_7475_7265; // "feature"
@@ -132,24 +132,50 @@ impl Cellular {
         }
     }
 
-    /// Feature point of the cell `offset` steps from `cell`, relative to
-    /// `cell`'s corner.
+    /// Feature point of the cell `offset` steps from the query cell, whose
+    /// id (its hash) is `id`, relative to the query cell's corner.
     ///
     /// Working relative to the query cell keeps precision independent of how
     /// far the query is from the origin, and makes periodic repeats
     /// bit-identical.
-    fn feature(&self, cell: [i64; 2], offset: [i8; 2]) -> (Vec2, u64) {
-        let [wx, wy] = self.lattice.wrap_cell([
-            cell[0] + i64::from(offset[0]),
-            cell[1] + i64::from(offset[1]),
-        ]);
-        let id = hash(self.seed, &[FEATURE_TAG, key(wx), key(wy)]);
+    fn feature(&self, id: u64, offset: [i8; 2]) -> Vec2 {
         let jitter = Vec2::new(
             unit_f32(hash(id, &[0])) - 0.5,
             unit_f32(hash(id, &[1])) - 0.5,
         ) * self.jitter;
         let corner = Vec2::new(f32::from(offset[0]), f32::from(offset[1]));
-        (corner + Vec2::splat(0.5) + jitter, id)
+        corner + Vec2::splat(0.5) + jitter
+    }
+
+    /// The feature points and ids of the 5 × 5 cells around `cell`, rows
+    /// from the bottom, relative to `cell`'s corner.
+    fn neighborhood(&self, cell: [i64; 2]) -> [(Vec2, u64); 25] {
+        // A cell's id is `hash(seed, [FEATURE_TAG, x, y])` of its wrapped
+        // index. The hash folds its keys from the left, so the seed-and-tag
+        // prefix is mixed once, each column's `x` once, and each cell's `y`
+        // last: one mix per cell instead of three for the same bits, and one
+        // wrap per row and column rather than per cell.
+        let prefix = mix(self.seed, FEATURE_TAG);
+        let column = |dx: i8| {
+            let x = self.lattice.wrap_axis(0, cell[0] + i64::from(dx));
+            mix(prefix, key(x))
+        };
+        let row = |dy: i8| key(self.lattice.wrap_axis(1, cell[1] + i64::from(dy)));
+        // Written out rather than `array::map`, which is not always inlined.
+        let columns = [column(-2), column(-1), column(0), column(1), column(2)];
+        let rows = [row(-2), row(-1), row(0), row(1), row(2)];
+        let offsets = [-2, -1, 0, 1, 2_i8];
+        let cells = offsets.into_iter().zip(rows).flat_map(|(dy, row)| {
+            offsets
+                .into_iter()
+                .zip(columns)
+                .map(move |(dx, column)| ([dx, dy], mix(column, row)))
+        });
+        let mut points = [(Vec2::ZERO, 0_u64); 25];
+        for (slot, (offset, id)) in points.iter_mut().zip(cells) {
+            *slot = (self.feature(id, offset), id);
+        }
+        points
     }
 
     /// Looks up the nearest feature points around `p`.
@@ -164,16 +190,10 @@ impl Cellular {
         let at = self.lattice.locate(p);
         let q = at.frac;
 
-        let mut points = [(Vec2::ZERO, 0_u64); 25];
+        let points = self.neighborhood(at.cell);
         let mut nearest = (f32::INFINITY, 0);
         let mut second = f32::INFINITY;
         let mut second_index = 0;
-        for (slot, (dy, dx)) in points
-            .iter_mut()
-            .zip((-2..=2).flat_map(|dy| (-2..=2).map(move |dx| (dy, dx))))
-        {
-            *slot = self.feature(at.cell, [dx, dy]);
-        }
         for (index, (point, _)) in points.iter().enumerate() {
             let d = (*point - q).length_squared();
             if d < nearest.0 {
@@ -315,6 +335,41 @@ impl ScalarField for CellularField {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn neighborhoods_match_cells_hashed_one_by_one() {
+        let domains = [
+            (Domain::Plane, Vec2::new(0.37, 5.0)),
+            (Domain::periodic(1, 1).unwrap(), Vec2::ONE),
+            (Domain::periodic(2, 3).unwrap(), Vec2::new(1.5, 2.0)),
+            (Domain::periodic(1, 1).unwrap(), Vec2::new(7.0, 2.0)),
+        ];
+        for (domain, frequency) in domains {
+            let cellular = Cellular::new(domain, frequency, 0.8, 9).unwrap();
+            for i in 0..256_u64 {
+                let h = hash(0x6365_6c6c, &[i]);
+                let scale = [4_i64, 1 << 20, 1 << 40, 1 << 61][(i % 4) as usize];
+                let cell = [h.cast_signed() % scale, (h >> 3).cast_signed() % scale];
+                let points = cellular.neighborhood(cell);
+                let mut slot = 0;
+                for dy in -2..=2_i8 {
+                    for dx in -2..=2_i8 {
+                        let [wx, wy] = cellular
+                            .lattice
+                            .wrap_cell([cell[0] + i64::from(dx), cell[1] + i64::from(dy)]);
+                        let id = hash(9, &[FEATURE_TAG, key(wx), key(wy)]);
+                        let point = cellular.feature(id, [dx, dy]);
+                        assert_eq!(points[slot].1, id, "{domain:?} cell {cell:?}");
+                        assert_eq!(
+                            points[slot].0.to_array().map(f32::to_bits),
+                            point.to_array().map(f32::to_bits)
+                        );
+                        slot += 1;
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn distances_are_ordered_and_border_is_bounded() {

@@ -8,10 +8,10 @@
 //! work. The benchmarks themselves live in `benches/`; run them with
 //! `cargo bench -p dapple_wind_tunnel`.
 
-use dapple_field::program::{FieldProgram, NodeId, Op, ProgramBuilder, ValueProgram};
-use dapple_field::{Basis, Domain, FractalParams};
+use dapple_field::program::{FieldProgram, NodeId, Op, ProgramBuilder, SolidProgram, ValueProgram};
+use dapple_field::{Basis, Domain, Domain3, FractalParams};
 use dapple_library::oak;
-use glam::Vec2;
+use glam::{Vec2, Vec3};
 
 /// The unit period every fixture program is defined over.
 ///
@@ -153,6 +153,55 @@ pub fn deep_color() -> ValueProgram {
     oak::bark_color(period(), &deep_scalar()).expect("the library's bark color builds")
 }
 
+/// The unit solid period every solid fixture is defined over.
+///
+/// # Panics
+///
+/// Never: a 1 by 1 by 1 period is valid.
+#[must_use]
+pub fn solid_period() -> Domain3 {
+    Domain3::periodic(1, 1, 1).expect("a unit period is valid")
+}
+
+/// Distance of the oak board's face from the pith, in meters: the wood
+/// module's default.
+pub const BOARD_OFFSET: f32 = 0.14;
+
+/// The red channel of the library's solid oak wood, the program a chart bake
+/// evaluates at surface points.
+///
+/// # Panics
+///
+/// Never: the library builds it.
+#[must_use]
+pub fn oak_wood_red() -> SolidProgram {
+    let [red, _, _] = oak::wood_channels().expect("the library's oak wood builds");
+    red
+}
+
+/// The library's solid oak wood sliced as the wood module cuts its board: a
+/// plane [`BOARD_OFFSET`] from the pith, tangential to the rings, with the
+/// plane's x running up the trunk.
+///
+/// # Panics
+///
+/// Never: the library builds the wood, and the slice is valid.
+#[must_use]
+pub fn oak_board_color() -> ValueProgram {
+    let mut b = ProgramBuilder::new();
+    let solid = oak::wood_color(&mut b).expect("the library's oak wood builds");
+    let board = b
+        .add(Op::Slice {
+            input: solid,
+            origin: [BOARD_OFFSET, 0.0, 0.0],
+            u: [0.0, 0.0, 1.0],
+            v: [0.0, 1.0, 0.0],
+            domain: Domain::Plane,
+        })
+        .expect("valid slice");
+    b.finish_value(board).expect("a planar output")
+}
+
 /// A chain of `len` dependent nodes over one fractal source, every node
 /// with its own parameters so no two share a fingerprint.
 ///
@@ -215,5 +264,15 @@ pub fn grid_points(side: u32) -> Vec<Vec2> {
                 center * step
             })
         })
+        .collect()
+}
+
+/// [`grid_points`] lifted onto the plane `z = (x + y) / 2` through the unit
+/// cube, so that every coordinate varies from point to point.
+#[must_use]
+pub fn grid_points3(side: u32) -> Vec<Vec3> {
+    grid_points(side)
+        .into_iter()
+        .map(|p| p.extend((p.x + p.y) * 0.5))
         .collect()
 }

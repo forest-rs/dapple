@@ -750,6 +750,10 @@ pub enum Event {
     },
     /// A material operation ran in the instance's body.
     Operation(Report),
+    /// The instance was not made: its parent skipped it, as its own
+    /// arguments asked (a package step whose guard does not hold). It has
+    /// no arguments, no outputs and no cache entry.
+    Skipped,
 }
 
 /// One diagnostic, attributed to the instance that made it.
@@ -784,7 +788,16 @@ impl Diagnostics {
     pub fn instances(&self) -> impl Iterator<Item = (&str, &ModuleId)> + '_ {
         self.entries.iter().filter_map(|e| match e.event {
             Event::Instantiated { .. } => Some((e.path.as_str(), &e.module)),
-            Event::Operation(_) => None,
+            Event::Operation(_) | Event::Skipped => None,
+        })
+    }
+
+    /// The instances skipped ([`Context::skip`]), as `(path, module)`, in
+    /// order.
+    pub fn skipped(&self) -> impl Iterator<Item = (&str, &ModuleId)> + '_ {
+        self.entries.iter().filter_map(|e| match e.event {
+            Event::Skipped => Some((e.path.as_str(), &e.module)),
+            Event::Instantiated { .. } | Event::Operation(_) => None,
         })
     }
 
@@ -805,6 +818,7 @@ impl fmt::Display for Diagnostics {
                     writeln!(f, "{} = {} ({fingerprint:016x})", e.path, e.module)?;
                 }
                 Event::Operation(r) => writeln!(f, "{}: {r}", e.path)?,
+                Event::Skipped => writeln!(f, "{} = {} skipped", e.path, e.module)?,
             }
         }
         Ok(())
@@ -921,6 +935,28 @@ impl<'a> Context<'a> {
         value
     }
 
+    /// The path of child `name` of the current instance.
+    fn child(&self, name: &str) -> String {
+        if self.path().is_empty() {
+            String::from(name)
+        } else {
+            format!("{}/{name}", self.path())
+        }
+    }
+
+    /// Records that the current instance did not make its child `name`, an
+    /// instance of `module`, as its arguments asked: a step that runs only
+    /// sometimes, skipped. Diagnostics then say what was left out
+    /// ([`Diagnostics::skipped`]); nothing else changes.
+    pub fn skip(&mut self, name: &str, module: ModuleId) {
+        let path = self.child(name);
+        self.diagnostics.entries.push(Entry {
+            path,
+            module,
+            event: Event::Skipped,
+        });
+    }
+
     /// Instantiates `module` as `name` under the current instance, with
     /// `bind`'s arguments.
     ///
@@ -940,11 +976,7 @@ impl<'a> Context<'a> {
         bind: Bind,
     ) -> Result<Outputs, ModuleError> {
         let interface = module.interface();
-        let path = if self.path().is_empty() {
-            String::from(name)
-        } else {
-            format!("{}/{name}", self.path())
-        };
+        let path = self.child(name);
         let fail = |kind| ModuleError {
             path: path.clone(),
             kind: Box::new(kind),

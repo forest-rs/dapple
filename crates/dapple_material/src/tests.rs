@@ -1062,3 +1062,53 @@ fn resources_resolved_beneath_a_kept_result_are_checked() {
     assert_eq!(b, build_with(&Paint, tinted(), &Tint(0.25), None));
     assert_ne!(a.0, b.0);
 }
+
+/// Paints once, and records a second coat it leaves out.
+struct OneCoat;
+
+impl Module for OneCoat {
+    fn interface(&self) -> Interface {
+        Interface {
+            id: ModuleId::new("test.one_coat", 1),
+            doc: "one paint".into(),
+            params: vec![],
+            inputs: vec![],
+            outputs: vec![],
+        }
+    }
+
+    fn build(&self, cx: &mut Context<'_>, _args: &Args) -> Result<Outputs, ModuleError> {
+        cx.instantiate(&Paint, "first", Bind::new())?;
+        cx.skip("second", Paint.interface().id);
+        Ok(Outputs::new())
+    }
+}
+
+#[test]
+fn skipped_instances_are_recorded_and_replayed() {
+    let mut cache = InstanceCache::new(usize::MAX);
+    let plain = build_with(&OneCoat, Bind::new(), &Host, None);
+    let d = &plain.1;
+    let paths = |it: &mut dyn Iterator<Item = (&str, &ModuleId)>| {
+        it.map(|(p, m)| alloc::format!("{p} {m}"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        paths(&mut d.instances()),
+        ["wall test.one_coat@1", "wall/first test.paint@1"]
+    );
+    assert_eq!(paths(&mut d.skipped()), ["wall/second test.paint@1"]);
+    assert_eq!(d.fingerprint_at("wall/second"), None, "no arguments");
+    assert!(
+        d.to_string()
+            .ends_with("wall/second = test.paint@1 skipped\n"),
+        "{d}"
+    );
+    // Nothing is kept for it, and a hit replays it.
+    let cold = build_with(&OneCoat, Bind::new(), &Host, Some(&mut cache));
+    assert_eq!(cold, plain);
+    assert_eq!(cache.stats().entries, 2);
+    let warm = build_with(&OneCoat, Bind::new(), &Host, Some(&mut cache));
+    assert_eq!(warm, plain);
+    assert_eq!(cache.stats().hits, 1);
+}

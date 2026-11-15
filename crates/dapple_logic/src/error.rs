@@ -72,6 +72,9 @@ pub enum ErrorKind {
     },
     /// Two inputs of one name.
     DuplicateInput(String),
+    /// An expression conditioned on a result that is no earlier flag
+    /// expression: that result's index.
+    Condition(usize),
     /// The compiled tape did not build or verify: a bug in this crate, with
     /// the tape's own account of it.
     Tape(String),
@@ -111,6 +114,7 @@ impl fmt::Display for ErrorKind {
                 write!(f, "{operation} does not take {}", ty.with_article())
             }
             Self::DuplicateInput(n) => write!(f, "two inputs named {n:?}"),
+            Self::Condition(i) => write!(f, "result {i} is no earlier flag expression"),
             Self::Tape(e) => write!(f, "the tape does not build: {e}"),
         }
     }

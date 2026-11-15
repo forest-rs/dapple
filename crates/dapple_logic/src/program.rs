@@ -49,6 +49,9 @@ const LANGUAGE: u64 = 1;
 pub struct Builder {
     inputs: Vec<(String, Type)>,
     expressions: Vec<Typed>,
+    /// Each expression's condition, if it has one: an earlier flag
+    /// result, and the value it must have for the expression to run.
+    conditions: Vec<Option<(usize, bool)>>,
 }
 
 impl Builder {
@@ -81,12 +84,49 @@ impl Builder {
     ///
     /// The first thing wrong with it, with where it is in `source`.
     pub fn expression(&mut self, source: &str, ty: Type) -> Result<usize, Error> {
+        self.add(source, ty, None)
+    }
+
+    /// Adds `source` as [`Self::expression`] does, to run only where result
+    /// `condition` (an earlier flag expression) is `holds`. Where it is not,
+    /// none of `source` runs, so nothing in it can stop the run, and its
+    /// result is its type's zero: `0.0`, `0` or `false`, a placeholder for a
+    /// value nothing needs.
+    ///
+    /// This is how a value that is needed only sometimes (a parameter of a
+    /// step that runs only when a flag holds) costs nothing, and cannot
+    /// fail, when it is not needed.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Condition`] if `condition` is no earlier flag
+    /// expression; otherwise as [`Self::expression`].
+    pub fn expression_when(
+        &mut self,
+        source: &str,
+        ty: Type,
+        condition: usize,
+        holds: bool,
+    ) -> Result<usize, Error> {
+        if self.expressions.get(condition).map(|e| e.ty) != Some(Type::Flag) {
+            return Err(Error::new(Span::default(), ErrorKind::Condition(condition)));
+        }
+        self.add(source, ty, Some((condition, holds)))
+    }
+
+    fn add(
+        &mut self,
+        source: &str,
+        ty: Type,
+        condition: Option<(usize, bool)>,
+    ) -> Result<usize, Error> {
         let tree = parse(source)?;
         let typed = Scope {
             inputs: &self.inputs,
         }
         .elaborate(&tree, Some(ty))?;
         self.expressions.push(typed);
+        self.conditions.push(condition);
         Ok(self.expressions.len() - 1)
     }
 
@@ -97,7 +137,7 @@ impl Builder {
     /// [`ErrorKind::Tape`] if the tape does not build or verify, which is a
     /// bug in this crate.
     pub fn build(self) -> Result<Program, Error> {
-        let emitted = emit(&self.inputs, &self.expressions)?;
+        let emitted = emit(&self.inputs, &self.expressions, &self.conditions)?;
         Ok(Program {
             program: Arc::new(emitted.program),
             bytes: Arc::from(emitted.bytes),
@@ -220,7 +260,7 @@ impl Program {
 
     /// Instructions in the program. Nothing branches backward, so no run
     /// executes more; a run executes fewer where `?:`, `&&` or `||` skip
-    /// code.
+    /// code, or a condition skips an expression.
     #[must_use]
     pub const fn instructions(&self) -> u64 {
         self.instructions

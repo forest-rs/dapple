@@ -401,8 +401,14 @@ impl Emitter {
 }
 
 /// Compiles `expressions` over `inputs` into one function: the inputs in
-/// order as arguments, one result per expression.
-pub(crate) fn emit(inputs: &[(String, Type)], expressions: &[Typed]) -> Result<Emitted, Error> {
+/// order as arguments, one result per expression, each run only where its
+/// condition (an earlier flag result and the value it must have), if it
+/// has one, holds, and its type's zero where not.
+pub(crate) fn emit(
+    inputs: &[(String, Type)],
+    expressions: &[Typed],
+    conditions: &[Option<(usize, bool)>],
+) -> Result<Emitted, Error> {
     let mut pb = ProgramBuilder::new();
     pb.set_program_name("dapple_logic");
     let f = pb
@@ -448,11 +454,38 @@ pub(crate) fn emit(inputs: &[(String, Type)], expressions: &[Typed]) -> Result<E
         e.literals.push((l, r));
     }
 
-    let mut rets = vec![];
+    let mut rets: Vec<Reg> = vec![];
     let mut ranges = Vec::with_capacity(expressions.len());
-    for x in expressions {
+    for (x, condition) in expressions.iter().zip(conditions) {
         let start = e.asm.pc().0;
-        rets.push(e.emit(x)?);
+        let r = match *condition {
+            None => e.emit(x)?,
+            Some((c, holds)) => {
+                let c = *rets
+                    .get(c)
+                    .ok_or_else(|| tape_error("a condition after its expression"))?;
+                let d = e.reg(value_type(x.ty));
+                let (run, skip, join) = (e.asm.label(), e.asm.label(), e.asm.label());
+                if holds {
+                    e.asm.br(c, run, skip);
+                } else {
+                    e.asm.br(c, skip, run);
+                }
+                e.place(run)?;
+                let r = e.emit(x)?;
+                e.asm.mov(d, r).jmp(join);
+                e.place(skip)?;
+                match x.ty {
+                    Type::Scalar => e.asm.const_f32_bits(d, 0),
+                    Type::Integer => e.asm.const_u32(d, 0),
+                    Type::Flag => e.asm.const_bool(d, false),
+                };
+                e.asm.jmp(join);
+                e.place(join)?;
+                d
+            }
+        };
+        rets.push(r);
         ranges.push((start, e.asm.pc().0));
     }
     e.asm.ret(Reg::EFFECT, &rets);

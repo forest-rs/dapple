@@ -9,6 +9,7 @@
 //! the same bytes, and a [`Package::fingerprint`] is stable.
 
 use alloc::borrow::Cow;
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -799,9 +800,44 @@ pub enum InputBinding {
     Output(OutputRef),
     /// The package's own input of that name.
     Input(String),
+    /// One of two bindings, chosen by a condition: see [`Select`].
+    Select(Box<Select<Self>>),
+}
+
+/// A choice between two bindings by a flag expression over the package's
+/// parameters, in the language of [`dapple_logic`]:
+///
+/// ```json
+/// { "select": {
+///     "when": "painted",
+///     "then": { "output": { "step": "paint", "output": "material" } },
+///     "else": { "output": { "step": "bare", "output": "material" } } } }
+/// ```
+///
+/// `then` is read where the condition holds, `else` where it does not, so
+/// `then` may read a step that has the same text as its `when` and `else`
+/// one that has it as its `unless` (see [`Step::when`]). Needs
+/// [`crate::compile::LOGIC`] at version 2.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Select<T> {
+    /// The condition: a flag expression.
+    pub when: String,
+    /// What is read where it holds.
+    pub then: T,
+    /// What is read where it does not.
+    #[serde(rename = "else")]
+    pub otherwise: T,
 }
 
 /// One module instance in a package body.
+///
+/// A step can be **guarded**: with [`Self::when`] it runs only where that
+/// flag expression over the package's parameters holds, with
+/// [`Self::unless`] only where it does not. A step that does not run is not
+/// instantiated at all. What reads its outputs must be sure it ran (the
+/// rules are in [`crate::compile`]), unless [`Self::otherwise`] says what
+/// they are when it does not.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
@@ -810,12 +846,79 @@ pub struct Step {
     pub name: String,
     /// The module it instantiates.
     pub module: ModuleRef,
+    /// Runs only where this flag expression holds, such as
+    /// `"moss > 0.0"`. Needs [`crate::compile::LOGIC`] at version 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
+    /// Runs only where this flag expression does not hold: the other side
+    /// of a `when` of the same text. A step has `when` or `unless`, not
+    /// both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unless: Option<String>,
     /// Parameter bindings; the rest keep the module's defaults.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, ParamBinding>,
     /// Input bindings.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub inputs: BTreeMap<String, InputBinding>,
+    /// For a guarded step, what some of its outputs are where it does not
+    /// run: each named output is then the step's own input of the given
+    /// name, passed through as it is bound. `{"material": "base"}` makes the
+    /// step an optional layer: its readers get the layer where it runs and
+    /// what is under it where it does not, and need not know it is guarded.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub otherwise: BTreeMap<String, String>,
+}
+
+/// Where a package output comes from: a step's output, or a choice between
+/// two by a condition (`{"select": {"when": ..., "then": ..., "else":
+/// ...}}`, whose branches are the same, as in [`Select`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum BodyOutput {
+    /// A step's output: `{"step": ..., "output": ...}`.
+    Output(OutputRef),
+    /// One of two, chosen by a condition.
+    Select {
+        /// The choice.
+        select: Box<Select<Self>>,
+    },
+}
+
+impl From<OutputRef> for BodyOutput {
+    fn from(r: OutputRef) -> Self {
+        Self::Output(r)
+    }
+}
+
+/// The fields a [`BodyOutput`] may have, read before deciding which it
+/// is, so a malformed one is refused saying what it should be.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBodyOutput {
+    step: Option<String>,
+    output: Option<String>,
+    select: Option<Box<Select<BodyOutput>>>,
+}
+
+impl<'de> Deserialize<'de> for BodyOutput {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match RawBodyOutput::deserialize(d)? {
+            RawBodyOutput {
+                step: Some(step),
+                output: Some(output),
+                select: None,
+            } => Ok(Self::Output(OutputRef { step, output })),
+            RawBodyOutput {
+                step: None,
+                output: None,
+                select: Some(select),
+            } => Ok(Self::Select { select }),
+            _ => Err(serde::de::Error::custom(
+                "a package output is a step's output (`step` and `output`) or a `select`",
+            )),
+        }
+    }
 }
 
 /// A package body: a graph of module instances, in order (a step reads
@@ -827,7 +930,7 @@ pub struct Body {
     /// The steps.
     pub steps: Vec<Step>,
     /// Each package output's source.
-    pub outputs: BTreeMap<String, OutputRef>,
+    pub outputs: BTreeMap<String, BodyOutput>,
 }
 
 /// What a package needs from the engine that runs it.

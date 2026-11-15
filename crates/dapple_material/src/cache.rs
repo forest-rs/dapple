@@ -395,7 +395,7 @@ fn charge(key: &Key, outputs: &Outputs, entries: &[Entry], resources: &[Resoluti
                 + e.path.len()
                 + e.module.name.len()
                 + match &e.event {
-                    Event::Instantiated { .. } => 0,
+                    Event::Instantiated { .. } | Event::Skipped => 0,
                     Event::Operation(r) => r.approximations.len() * size_of::<Approximation>(),
                 }
         })

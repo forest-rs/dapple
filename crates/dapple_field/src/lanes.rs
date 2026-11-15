@@ -223,6 +223,38 @@ pub(crate) mod tests {
         out
     }
 
+    /// Points, in cells, as a raster's rows put them at low frequencies:
+    /// runs of lanes a few thousandths of a cell apart, so that a kernel
+    /// summing a run in one cell together sees runs of every length, close
+    /// to a cell's faces and corners and crossing them, with NaN, signed
+    /// zeros and 10¹⁵ among them, and a run spread wide across its cell.
+    pub(crate) fn rows<const N: usize>() -> Vec<[f32; N]> {
+        let mut out = Vec::new();
+        let starts: [([f32; 3], [f32; 3]); 6] = [
+            ([2.02, 2.97, 2.5], [0.003, 0.0, 0.0]),
+            ([1.9, -0.3, 2.99], [0.0, 0.002, -0.004]),
+            ([-0.5, 0.01, -0.01], [-0.001, 0.001, 0.02]),
+            ([0.999, 0.001, 0.5], [0.0004, 0.0, 0.0001]),
+            ([2.5, 2.5, 2.5], [0.05, 0.03, 0.0]),
+            ([-3.0, 4.0, 0.0], [0.13, -0.11, 0.07]),
+        ];
+        for (k, (start, step)) in starts.into_iter().enumerate() {
+            for i in 0..150 {
+                let mut p: [f32; N] =
+                    core::array::from_fn(|axis| start[axis] + step[axis] * i as f32);
+                match (i + 3 * k) % 37 {
+                    7 => p[0] = f32::NAN,
+                    19 => p = [-0.0; N],
+                    29 => p[N - 1] = 1e15,
+                    33 => p[0] = 0.0,
+                    _ => {}
+                }
+                out.push(p);
+            }
+        }
+        out
+    }
+
     /// The full proof walks all 2³² patterns (a scratch harness, about two
     /// seconds); this keeps the edges and a strided sweep in the suite.
     #[test]

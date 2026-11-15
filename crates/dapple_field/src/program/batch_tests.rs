@@ -373,7 +373,128 @@ pub(super) fn zoo() -> Vec<ValueProgram> {
         .unwrap();
     programs.push(b.finish_value(board).unwrap());
     programs.push(crests);
+    programs.extend(waves());
     programs.extend(leaves());
+    programs
+}
+
+/// Waves whose phases are noise and fractals of either basis, planar and
+/// solid (sliced, and on a turned lattice), so their gradient instances
+/// run, as parquet's rings and the oak's rings and rays do.
+fn waves() -> Vec<ValueProgram> {
+    // The plane, which a slice reads the solid onto.
+    let plane = Domain::Plane;
+    let solid = Domain3::Space;
+    let mut programs = Vec::new();
+    for basis in [Basis::Value, Basis::Gradient] {
+        let mut b = ProgramBuilder::new();
+        let mut add = |op: Op| b.add(op).unwrap();
+        let along = add(Op::Fractal {
+            basis,
+            domain: plane,
+            frequency: [2.0, 30.0],
+            seed: 3,
+            params: FractalParams {
+                octaves: 4,
+                ..FractalParams::default()
+            },
+        });
+        let ridged = add(Op::Fractal {
+            basis,
+            domain: plane,
+            frequency: [5.0, 3.0],
+            seed: 4,
+            params: FractalParams {
+                kind: FractalKind::Ridged,
+                octaves: 3,
+                ..FractalParams::default()
+            },
+        });
+        let noise = add(Op::Noise {
+            basis,
+            domain: plane,
+            frequency: [7.0, 9.0],
+            seed: 6,
+        });
+        let rings = add(Op::Mix {
+            a: along,
+            b: ridged,
+            t: noise,
+        });
+        let rings = add(Op::Remap {
+            input: rings,
+            from: [-1.0, 1.0],
+            to: [-8.0, 8.0],
+        });
+        let zero = add(Op::Constant {
+            domain: plane,
+            value: 0.0,
+        });
+        let planar = add(Op::Wave {
+            input: rings,
+            shift: zero,
+            shape: WaveShape::Sawtooth,
+            from: [0.62, 0.86],
+            to: [0.0, 1.0],
+        });
+        // A solid phase from the position's length, a fractal and a noise
+        // on a turned lattice, sliced onto a plane.
+        let position = add(Op::Position3);
+        let radius = add(Op::Length { input: position });
+        let wobble = add(Op::Fractal3 {
+            basis,
+            domain: solid,
+            frequency: [6.0, 6.0, 1.2],
+            seed: 10,
+            params: FractalParams {
+                octaves: 4,
+                ..FractalParams::default()
+            },
+        });
+        let sweep = add(Op::Noise3 {
+            basis,
+            domain: solid,
+            frequency: [1.0, 1.0, 1.0],
+            seed: 20,
+        });
+        let sweep = add(Op::Transform3 {
+            input: sweep,
+            transform: Affine3 {
+                matrix: Mat3::from_axis_angle(Vec3::new(0.36, 0.8, 0.48).normalize(), 0.9)
+                    * Mat3::from_diagonal(Vec3::new(9.0, 9.0, 3.0)),
+                translation: Vec3::ZERO,
+            },
+        });
+        let phase = add(Op::Add {
+            a: radius,
+            b: wobble,
+        });
+        let phase = add(Op::Add { a: phase, b: sweep });
+        let phase = add(Op::Remap {
+            input: phase,
+            from: [0.0, 1.0],
+            to: [0.0, 40.0],
+        });
+        let phase = add(Op::Slice {
+            input: phase,
+            origin: [0.14, 0.02, 0.3],
+            u: [0.0, 0.0, 1.0],
+            v: [0.0, 1.0, 0.0],
+            domain: plane,
+        });
+        let sliced = add(Op::Wave {
+            input: phase,
+            shift: zero,
+            shape: WaveShape::Triangle,
+            from: [0.1, 0.06],
+            to: [0.0, 1.0],
+        });
+        let both = add(Op::Max {
+            a: planar,
+            b: sliced,
+        });
+        programs.push(b.finish_value(both).unwrap());
+    }
     programs
 }
 
@@ -739,6 +860,37 @@ pub(super) fn awkward_points() -> Vec<Vec2> {
     points
 }
 
+/// Rows of points as a raster's texels fall, `step` apart from `start`
+/// along `x` and down `y`, with NaN, signed zeros and huge coordinates
+/// among them: lanes that share their lattice cells in runs.
+fn rows(start: Vec2, step: f32) -> Vec<Vec2> {
+    let mut points = Vec::new();
+    for row in 0..3 {
+        for i in 0..150 {
+            #[expect(clippy::cast_precision_loss, reason = "small indices")]
+            let mut p = start + Vec2::new(i as f32, row as f32 * 37.0) * step;
+            match i % 41 {
+                7 => p.x = f32::NAN,
+                19 => p = Vec2::splat(-0.0),
+                29 => p.y = 1e15,
+                33 => p.x = 0.0,
+                _ => {}
+            }
+            points.push(p);
+        }
+    }
+    points
+}
+
+/// Raster rows at a quarter millimeter, a millimeter and a 256th of a
+/// unit a texel, the last at a 1 m period's own scale.
+fn raster_rows() -> Vec<Vec2> {
+    let mut points = rows(Vec2::new(-0.01, 0.02), 0.000_25);
+    points.extend(rows(Vec2::new(0.31, -0.2), 0.001));
+    points.extend(rows(Vec2::new(0.0, 0.5), 1.0 / 256.0));
+    points
+}
+
 pub(super) fn footprints() -> [Footprint; 7] {
     [0.0, 1e-6, 1.0 / 256.0, 0.02, 0.07, 0.3, 1e6].map(|w| Footprint::new(w).unwrap())
 }
@@ -781,6 +933,28 @@ fn batches_evaluate_each_point_as_alone() {
                 assert!(same_bits(alone, recursive), "{p} {footprint:?}");
                 assert!(same_bits(values[i], alone), "run at {p} {footprint:?}");
                 assert!(same_bits(whole[i], alone), "batch at {p} {footprint:?}");
+            }
+        }
+    }
+}
+
+/// Along raster rows, where lanes share lattice cells in runs and the
+/// lattice kernels sum a cell's lanes together, at the rows' own texel
+/// sizes among others.
+#[test]
+fn batches_along_rows_evaluate_each_point_as_alone() {
+    let points = raster_rows();
+    let widths = [0.0, 0.000_25, 0.001, 1.0 / 256.0, 0.02].map(|w| Footprint::new(w).unwrap());
+    for program in zoo() {
+        let mut kept = program.evaluator();
+        for footprint in widths {
+            let mut values = vec![Value::Id(u32::MAX); points.len()];
+            for run in runs(points.len()) {
+                kept.eval_value_batch(&points[run.clone()], footprint, &mut values[run]);
+            }
+            for (i, &p) in points.iter().enumerate() {
+                let alone = program.eval(p, footprint);
+                assert!(same_bits(values[i], alone), "run at {p} {footprint:?}");
             }
         }
     }
@@ -890,11 +1064,13 @@ fn runs(len: usize) -> impl Iterator<Item = core::ops::Range<usize>> {
 
 #[test]
 fn charts_evaluate_each_sample_as_alone() {
-    let points: Vec<Vec3> = awkward_points()
+    let mut points: Vec<Vec3> = awkward_points()
         .iter()
         .enumerate()
         .map(|(i, p)| p.extend(signed(&[i as u64, 9]) * [1.0, 7.0, 1e3][i % 3]))
         .collect();
+    // Raster rows across a board's face, the trunk along `z`.
+    points.extend(raster_rows().iter().map(|p| Vec3::new(0.14, p.y, p.x)));
     let widths = footprints();
     for program in solids() {
         let mut alone = program.program().evaluator();

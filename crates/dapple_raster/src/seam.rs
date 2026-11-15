@@ -26,7 +26,10 @@
 //! inside and one a texel wide changes the step at its texel by twice its
 //! height, but it cannot move the median line. So the wrap counts as only
 //! as much rougher as both comparisons agree, the smaller of the two, and
-//! [`Seam::is_seamless`] allows up to [`SEAM_TOLERANCE`].
+//! [`Seam::is_seamless`] allows up to [`SEAM_TOLERANCE`]. Content that is
+//! nearly constant but for sparse features has a median line inside near
+//! zero, which any step would exceed many times over, so the interior's
+//! median is taken as no less than a quarter of its mean.
 //!
 //! This is a raster-only test: it catches gross seams that run along most
 //! of the wrap and never cries wolf on features that cross under half of
@@ -46,6 +49,10 @@ use crate::Raster;
 /// The largest ratio of the wrap to the roughest interior position
 /// [`Seam::is_seamless`] accepts.
 pub const SEAM_TOLERANCE: f32 = 1.5;
+
+/// How much of the interior's mean its median line counts for at least,
+/// when the wrap's median line is compared with it.
+const MEDIAN_FLOOR: f64 = 0.25;
 
 /// An axis of a raster.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -167,10 +174,13 @@ pub fn seam<T: SeamValue>(r: &Raster<T>, axis: Axis) -> Seam {
     let last = size - 1;
     let roughest = |p: &[Lines]| p.iter().map(|l| l.sum).fold(0.0, f64::max);
     let (wrap, interior) = (step[last].sum, roughest(&step[..last]));
-    let ratio =
-        compare(&step[last..], &step[..last]).max(compare(&[bend[0], bend[last]], &bend[1..last]));
     #[expect(clippy::cast_precision_loss, reason = "line counts fit f64")]
     let n = lines as f64;
+    let ratio = compare(&step[last..], &step[..last], n).max(compare(
+        &[bend[0], bend[last]],
+        &bend[1..last],
+        n,
+    ));
     #[expect(clippy::cast_possible_truncation, reason = "means of f32 steps")]
     Seam {
         axis,
@@ -205,10 +215,15 @@ impl Lines {
 /// How many times rougher the roughest of the `wrap` positions is than the
 /// roughest of the `interior` ones, as far as the mean over lines and the
 /// median line agree.
-fn compare(wrap: &[Lines], interior: &[Lines]) -> f32 {
-    let by = |stat: fn(&Lines) -> f64| {
+///
+/// Over `lines` lines, the interior's median is taken to be at least
+/// [`MEDIAN_FLOOR`] of its mean: where the typical line is flat inside but
+/// a few features carry the mean, a wrap that steps at all is not
+/// thereby a seam.
+fn compare(wrap: &[Lines], interior: &[Lines], lines: f64) -> f32 {
+    let by = |stat: fn(&Lines) -> f64, floor: f64| {
         let roughest = |p: &[Lines]| p.iter().map(stat).fold(0.0, f64::max);
-        let (w, i) = (roughest(wrap), roughest(interior));
+        let (w, i) = (roughest(wrap), roughest(interior).max(floor));
         #[expect(clippy::cast_possible_truncation, reason = "a ratio of sums")]
         if i > 1e-12 {
             (w / i) as f32
@@ -218,7 +233,8 @@ fn compare(wrap: &[Lines], interior: &[Lines]) -> f32 {
             1.0
         }
     };
-    by(|l| l.sum).min(by(|l| l.median))
+    let mean = interior.iter().map(|l| l.sum).fold(0.0, f64::max) / lines;
+    by(|l| l.sum, 0.0).min(by(|l| l.median, MEDIAN_FLOOR * mean))
 }
 
 #[cfg(test)]
@@ -431,6 +447,26 @@ mod tests {
                 let noise = family("value", n, seed);
                 Box::new(move |x, y| if noise(x, y) > level { 1.0 } else { 0.0 })
             }
+            // A nearly flat ground (a faint periodic ripple) with sparse
+            // round pits: most lines cross no pit, so the typical step
+            // inside is the ripple's, near zero, while the pits carry the
+            // mean.
+            _ if name.starts_with("pitted") => {
+                let k = count("pitted");
+                Box::new(move |x, y| {
+                    let ripple = 0.002 * sinf(TAU * 3.0 * x / n) * sinf(TAU * 2.0 * y / n);
+                    let pits: f32 = (0..k)
+                        .map(|i| {
+                            let (dx, dy) =
+                                (around(x, u(i * 7) * n, n), around(y, u(i * 7 + 1) * n, n));
+                            let r = 1.5 + u(i * 7 + 2) * 2.0;
+                            let t = (1.0 - (dx * dx + dy * dy) / (r * r)).max(0.0);
+                            0.3 * t
+                        })
+                        .sum();
+                    0.5 + ripple - pits
+                })
+            }
             // Dirt streaks: shallow runs down the surface, 1 to 2.5 texels
             // wide and 30% to 70% of the period long.
             _ if name.starts_with("streaks") => {
@@ -616,6 +652,85 @@ mod tests {
             for name in ["cells4", "cells12"] {
                 for seed in [1, 3] {
                     holds(name, n, seed);
+                }
+            }
+        }
+    }
+
+    /// Content that is nearly constant but for sparse features has a
+    /// typical step inside near zero and a mean carried by the features:
+    /// a wrap under any cyclic shift, with a feature on it, is no seam.
+    #[test]
+    fn nearly_constant_content_with_sparse_features_is_seamless() {
+        for n in [24, 32, 48, 56, 64] {
+            for name in ["pitted3", "pitted5", "pitted8"] {
+                for seed in 1..=4 {
+                    let r = sampled(n, family(name, n as f32, seed));
+                    for s in 0..i64::from(n) {
+                        for (axis, rolled) in [(Axis::X, r.rolled(s, 0)), (Axis::Y, r.rolled(0, s))]
+                        {
+                            let m = seam(&rolled, axis);
+                            assert!(
+                                m.is_seamless(),
+                                "{name} #{seed} at {n}, started {s} texels on along {axis:?}: {m:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The same content is not let through when its wrap really steps:
+    /// the floor on the interior's median does not blind the check.
+    /// Content flat but for a feature carrying the mean: in a third of the
+    /// lines a curve rising to 0.5 and dropping across the wrap, on ground
+    /// that in all the lines rises by `ground` across the period.
+    fn sawtooth(ground: f32) -> Raster {
+        raster(|x, y| {
+            let t = x as f32 / 64.0;
+            ground * t + if y < 20 { 0.5 * t * t * t } else { 0.0 }
+        })
+    }
+
+    /// A wrap that steps in a minority of the lines and barely in the rest
+    /// (a faint rise in the ground): the median line inside bends and steps
+    /// by nothing, so by the median alone the faint step would look
+    /// infinitely rough, but it is judged against the mean inside, which
+    /// the feature carries.
+    #[test]
+    fn a_faint_step_beside_a_sparse_feature_is_no_seam() {
+        let r = sawtooth(0.00005);
+        let m = seam(&r, Axis::X);
+        assert!(m.is_seamless(), "{m:?}");
+    }
+
+    /// The same feature over ground that steps across the wrap by a tenth
+    /// of the feature's height is a seam: the floor does not blind the
+    /// check.
+    #[test]
+    fn a_real_step_beside_a_sparse_feature_is_a_seam() {
+        let r = sawtooth(0.05);
+        let m = seam(&r, Axis::X);
+        assert!(!m.is_seamless(), "{m:?}");
+    }
+
+    #[test]
+    fn nearly_constant_content_with_a_step_across_the_wrap_is_a_seam() {
+        use Injected::{Edge as Faded, Ramp};
+        for n in [24, 32, 48, 56, 64] {
+            for name in ["pitted3", "pitted5", "pitted8"] {
+                for seed in 1..=4 {
+                    for axis in [Axis::X, Axis::Y] {
+                        for (seam_kind, strength) in [(Ramp, 0.5), (Faded, 0.5)] {
+                            let r = injected(name, n, seed, seam_kind, axis, strength);
+                            let m = seam(&r, axis);
+                            assert!(
+                                !m.is_seamless(),
+                                "{name} #{seed} at {n}: {seam_kind:?} {strength} along {axis:?} missed: {m:?}"
+                            );
+                        }
+                    }
                 }
             }
         }

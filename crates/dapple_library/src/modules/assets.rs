@@ -389,7 +389,7 @@ pub struct VarnishedBoard;
 impl Module for VarnishedBoard {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId::new("dapple_library.varnished_board", 2),
+            id: ModuleId::new("dapple_library.varnished_board", 3),
             doc: "varnished oak".into(),
             params: vec![
                 color("varnish", Vec3::new(0.78, 0.52, 0.25), "the varnish's tint"),
@@ -440,7 +440,7 @@ pub struct Threshold;
 impl Module for Threshold {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId::new("dapple_library.threshold", 2),
+            id: ModuleId::new("dapple_library.threshold", 3),
             doc: "a limestone step and an oiled oak tread".into(),
             params: vec![seed()],
             inputs: vec![],
@@ -460,12 +460,15 @@ impl Module for Threshold {
                     .scalar("bedding", 0.05),
             )?,
         )?;
-        let wood = take(cx.instantiate(&Wood, "tread", Bind::new())?)?;
         #[expect(clippy::cast_precision_loss, reason = "grid sizes are small")]
         let (middle, top) = (
             grid.origin.y + 0.5 * grid.texel.y * grid.height as f32,
             grid.origin.y + grid.texel.y * (grid.height + 1) as f32,
         );
+        // The tread is one board as deep as the tread, when the grid starts
+        // on a board's edge (at a multiple of its width from `y = 0`).
+        let depth = (middle - grid.origin.y).clamp(0.05, 1.0);
+        let wood = take(cx.instantiate(&Wood, "tread", Bind::new().scalar("width", depth))?)?;
         let tread = band(grid, middle, top)?;
         let joined = cx.record(ops::select(&stone, &wood, &tread, Transition::Mask)?);
         let m = take(

@@ -12,7 +12,7 @@
 //! | [`CeramicBody`] | Fired-clay body: grain, iron speckle, mottling. |
 //! | [`Mortar`] | Sanded lime mortar, tooled into its joints when given their distance map. |
 //! | [`Stone`] | Bedded sandstone or limestone with drag-tooled faces. |
-//! | [`Wood`] | Oak cut from a solid log: flat-sawn figure from real growth rings. |
+//! | [`Wood`] | Oak boards cut from a solid log: flat-sawn figure from real growth rings, a board to a cut. |
 //! | [`Finish`] | A glaze, varnish or oil: pigment where opaque, OpenPBR's coat on top, orange peel on the coat. |
 //! | [`Grime`] | Dirt settled where ambient occlusion and cavities trap it. |
 //! | [`Streaks`] | Grime washed down from upward-facing ledges. |

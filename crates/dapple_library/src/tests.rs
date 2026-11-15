@@ -822,12 +822,13 @@ mod wood {
     use dapple_field::{Edge, Value};
     use dapple_material::module::{Bind, Context};
     use dapple_material::resource::NoResources;
-    use dapple_material::{Channel, Grid, Param};
+    use dapple_material::{Aux, Channel, Grid, Param};
     use glam::{Vec2, Vec3};
 
     use crate::modules::Wood;
 
-    /// The board's linear base color over 10 × 4 cm at `texel` meters.
+    /// The board's linear base color over 10 × 4 cm about its middle at
+    /// `texel` meters.
     fn board(texel: f32) -> (u32, Vec<Vec3>) {
         #[expect(
             clippy::cast_possible_truncation,
@@ -841,7 +842,7 @@ mod wood {
         let grid = Grid {
             width: w,
             height: h,
-            origin: Vec2::new(0.3, -0.02),
+            origin: Vec2::new(0.3, 0.08),
             texel: Vec2::splat(texel),
             edge: Edge::Clamp,
         };
@@ -861,6 +862,72 @@ mod wood {
             })
             .collect();
         (w, colors)
+    }
+
+    /// The wood over a grid of `w` × `h` texels of 2 mm from `origin`.
+    fn boards(origin: Vec2, w: u32, h: u32) -> dapple_material::Material {
+        let grid = Grid {
+            width: w,
+            height: h,
+            origin,
+            texel: Vec2::splat(0.002),
+            edge: Edge::Clamp,
+        };
+        let mut cx = Context::new(grid, &NoResources);
+        cx.instantiate(&Wood, "boards", Bind::new())
+            .unwrap()
+            .take_material("material")
+            .unwrap()
+    }
+
+    /// Texel `i`'s height.
+    fn height(m: &dapple_material::Material, i: usize) -> f32 {
+        let Some(Channel::Map(map)) = m.aux(Aux::Height) else {
+            panic!("a height map");
+        };
+        map.value(i).scalar().expect("a scalar height")
+    }
+
+    /// Texel `i`'s base color, its components summed.
+    fn color(m: &dapple_material::Material, i: usize) -> f32 {
+        let Some(Channel::Map(map)) = m.param(Param::BaseColor) else {
+            panic!("a color map");
+        };
+        let Value::Vector3(c) = map.value(i) else {
+            panic!("a color");
+        };
+        c.x + c.y + c.z
+    }
+
+    /// Boards are laid 20 cm apart from `y = 0`, a sunken gap between them,
+    /// and each board is the same cut wherever the grid starts.
+    #[test]
+    fn boards_are_laid_side_by_side_each_its_own_cut() {
+        // 4 cm by 40 cm: two boards, the joint at row 100.
+        let both = boards(Vec2::ZERO, 20, 200);
+        let row = |r: usize| (0..20).map(|x| height(&both, r * 20 + x)).sum::<f32>() / 20.0;
+        let joint = row(100).min(row(99));
+        let lowest = (5..95)
+            .chain(105..195)
+            .map(row)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            joint < lowest - 1e-4,
+            "the joint, {joint}, is sunken below {lowest}"
+        );
+        // The second board alone.
+        let second = boards(Vec2::new(0.0, 0.2), 20, 100);
+        for i in 20 * 5..20 * 95 {
+            let (a, b) = (color(&both, 20 * 100 + i), color(&second, i));
+            assert!((a - b).abs() < 1e-3, "texel {i}: {a} against {b}");
+        }
+        // The two boards are different cuts.
+        let first: f32 = (20 * 5..20 * 95).map(|i| color(&both, i)).sum();
+        let other: f32 = (20 * 5..20 * 95).map(|i| color(&second, i)).sum();
+        assert!(
+            (first - other).abs() > 1e-2 * first,
+            "{first} against {other}"
+        );
     }
 
     /// Baked at 4 mm, the board is close to its 0.5 mm bake averaged over

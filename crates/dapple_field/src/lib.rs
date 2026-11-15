@@ -101,6 +101,7 @@ pub mod shaping;
 mod solid;
 mod tiling;
 mod types;
+mod wave;
 
 pub use cellular::{CellOutput, CellSample, Cellular, CellularField};
 pub use domain::{Domain, Domain3, DomainError, Footprint, MAX_LATTICE_CELLS};
@@ -113,6 +114,7 @@ pub use shape::Disk;
 pub use solid::{Cellular3, CellularField3, Fractal3, Noise3, SolidField, central_difference3};
 pub use tiling::{MAX_HERRINGBONE_RATIO, Pattern, TileOutput, TileSample, Tiling, TilingField};
 pub use types::{NormalFrame, PortType, Primaries, Value};
+pub use wave::WaveShape;
 
 #[cfg(test)]
 mod golden_tests;

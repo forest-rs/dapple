@@ -572,6 +572,27 @@ fn node_bounds(op: &Op, all: &[Bounds]) -> Bounds {
             range: Some([0.0, 1.0]),
             slope: None,
         },
+        // Held between its ends. A sawtooth or a hard step jumps; a
+        // triangle's ramp is continuous, its slope at most the ramp's times
+        // the phase's and the shift's.
+        Op::Wave {
+            input,
+            shift,
+            shape,
+            from,
+            to,
+        } => {
+            let (lo, hi) = (f64::from(to[0]), f64::from(to[1]));
+            let k = f64::from(from[1]) - f64::from(from[0]);
+            let slope = (shape == crate::WaveShape::Triangle && k != 0.0)
+                .then(|| at(input).slope.zip(at(shift).slope))
+                .flatten()
+                .map(|(x, s)| (hi - lo).abs() / k.abs() * (x + s));
+            Bounds {
+                range: Some([lo.min(hi), lo.max(hi)]),
+                slope,
+            }
+        }
         // The angle jumps across the negative x half-axis.
         Op::Atan2 { .. } => Bounds {
             range: Some([-core::f64::consts::PI, core::f64::consts::PI]),

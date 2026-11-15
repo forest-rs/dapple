@@ -259,7 +259,8 @@ simply demoted.
   and `Transform3` are their own ops. The existing 2D ops and their
   fingerprints are unchanged.
 - **The other ops** (arithmetic, clamp, remap, mix, fract, length, vectors,
-  colors, and `atan2` for angles around an axis) work in either space, but
+  colors, `atan2` for angles around an axis, and `wave`, a ramp of a
+  periodic phase averaged over the footprint) work in either space, but
   refuse inputs from both.
 - **`Slice { origin, u, v, domain }`** is the only way from a solid field to a
   planar one. It can be periodic when `u·px` and `v·py` are lattice vectors of

@@ -11,7 +11,7 @@ use glam::{Mat2, Mat3, Vec2, Vec3};
 use super::block::{Block, LANES, Layout};
 use super::{
     ChartSample, FieldProgram, Kernel, Node, NodeId, slice_chain, slice_point, warp_chain,
-    warp_move,
+    warp_move, wave_value,
 };
 use crate::domain::Footprint;
 use crate::field::{Affine2, Affine3};
@@ -229,8 +229,10 @@ impl Compiler<'_> {
             _ => {
                 let mut args = [0; 3];
                 let mut count = 0;
-                for input in entry.op.inputs().iter() {
-                    args[count] = self.compile(input, ctx, gradient);
+                for (k, input) in entry.op.inputs().iter().enumerate() {
+                    // A wave's footprint in phase needs its phase's gradient.
+                    let phase = k == 0 && matches!(entry.kernel, Kernel::Wave(..));
+                    args[count] = self.compile(input, ctx, gradient || phase);
                     count += 1;
                 }
                 let reg = self.register(Shape::of(entry.port));
@@ -351,7 +353,7 @@ impl Plan {
         let tree_evaluations = compiler.tree_count(output, 0);
         let registers = compiler.shapes.len();
         let (steps, constants) = fold(nodes, compiler.steps, registers);
-        let layout = Layout::new(&steps, &compiler.shapes);
+        let layout = Layout::new(nodes, &steps, &compiler.shapes);
         Self {
             steps,
             constants,
@@ -528,7 +530,12 @@ impl<'a> Evaluator<'a> {
                         );
                     } else {
                         let kernel = &self.program.nodes[node.0 as usize].kernel;
-                        self.registers[reg] = kernel.combine(p, footprint, &values[..count]);
+                        self.registers[reg] = if let Kernel::Wave(_, _, ref ramp) = *kernel {
+                            let phase = self.gradients[args[0]];
+                            wave_value(ramp, footprint, &values[..count], phase)
+                        } else {
+                            kernel.combine(p, footprint, &values[..count])
+                        };
                     }
                 }
                 Step::Chain { reg, from, ref by } => {

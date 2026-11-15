@@ -21,6 +21,7 @@ use crate::scatter::{Placement, ScatterOutput, Stamp};
 use crate::solid::SolidField;
 use crate::tiling::{Pattern, TileOutput};
 use crate::types::{PortType, Primaries, Value};
+use crate::wave::WaveShape;
 
 /// Whether two values are the same bits, NaN for NaN whatever its payload.
 pub(super) fn same_bits(a: Value, b: Value) -> bool {
@@ -228,6 +229,17 @@ pub(super) fn zoo() -> Vec<ValueProgram> {
     programs.push(b.clone().finish_value(field).unwrap());
     programs.push(b.clone().finish_value(toward).unwrap());
     programs.push(b.clone().finish_value(summary).unwrap());
+    // A stripe around each whole turn of the angle, widened by the fractal.
+    let striped = b
+        .add(Op::Wave {
+            input: both,
+            shift: fbm,
+            shape: WaveShape::Triangle,
+            from: [0.1, 0.3],
+            to: [1.0, 0.0],
+        })
+        .unwrap();
+    programs.push(b.clone().finish_value(striped).unwrap());
 
     // A solid wood-like field, sliced and transformed.
     let mut b = ProgramBuilder::new();
@@ -316,6 +328,27 @@ pub(super) fn zoo() -> Vec<ValueProgram> {
             t: z,
         })
         .unwrap();
+    // Band-limited rings and rays: waves of the ring phase and the angle.
+    let banded = b
+        .add(Op::Wave {
+            input: late,
+            shift: wobble,
+            shape: WaveShape::Sawtooth,
+            from: [0.4, 0.95],
+            to: [0.0, 1.0],
+        })
+        .unwrap();
+    let rays = b
+        .add(Op::Wave {
+            input: around,
+            shift: pores,
+            shape: WaveShape::Triangle,
+            from: [0.06, 0.06],
+            to: [1.0, 0.0],
+        })
+        .unwrap();
+    let wood = b.add(Op::Add { a: wood, b: banded }).unwrap();
+    let wood = b.add(Op::Max { a: wood, b: rays }).unwrap();
     let turned = b
         .add(Op::Transform3 {
             input: wood,
@@ -644,12 +677,20 @@ fn solids() -> Vec<SolidProgram> {
         a: radius,
         b: grain,
     });
+    let banded = add(Op::Wave {
+        input: rings,
+        shift: pores,
+        shape: WaveShape::Sawtooth,
+        from: [0.3, 0.8],
+        to: [0.2, 0.9],
+    });
     let rings = add(Op::Fract { input: rings });
     let wood = add(Op::Mix {
         a: rings,
         b: flecks,
         t: pores,
     });
+    let wood = add(Op::Add { a: wood, b: banded });
     let turned = add(Op::Transform3 {
         input: wood,
         transform: Affine3 {
@@ -929,6 +970,13 @@ fn pointwise() -> Vec<ValueProgram> {
         to: [1.0, -1.0],
     });
     let fract = add(Op::Fract { input: product });
+    let fract = add(Op::Wave {
+        input: fract,
+        shift: y,
+        shape: WaveShape::Triangle,
+        from: [0.2, 0.4],
+        to: [0.0, 1.0],
+    });
     let atan = add(Op::Atan2 { y: x, x: y });
     let mask = add(Op::AsMask { input: remapped });
     let mixed = add(Op::Mix {

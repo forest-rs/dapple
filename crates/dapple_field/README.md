@@ -13,6 +13,8 @@ Deterministic, band-limited procedural fields for [dapple](../../README.md).
   normals, checked when the program is built. One IR covers planar and solid
   nodes; `Op::Slice` turns a solid field into a planar one, and
   `SolidProgram::eval_chart` evaluates a solid field at surface points.
+  `Op::Wave` repeats a ramp along a phase (rings, stripes) averaged over the
+  footprint in closed form, where `Op::Fract` would alias.
 - `image`: sampled images, texels of any port type read back as a field
   (`Op::Sample`) under an explicit `SamplePolicy`: linear per component
   (never renormalized) or nearest, periodic-aware, footprint-filtered through

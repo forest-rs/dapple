@@ -460,6 +460,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dapple_logic"
+version = "0.0.1"
+dependencies = [
+ "execution_tape",
+ "libm",
+]
+
+[[package]]
 name = "dapple_material"
 version = "0.0.1"
 dependencies = [
@@ -569,6 +577,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "261f53755a37ef53f96631714e6c3ddccbfaf361802f4147880a914aa80df4a4"
 dependencies = [
  "hashbrown",
+]
+
+[[package]]
+name = "execution_tape"
+version = "0.1.0"
+source = "git+https://github.com/forest-rs/execution?rev=a4963de89eb4cab5a753e3b8f3ba1d747006e662#a4963de89eb4cab5a753e3b8f3ba1d747006e662"
+dependencies = [
+ "libm",
 ]
 
 [[package]]

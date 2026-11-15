@@ -12,6 +12,7 @@ members = [
     "crates/dapple_imaging",
     "crates/dapple_lab",
     "crates/dapple_library",
+    "crates/dapple_logic",
     "crates/dapple_material",
     "crates/dapple_package",
     "crates/dapple_raster",
@@ -102,10 +103,16 @@ dapple_graph = { path = "crates/dapple_graph" }
 dapple_imaging = { path = "crates/dapple_imaging" }
 dapple_lab = { path = "crates/dapple_lab" }
 dapple_library = { path = "crates/dapple_library" }
+dapple_logic = { path = "crates/dapple_logic" }
 dapple_material = { path = "crates/dapple_material" }
 dapple_package = { path = "crates/dapple_package" }
 dapple_raster = { path = "crates/dapple_raster" }
 execution_graph = { default-features = false, version = "0.1.0" }
+# Pinned to one forest-rs/execution main commit (with f32 math intrinsics bit
+# for bit with `libm` 0.2.16, and O(1) host import dispatch); no crates.io
+# release contains them yet. It pins `libm` to exactly 0.2.16, which holds
+# this workspace's `libm` there too.
+execution_tape = { default-features = false, git = "https://github.com/forest-rs/execution", rev = "a4963de89eb4cab5a753e3b8f3ba1d747006e662" }
 # Pinned to one forest-rs/exedra main commit (after the merge of #98, with the
 # keyed hash contract, tangents, attribute streams and layer propagation);
 # no crates.io release contains them yet. Keep every exedra crate on the same

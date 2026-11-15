@@ -773,6 +773,12 @@ pub enum ParamBinding {
     Value(ValueSource),
     /// The package's own parameter of that name.
     Param(String),
+    /// An expression over the package's own scalar, integer and flag
+    /// parameters, such as `"max(chipping, 0.5 * weather * weather)"`, in
+    /// the language of [`dapple_logic`]. It must make a value of the
+    /// step parameter's kind (a scalar, an integer or a flag), and needs
+    /// [`crate::compile::LOGIC`].
+    Expr(String),
 }
 
 /// A named output of an earlier step.

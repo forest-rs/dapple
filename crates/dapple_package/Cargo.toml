@@ -12,6 +12,7 @@ categories = ["graphics", "no-std"]
 
 [dependencies]
 dapple_field.workspace = true
+dapple_logic.workspace = true
 dapple_material.workspace = true
 glam.workspace = true
 serde.workspace = true

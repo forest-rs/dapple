@@ -26,11 +26,12 @@ fn main() -> Result<()> {
     let package = Package::from_json(VARNISHED_BOARD)?;
     let module = registry().compile(&package)?;
     let worn = module.preset("dark_and_worn").ok_or("missing preset")?;
-    // 80 × 20 cm, along the trunk in +x, across the board in +y.
+    // 80 × 20 cm, along the trunk in +x, across the board in +y: the first
+    // board, from y = 0 to its 20 cm width.
     let grid = Grid {
         width: 1536,
         height: 384,
-        origin: Vec2::new(0.0, -0.1),
+        origin: Vec2::ZERO,
         texel: Vec2::splat(0.8 / 1536.0),
         edge: Edge::Clamp,
     };

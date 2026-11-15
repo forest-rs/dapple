@@ -15,9 +15,10 @@
 //! **What is on the wall** comes from the library, not from a list kept
 //! here:
 //!
-//! - every package in [`dapple_library::packages::PACKAGES`], at every
-//!   preset it ships, in its order (fresh to weathered); a package's family
-//!   is its name;
+//! - every package in [`dapple_library::packages::PACKAGES`], at its
+//!   defaults and then at every preset it ships, in its order (fresh to
+//!   weathered), its defaults left out only when a preset sets nothing but
+//!   them; a package's family is its name;
 //! - every module [`dapple_library::packages::registry`] registers whose
 //!   inputs are all optional and which returns a `material`: a surface
 //!   that needs nothing from its host. Modules that need an input material
@@ -31,7 +32,7 @@
 //! [`FAMILIES`] groups the library's modules into rows; a module it does
 //! not list still appears, in the `other` row.
 //!
-//! Each swatch is built at its defaults (or preset) on a 1 m wrapping tile
+//! Each swatch is built at its defaults or a preset on a 1 m wrapping tile
 //! through one [`InstanceCache`], so presets that share a step (a package's
 //! bare metal under every preset's weathering) build it once. Each is
 //! gated on `dapple_lab`'s material report: a failing swatch is still
@@ -50,11 +51,11 @@ use dapple_field::Edge;
 use dapple_lab::report::Report;
 use dapple_library::packages::{self, PACKAGES};
 use dapple_material::module::{
-    Bind, Context, Diagnostics, InstanceCache, Interface, Module, OutputKind,
+    Bind, Context, Diagnostics, InstanceCache, Interface, Module, OutputKind, ParamValue,
 };
 use dapple_material::resource::NoResources;
 use dapple_material::{Grid, Material};
-use dapple_package::Package;
+use dapple_package::{Package, Preset};
 use glam::Vec2;
 use serde_json::{Value, json};
 
@@ -133,6 +134,17 @@ struct LeftOut {
     reason: &'static str,
 }
 
+/// Whether `preset` sets nothing but `interface`'s defaults, so it shows
+/// the package's defaults itself.
+fn at_defaults(preset: &Preset, interface: &Interface) -> bool {
+    preset.values.iter().all(|(name, value)| {
+        interface
+            .params
+            .iter()
+            .any(|p| p.name == *name && p.default == ParamValue::from(*value))
+    })
+}
+
 /// Whether a module is a complete surface: every input optional, and a
 /// `material` output.
 fn showable(interface: &Interface) -> bool {
@@ -153,13 +165,15 @@ fn swatches() -> Result<(Vec<Swatch>, Vec<LeftOut>)> {
         let package = Package::from_json(source)?;
         let compiled = registry.compile(&package)?;
         let name = compiled.interface().id.name.into_owned();
+        // Every package at its defaults, then at its presets.
         let family = name.strip_prefix(PACKAGED).unwrap_or(&name).to_owned();
         #[expect(
             clippy::arc_with_non_send_sync,
             reason = "the registry hands out modules as `Arc<dyn Module>`; the wall is one thread"
         )]
         let module: Arc<dyn Module> = Arc::new(compiled.clone());
-        if package.presets.is_empty() {
+        let interface = compiled.interface();
+        if !package.presets.iter().any(|p| at_defaults(p, &interface)) {
             out.push(Swatch {
                 family: family.clone(),
                 label: String::from("defaults"),
@@ -518,12 +532,26 @@ mod tests {
         let (swatches, left_out) = swatches().expect("the library enumerates");
         for source in PACKAGES {
             let package = Package::from_json(source).expect("a shipped package");
+            let shown = |preset: Option<&str>| {
+                swatches.iter().any(|s| {
+                    s.preset.as_deref() == preset
+                        && s.module.interface().id.name == package.interface.module.name
+                })
+            };
+            let interface = packages::registry()
+                .compile(&package)
+                .expect("a shipped package compiles")
+                .interface();
+            let defaults_preset = package.presets.iter().any(|p| at_defaults(p, &interface));
+            assert_eq!(
+                shown(None),
+                !defaults_preset,
+                "{} at its defaults is on the wall, unless a preset is its defaults",
+                package.interface.module.name
+            );
             for preset in &package.presets {
                 assert!(
-                    swatches
-                        .iter()
-                        .any(|s| s.preset.as_deref() == Some(preset.name.as_str())
-                            && s.module.interface().id.name == package.interface.module.name),
+                    shown(Some(&preset.name)),
                     "{}/{} is on the wall",
                     package.interface.module.name,
                     preset.name
@@ -544,6 +572,27 @@ mod tests {
         subjects.sort();
         subjects.dedup();
         assert_eq!(subjects.len(), swatches.len(), "directories are unique");
+    }
+
+    /// A preset that sets only defaults is the package at its defaults; one
+    /// that moves any parameter is not.
+    #[test]
+    fn a_preset_of_defaults_stands_for_them() {
+        let package = Package::from_json(PACKAGES[0]).expect("a shipped package");
+        let interface = packages::registry()
+            .compile(&package)
+            .expect("compiles")
+            .interface();
+        let param = &interface.params[0];
+        let same = Preset::new("same", "").with(&param.name, param.default);
+        assert!(at_defaults(&same, &interface));
+        assert!(at_defaults(&Preset::new("empty", ""), &interface));
+        let moved = package
+            .presets
+            .iter()
+            .find(|p| !p.values.is_empty())
+            .expect("a preset that sets something");
+        assert!(!at_defaults(moved, &interface));
     }
 
     /// Every swatch builds on a small grid through one cache, passes the

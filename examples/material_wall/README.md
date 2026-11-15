@@ -1,7 +1,8 @@
 # material_wall
 
-One image of everything `dapple_library` makes: every package preset and
-every library module that is a complete surface, each baked as a 1 m
+One image of everything `dapple_library` makes: every package at its
+defaults and at every preset, and every library module that is a complete
+surface, each baked as a 1 m
 swatch, gated on `dapple_lab`'s material report, exported through
 `dapple_export`, and rendered in Blender as one labeled contact sheet. Run
 it after a library change to see the whole library at once.
@@ -11,10 +12,11 @@ it after a library change to see the whole library at once.
 The wall enumerates the library rather than keeping its own list:
 
 - **Packages**: every package in `dapple_library::packages::PACKAGES`, at
-  every preset it ships, in the package's order (fresh to weathered). A
+  its defaults (labeled `defaults`) and then at every preset it ships, in
+  the package's order (fresh to weathered). The defaults are left out only
+  when a preset sets nothing but defaults, so it shows them already. A
   package's family is its name: `varnished_board`, `weathered_copper`,
-  `rusted_steel`, `painted_steel`. A package without presets is shown at
-  its defaults.
+  `rusted_steel`, `painted_steel`.
 - **Modules**: every module `dapple_library::packages::registry()`
   registers that is a complete surface by itself, at its defaults. The
   rule: **every input optional, and a `material` output.** That keeps the
@@ -91,9 +93,9 @@ modules need no edit here.
 
 ## Test
 
-`cargo test -p material_wall` checks that every package preset is on the
-wall and every registered module is either on it or left out with a
-reason (so a package added to `PACKAGES` appears automatically), and builds
+`cargo test -p material_wall` checks that every package is on the wall at
+its defaults (unless a preset is them) and at every preset, and every
+registered module is either on it or left out with a reason (so a package added to `PACKAGES` appears automatically), and builds
 every swatch on a 32² grid through one cache, the same gate and the same
 export (in memory, so it runs on `wasm32-wasip1` too), checking that
 presets reuse their shared steps.

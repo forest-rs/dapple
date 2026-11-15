@@ -2207,9 +2207,10 @@ impl FieldProgram {
     ///
     /// The value equals [`Self::eval_node`]'s, bit for bit. Gradients follow
     /// the chain rule through every op with a closed-form derivative, and
-    /// through transforms, slices and warps; any other node's gradient, such
-    /// as a vector component's, is taken by central differences of that node
-    /// (see [`central_difference`](crate::central_difference)).
+    /// through transforms, slices and warps, and through the components and
+    /// the length of the solid position; any other node's gradient, such as
+    /// another vector's component, is taken by central differences of that
+    /// node (see [`central_difference`](crate::central_difference)).
     ///
     /// # Panics
     ///
@@ -2345,6 +2346,21 @@ impl FieldProgram {
                 wave(ramp, footprint, [s(0), s(1)], [gradients[0], gradients[1]]);
             return (Value::Scalar(value), gradient);
         }
+        // A component or the length of the solid position, whose Jacobian
+        // is the identity: closed forms where a vector's gradient is not
+        // otherwise carried.
+        match *kernel {
+            Kernel::Component(input, index) if self.is_position(input) => {
+                return (kernel.combine(p, footprint, values), Vec3::AXES[index]);
+            }
+            Kernel::Length(input) if self.is_position(input) => {
+                let value = kernel.combine(p, footprint, values);
+                let length = value.scalar().expect("a length is a scalar");
+                let gradient = if length > 0.0 { p / length } else { Vec3::ZERO };
+                return (value, gradient);
+            }
+            _ => {}
+        }
         if let Some((value, gradient)) = kernel.value_and_gradient(p, footprint) {
             return (Value::Scalar(value), gradient);
         }
@@ -2353,6 +2369,11 @@ impl FieldProgram {
             .gradient(p, footprint, values, gradients)
             .unwrap_or_else(|| self.numeric_gradient(id, value, p, footprint));
         (value, gradient)
+    }
+
+    /// Whether node `id` is the solid position.
+    pub(super) fn is_position(&self, id: NodeId) -> bool {
+        matches!(self.nodes[id.0 as usize].kernel, Kernel::Position3)
     }
 
     /// Central differences of node `id` around `p`, zero for vector values.

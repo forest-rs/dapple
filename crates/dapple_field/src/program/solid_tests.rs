@@ -444,3 +444,37 @@ fn chart_evaluation_integrates_point_only_programs() {
         assert!((a - d).abs() < 1e-6, "{a} {d}");
     }
 }
+
+/// The components and the length of the solid position have closed-form
+/// gradients, through a slice too: they agree with central differences.
+#[test]
+fn the_position_differentiates_in_closed_form() {
+    let mut b = ProgramBuilder::new();
+    let position = b.add(Op::Position3).unwrap();
+    let length = b.add(Op::Length { input: position }).unwrap();
+    let y = b
+        .add(Op::Component {
+            input: position,
+            index: 1,
+        })
+        .unwrap();
+    let sum = b.add(Op::Add { a: length, b: y }).unwrap();
+    let planar = b
+        .add(Op::Slice {
+            input: sum,
+            origin: [0.3, -0.2, 0.5],
+            u: [0.6, 0.8, 0.0],
+            v: [0.0, 0.0, 1.0],
+            domain: Domain::Plane,
+        })
+        .unwrap();
+    let program = b.finish(planar).unwrap();
+    for p in points3(40, 2.0).into_iter().map(Vec3::truncate) {
+        let (_, gradient) = program.eval_node_gradient(planar, p, Footprint::POINT);
+        let numeric = crate::central_difference(&program, p, Footprint::POINT);
+        assert!(
+            (gradient - numeric).abs().max_element() < 1e-2,
+            "{gradient} against {numeric} at {p}"
+        );
+    }
+}

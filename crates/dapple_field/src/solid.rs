@@ -616,6 +616,74 @@ pub(crate) fn lattice_lanes3(
     }
 }
 
+/// One octave of 3D lattice noise and its gradient at the points `(x[i],
+/// y[i], z[i])`, into `values` and the gradient's `gradients[axis]`: at
+/// each point the bits of [`lattice_eval3::<true>`](lattice_eval3) there.
+///
+/// The chunk's points are located together as [`lattice_lanes3`] locates
+/// them. [`Basis::Gradient`] keeps a lane's lines and layers of corner
+/// prefixes for the next lane in the same column and layer, as
+/// [`lattice_lanes3`] does; [`Basis::Value`] blends each lane's corners as
+/// the point kernel does.
+pub(crate) fn lattice_gradient_lanes3(
+    basis: Basis,
+    lattice: Lattice3,
+    seed: u64,
+    offset: Vec3,
+    points: [&[f32]; 3],
+    values: &mut [f32],
+    gradients: [&mut [f32]; 3],
+) {
+    let [gx, gy, gz] = gradients;
+    let prefix = mix(seed, LATTICE_TAG);
+    for (start, (points, values)) in lanes::chunks(points, values).enumerate() {
+        let n = values.len().min(lanes::WIDTH);
+        let start = start * lanes::WIDTH;
+        let mut cells = [[0_i64; lanes::WIDTH]; 3];
+        let mut fracs = [[0.0_f32; lanes::WIDTH]; 3];
+        for (axis, (cells, fracs)) in cells.iter_mut().zip(&mut fracs).enumerate() {
+            lanes::locate(
+                points[axis],
+                lattice.frequency[axis],
+                offset[axis],
+                &mut cells[..n],
+                &mut fracs[..n],
+            );
+        }
+        let ([cx, cy, cz], [fx, fy, fz]) = (&cells, &fracs);
+        let mut store = |i: usize, (value, gradient): (f32, Vec3)| {
+            values[i] = value;
+            (gx[start + i], gy[start + i], gz[start + i]) = gradient.into();
+        };
+        match basis {
+            Basis::Value => {
+                for i in 0..n {
+                    let f = Vec3::new(fx[i], fy[i], fz[i]);
+                    let cell = [cx[i], cy[i], cz[i]];
+                    store(i, eval_located3::<true>(basis, lattice, seed, cell, f));
+                }
+            }
+            Basis::Gradient => {
+                let (mut column, mut layer) = ([cx[0], cy[0]], cz[0]);
+                let mut lines = gradient_lines3(lattice, prefix, column);
+                let mut layers = gradient_layers3(lattice, layer);
+                for i in 0..n {
+                    if [cx[i], cy[i]] != column {
+                        column = [cx[i], cy[i]];
+                        lines = gradient_lines3(lattice, prefix, column);
+                    }
+                    if cz[i] != layer {
+                        layer = cz[i];
+                        layers = gradient_layers3(lattice, layer);
+                    }
+                    let f = Vec3::new(fx[i], fy[i], fz[i]);
+                    store(i, gradient_sum3::<true>(lattice, &lines, &layers, f));
+                }
+            }
+        }
+    }
+}
+
 /// [`Basis::Value`] noise at the located points of a chunk, the first
 /// `out.len()` of `cells` and `fracs`.
 fn value_lanes3(
@@ -795,6 +863,44 @@ impl Noise3 {
     }
 }
 
+impl Noise3 {
+    /// The noise and its gradient at the points `(x[i], y[i], z[i])`, all
+    /// with `footprint`, into `values` and `gradients`: each the bits
+    /// [`SolidField::eval_gradient`] gives at its point.
+    pub(crate) fn eval_gradient_lanes(
+        &self,
+        points: [&[f32]; 3],
+        footprint: Footprint,
+        values: &mut [f32],
+        mut gradients: [&mut [f32]; 3],
+    ) {
+        let weight = footprint.band_weight(self.lattice.max_frequency());
+        if weight == 0.0 {
+            values.fill(0.0);
+            gradients.iter_mut().for_each(|g| g.fill(0.0));
+            return;
+        }
+        let [gx, gy, gz] = gradients;
+        lattice_gradient_lanes3(
+            self.basis,
+            self.lattice,
+            self.seed,
+            Vec3::ZERO,
+            points,
+            values,
+            [&mut *gx, &mut *gy, &mut *gz],
+        );
+        for value in values {
+            *value *= weight;
+        }
+        for g in [gx, gy, gz] {
+            for g in g {
+                *g *= weight;
+            }
+        }
+    }
+}
+
 impl SolidField for Noise3 {
     fn domain(&self) -> Domain3 {
         self.domain
@@ -944,6 +1050,68 @@ impl Fractal3 {
             }
             for sum in out {
                 *sum /= self.total_amplitude;
+            }
+        }
+    }
+
+    /// The fractal and its gradient at the points `(x[i], y[i], z[i])`, all
+    /// with `footprint`, into `values` and `gradients`: octave by octave
+    /// over each chunk of [`lanes::WIDTH`] points, each octave's noise and
+    /// gradient by the lane kernel, and each value and gradient the bits
+    /// [`SolidField::eval_gradient`] gives at its point.
+    pub(crate) fn eval_gradient_lanes(
+        &self,
+        points: [&[f32]; 3],
+        footprint: Footprint,
+        values: &mut [f32],
+        gradients: [&mut [f32]; 3],
+    ) {
+        let mean = self.mean();
+        let [gx, gy, gz] = gradients;
+        let mut noise = [0.0; lanes::WIDTH];
+        let mut dn = [[0.0; lanes::WIDTH]; 3];
+        for (start, (points, out)) in lanes::chunks(points, values).enumerate() {
+            let n = out.len();
+            let start = start * lanes::WIDTH;
+            let noise = &mut noise[..n];
+            let mut sums = [Vec3::ZERO; lanes::WIDTH];
+            out.fill(0.0);
+            for octave in &self.octaves {
+                let weight = footprint.band_weight(octave.lattice.max_frequency());
+                if weight == 0.0 {
+                    for sum in &mut *out {
+                        *sum += mean * octave.amplitude;
+                    }
+                    continue;
+                }
+                let (lattice, seed, offset) = (octave.lattice, octave.seed, octave.offset);
+                let [dx, dy, dz] = &mut dn;
+                lattice_gradient_lanes3(
+                    self.basis,
+                    lattice,
+                    seed,
+                    offset,
+                    points,
+                    noise,
+                    [&mut dx[..n], &mut dy[..n], &mut dz[..n]],
+                );
+                for i in 0..n {
+                    let (n, d) = (noise[i], Vec3::new(dn[0][i], dn[1][i], dn[2][i]));
+                    let (detail, d_detail) = match self.kind {
+                        FractalKind::Fbm => (n, d),
+                        FractalKind::Ridged => {
+                            let r = 1.0 - n.abs();
+                            (r * r, d * (-2.0 * r * n.signum()))
+                        }
+                    };
+                    sums[i] += d_detail * (weight * octave.amplitude);
+                    out[i] += (mean + (detail - mean) * weight) * octave.amplitude;
+                }
+            }
+            for (i, sum) in out.iter_mut().enumerate() {
+                *sum /= self.total_amplitude;
+                let g = sums[i] / self.total_amplitude;
+                (gx[start + i], gy[start + i], gz[start + i]) = g.into();
             }
         }
     }

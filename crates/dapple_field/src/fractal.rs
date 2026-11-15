@@ -10,7 +10,8 @@ use glam::Vec2;
 use crate::domain::{Domain, DomainError, Footprint, Lattice};
 use crate::field::ScalarField;
 use crate::hash::{hash, unit_f32};
-use crate::noise::{Basis, lattice_noise, lattice_noise_gradient};
+use crate::lanes;
+use crate::noise::{Basis, lattice_lanes, lattice_noise, lattice_noise_gradient};
 
 /// Purpose tag for per-octave seeds.
 const OCTAVE_TAG: u64 = 0x6f63_7461_7665; // "octave"
@@ -150,44 +151,48 @@ impl Fractal {
     }
 
     /// The fractal at the points `(x[i], y[i])`, all with `footprint`, into
-    /// `out`: octave by octave over every point, each octave's band weight
-    /// taken once, and each value the bits [`ScalarField::eval`] gives at
-    /// its point.
+    /// `out`: octave by octave over each chunk of [`lanes::WIDTH`] points,
+    /// each octave's band weight taken once and its noise by the lane
+    /// kernel, and each value the bits [`ScalarField::eval`] gives at its
+    /// point.
     pub(crate) fn eval_lanes(&self, x: &[f32], y: &[f32], footprint: Footprint, out: &mut [f32]) {
         let mean = match self.kind {
             FractalKind::Fbm => 0.0,
             FractalKind::Ridged => ridged_mean(self.basis),
         };
-        out.fill(0.0);
-        for octave in &self.octaves {
-            let weight = footprint.band_weight(octave.lattice.max_frequency());
-            if weight == 0.0 {
-                for sum in &mut *out {
-                    *sum += mean * octave.amplitude;
+        let mut noise = [0.0; lanes::WIDTH];
+        for (points, out) in lanes::chunks([x, y], out) {
+            let noise = &mut noise[..out.len()];
+            out.fill(0.0);
+            for octave in &self.octaves {
+                let weight = footprint.band_weight(octave.lattice.max_frequency());
+                if weight == 0.0 {
+                    for sum in &mut *out {
+                        *sum += mean * octave.amplitude;
+                    }
+                    continue;
                 }
-                continue;
-            }
-            let noise =
-                |p| lattice_noise(self.basis, octave.lattice, octave.seed, octave.offset, p);
-            let lanes = out.iter_mut().zip(x.iter().zip(y));
-            match self.kind {
-                FractalKind::Fbm => {
-                    for (sum, (&x, &y)) in lanes {
-                        let detail = noise(Vec2::new(x, y));
-                        *sum += (mean + (detail - mean) * weight) * octave.amplitude;
+                let (lattice, seed, offset) = (octave.lattice, octave.seed, octave.offset);
+                lattice_lanes(self.basis, lattice, seed, offset, points, noise);
+                let lanes = out.iter_mut().zip(&*noise);
+                match self.kind {
+                    FractalKind::Fbm => {
+                        for (sum, &detail) in lanes {
+                            *sum += (mean + (detail - mean) * weight) * octave.amplitude;
+                        }
+                    }
+                    FractalKind::Ridged => {
+                        for (sum, &n) in lanes {
+                            let r = 1.0 - n.abs();
+                            let detail = r * r;
+                            *sum += (mean + (detail - mean) * weight) * octave.amplitude;
+                        }
                     }
                 }
-                FractalKind::Ridged => {
-                    for (sum, (&x, &y)) in lanes {
-                        let r = 1.0 - noise(Vec2::new(x, y)).abs();
-                        let detail = r * r;
-                        *sum += (mean + (detail - mean) * weight) * octave.amplitude;
-                    }
-                }
             }
-        }
-        for sum in out {
-            *sum /= self.total_amplitude;
+            for sum in out {
+                *sum /= self.total_amplitude;
+            }
         }
     }
 

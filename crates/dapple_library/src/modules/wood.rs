@@ -19,18 +19,23 @@ use super::{fraction, integer, meters, realize, scalar_channel, seed};
 use crate::glazed_brick::WOOD;
 use crate::oak;
 
-/// Oak boards, flat-sawn from a solid log ([`oak::wood_face_color`]),
-/// laid side by side along the grid's x, `width` apart in y from `y = 0`.
+/// Oak boards sawn from a solid log ([`oak::wood_face_color`]), laid side
+/// by side along the grid's x, `width` apart in y from `y = 0`.
 ///
-/// Each board's face is a plane about `offset` from the pith, running
-/// along the trunk, so its figure is real growth rings cut tangentially
-/// (a cathedral about its middle), not a painted pattern. The seed moves
-/// the first board's cut (the one from `y = 0` to `width`) along the trunk
-/// and around it; every other board is its own cut, from elsewhere in the
-/// log, a little nearer the pith or further from it, its cathedral off
-/// center, its tone a little lighter or darker. Rings and rays are
-/// band-limited by the grid's texels as they cross the face, so a coarse
-/// grid shows them faded toward their mean, not aliased.
+/// Each board's face is a plane through the log, running along the trunk,
+/// so its figure is real growth rings cut by it, not a painted pattern. The
+/// first board (the one from `y = 0` to `width`) is flat-sawn `offset` from
+/// the pith, its cathedral about its middle; the seed moves it along the
+/// trunk and around it. Every other board is its own cut from elsewhere in
+/// the log, as a log sawn through and through gives them: about half
+/// flat-sawn, nearer the pith or further from it, with long cathedrals; a
+/// quarter rift-sawn, the rings cut at 30° to 55° into straight grain; and
+/// a quarter quarter-sawn, the face nearly along the rays, which show as
+/// flecks. Each face leans a little along the trunk, so its cathedrals come
+/// faster or slower, and each board's tone is a little lighter or darker,
+/// warmer or cooler. Rings and rays are band-limited by the grid's texels
+/// as they cross the face, so a coarse grid shows them faded toward their
+/// mean, not aliased.
 ///
 /// Between boards is a narrow dark gap with eased edges, averaged over
 /// each texel row. Latewood reads darker and, weathered, stands a little
@@ -50,51 +55,85 @@ const GAP_DEPTH: f32 = 0.0008;
 const ROW_SAMPLES: u32 = 16;
 
 /// One board's cut through the log: the face's solid origin and axes, and
-/// a tone multiplying its color.
+/// a tint multiplying its color.
 struct Board {
     origin: [f32; 3],
     u: [f32; 3],
     v: [f32; 3],
-    tone: f32,
+    tint: Vec3,
 }
 
 impl Board {
     /// Board `k`, covering `y` in `[k·width, (k + 1)·width)`. Board 0 is the
-    /// seed's own cut, `offset` from the pith with its cathedral centered;
-    /// the others are hashed from `boards`.
-    fn new(k: i64, width: f32, offset: f32, args: &Args) -> Self {
+    /// seed's own cut, flat-sawn `offset` from the pith with its cathedral
+    /// centered, leaning so they come about every quarter meter; the others
+    /// are hashed from `boards`.
+    fn new(k: i64, width: f32, offset: f32, seed: &dyn Fn(&str) -> u64) -> Self {
+        use core::f32::consts::TAU;
         #[expect(clippy::cast_precision_loss, reason = "a bounded seed fraction")]
-        let along = (args.seed("along") % 1000) as f32 * 0.003;
+        let along = (seed("along") % 1000) as f32 * 0.003;
         #[expect(clippy::cast_precision_loss, reason = "a bounded seed fraction")]
-        let turn = (args.seed("around") % 1000) as f32 * 0.006_283;
-        let (along, turn, offset, shift, tone) = if k == 0 {
-            (along, turn, offset, 0.0, 1.0)
+        let turn = (seed("around") % 1000) as f32 * 0.006_283;
+        // The board's middle is `radius` from the pith; across it, the face
+        // meets the rings at `slant` (0 flat-sawn, a right angle
+        // quarter-sawn); along it, the face leans `lean` per meter toward
+        // or away from the pith.
+        let (along, turn, radius, slant, lean, tint) = if k == 0 {
+            (along, turn, offset, 0.0, 0.004, Vec3::ONE)
         } else {
-            let u = |i: u64| unit_f32(hash(args.seed("boards"), &[k.cast_unsigned(), i]));
+            let u = |i: u64| unit_f32(hash(seed("boards"), &[k.cast_unsigned(), i]));
+            // Sawn through and through, a log gives flat-sawn boards from
+            // its flanks and rift- and quarter-sawn ones from near its
+            // middle: about half flat, a quarter rift and a quarter
+            // quarter-sawn, each slanted either way.
+            let kind = u(5);
+            let slant = if kind < 0.5 {
+                0.25 * u(3)
+            } else if kind < 0.75 {
+                0.5 + 0.45 * u(3)
+            } else {
+                1.15 + 0.35 * u(3)
+            };
+            // A quarter-sawn board's face passes near the pith; the board
+            // keeps clear of it, its near edge at least 3 cm out.
+            let radius = offset * (0.6 + 0.9 * u(2));
+            let radius = if kind < 0.75 {
+                radius
+            } else {
+                radius.max((0.03 + 0.5 * width) / libm::sinf(slant))
+            };
+            let slant = if u(6) < 0.5 { -slant } else { slant };
+            let tone = 0.88 + 0.24 * u(4);
+            let warmth = 0.08 * (u(8) - 0.5);
             (
                 // Elsewhere along the trunk, anywhere around it.
                 along + 0.4 + 2.6 * u(0),
-                core::f32::consts::TAU * u(1),
-                offset * (0.7 + 0.6 * u(2)),
-                (u(3) - 0.5) * 0.3 * width,
-                0.93 + 0.14 * u(4),
+                TAU * u(1),
+                radius,
+                slant,
+                0.016 * (u(7) - 0.5),
+                tone * Vec3::new(1.0 + warmth, 1.0, 1.0 - warmth),
             )
         };
         let (s, c) = (libm::sinf(turn), libm::cosf(turn));
-        // Across the board is tangential to the rings at `offset` from the
-        // pith, at the board's middle (shifted); along it runs up the trunk.
+        // The face's normal points away from the pith, across it is
+        // tangential to the rings at `turn`, and along it runs up the
+        // trunk, leaning.
+        let n = Vec3::new(c, s, 0.0);
+        let v = Vec3::new(-s, c, 0.0);
+        let u = (Vec3::Z + n * lean).normalize();
+        let distance = radius * libm::cosf(slant);
+        let across = radius * libm::sinf(slant);
         #[expect(clippy::cast_precision_loss, reason = "board indices are small")]
-        let middle = (k as f32 + 0.5) * width + shift;
-        let v = [-s, c, 0.0];
+        let middle = (k as f32 + 0.5) * width;
+        // The face's point at the board's middle is `distance` out along the
+        // normal and `across` along it, at `along` up the trunk.
+        let origin = n * distance + v * (across - middle) + Vec3::Z * along;
         Self {
-            origin: [
-                offset * c - v[0] * middle,
-                offset * s - v[1] * middle,
-                along,
-            ],
-            u: [0.0, 0.0, 1.0],
-            v,
-            tone,
+            origin: origin.to_array(),
+            u: u.to_array(),
+            v: v.to_array(),
+            tint,
         }
     }
 }
@@ -135,8 +174,8 @@ fn joint(y: f32, height: f32, width: f32) -> (f32, f32) {
 impl Module for Wood {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId::new("dapple_library.wood", 3),
-            doc: "flat-sawn oak boards".into(),
+            id: ModuleId::new("dapple_library.wood", 4),
+            doc: "oak boards, flat-, rift- and quarter-sawn".into(),
             params: vec![
                 meters(
                     "offset",
@@ -173,7 +212,7 @@ impl Module for Wood {
             let end = (j + 1..grid.height)
                 .find(|&e| board_of(row_y(e), width) != k)
                 .unwrap_or(grid.height);
-            let board = Board::new(k, width, offset, args);
+            let board = Board::new(k, width, offset, &|purpose| args.seed(purpose));
             #[expect(clippy::cast_precision_loss, reason = "grid sizes are small")]
             let rows = Grid {
                 height: end - j,
@@ -188,7 +227,7 @@ impl Module for Wood {
                 let Value::Vector3(col) = color.value(i) else {
                     return Err(super::fail("wood color"));
                 };
-                colors.push(col * board.tone);
+                colors.push(col * board.tint);
             }
             j = end;
         }
@@ -220,5 +259,59 @@ impl Module for Wood {
             Channel::Constant(Value::Id(args.integer("surface"))),
         )?;
         Ok(Outputs::new().with("material", Output::Material(m)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use glam::Vec3;
+
+    use super::Board;
+
+    /// The boards from one log are a mix of cuts, each by the angle its
+    /// face meets the rings at mid-board, and none passes within 3 cm of
+    /// the pith.
+    #[test]
+    fn boards_are_flat_rift_and_quarter_sawn_clear_of_the_pith() {
+        let (width, offset) = (0.2, 0.14);
+        let seed = |purpose: &str| purpose.len() as u64 * 0x9e37_79b9;
+        let (mut flat, mut rift, mut quarter) = (0, 0, 0);
+        let count = 200;
+        for k in 1..=count {
+            let board = Board::new(k, width, offset, &seed);
+            let (origin, v) = (Vec3::from(board.origin), Vec3::from(board.v));
+            let at = |y: f32| (origin + v * y).truncate();
+            #[expect(clippy::cast_precision_loss, reason = "small board indices")]
+            let low = k as f32 * width;
+            let middle = at(low + 0.5 * width);
+            // The angle between the face and the ring's tangent there.
+            let slant = libm::asinf(middle.normalize().dot(v.truncate()).abs());
+            if slant < 0.3 {
+                flat += 1;
+            } else if slant < 1.0 {
+                rift += 1;
+            } else {
+                quarter += 1;
+            }
+            let nearest = (0..=100)
+                .map(|i| at(low + width * i as f32 / 100.0).length())
+                .fold(f32::INFINITY, f32::min);
+            assert!(
+                nearest > 0.029,
+                "board {k} passes {nearest} m from the pith"
+            );
+        }
+        for (name, n, share) in [
+            ("flat", flat, 0.5),
+            ("rift", rift, 0.25),
+            ("quarter", quarter, 0.25),
+        ] {
+            #[expect(clippy::cast_precision_loss, reason = "small counts")]
+            let found = n as f32 / count as f32;
+            assert!(
+                (found - share).abs() < 0.12,
+                "{found} of the boards {name}-sawn"
+            );
+        }
     }
 }

@@ -320,6 +320,28 @@ fn wood(b: &mut ProgramBuilder, cut: Cut) -> Result<NodeId, ProgramError> {
         })?;
         cut.lift(b, n)
     };
+    // One octave of solid noise on an oblique lattice, where the wood is
+    // shaped: `frequency` along the solid's axes as `noise` takes it, but
+    // its lattice turned off them, so features that end on lattice planes
+    // (a ray's fleck, cut where its extent runs out) do not end together
+    // along a plane across the trunk.
+    let oblique = |b: &mut ProgramBuilder, basis, frequency: [f32; 3], seed| {
+        let n = b.add(Op::Noise3 {
+            basis,
+            domain,
+            frequency: [1.0, 1.0, 1.0],
+            seed,
+        })?;
+        let n = b.add(Op::Transform3 {
+            input: n,
+            transform: Affine3 {
+                matrix: Mat3::from_axis_angle(Vec3::new(0.36, 0.8, 0.48).normalize(), 0.9)
+                    * Mat3::from_diagonal(Vec3::from(frequency)),
+                translation: Vec3::ZERO,
+            },
+        })?;
+        cut.lift(b, n)
+    };
     let position = b.add(Op::Position3)?;
     let x = b.add(Op::Component {
         input: position,
@@ -340,7 +362,7 @@ fn wood(b: &mut ProgramBuilder, cut: Cut) -> Result<NodeId, ProgramError> {
             translation: Vec3::ZERO,
         },
     })?;
-    // The trunk tapers: each ring is a cone, 3 cm wider per meter lower.
+    // The trunk tapers: each ring is a cone, 1.6 cm wider per meter lower.
     let z = b.add(Op::Component {
         input: position,
         index: 2,
@@ -348,15 +370,35 @@ fn wood(b: &mut ProgramBuilder, cut: Cut) -> Result<NodeId, ProgramError> {
     let taper = b.add(Op::Remap {
         input: z,
         from: [0.0, 1.0],
-        to: [0.0, 0.03],
+        to: [0.0, 0.016],
     })?;
     let radius = b.add(Op::Add {
         a: radius,
         b: taper,
     })?;
+    // No trunk tapers evenly: over a meter or two its rings swell and
+    // pinch by up to ±4 mm, so a face along it crosses them now faster,
+    // now slower, now not at all, and its cathedrals come irregularly.
+    let sweep = b.add(Op::Noise3 {
+        basis: Basis::Gradient,
+        domain,
+        frequency: [0.6, 0.6, 0.8],
+        seed: SEED + 20,
+    })?;
+    let sweep = b.add(Op::Remap {
+        input: sweep,
+        from: [-1.0, 1.0],
+        to: [-0.004, 0.004],
+    })?;
+    let radius = b.add(Op::Add {
+        a: radius,
+        b: sweep,
+    })?;
 
-    // Rings 5.5 mm apart, their radii wandering by up to ±8 mm.
-    let wobble = fractal(b, Basis::Gradient, [6.0, 6.0, 4.0], SEED + 10, 4)?;
+    // Rings wander by up to ±8 mm, around the trunk more than along it,
+    // so a face along the trunk crosses them steadily enough to draw
+    // cathedrals rather than eyes.
+    let wobble = fractal(b, Basis::Gradient, [6.0, 6.0, 1.2], SEED + 10, 4)?;
     let wobble = b.add(Op::Remap {
         input: wobble,
         from: [-1.0, 1.0],
@@ -366,10 +408,26 @@ fn wood(b: &mut ProgramBuilder, cut: Cut) -> Result<NodeId, ProgramError> {
         a: radius,
         b: wobble,
     })?;
-    let rings = b.add(Op::Remap {
+    // The tree grew fast when young and slower as it aged: rings 6.8 mm
+    // apart at the pith, 5.5 mm at 14 cm and 4.5 mm at 30 cm (the phase is
+    // 148·r + 120·r²).
+    let linear = b.add(Op::Remap {
         input: radius,
         from: [0.0, 1.0],
-        to: [0.0, 180.0],
+        to: [0.0, 148.0],
+    })?;
+    let square = b.add(Op::Mul {
+        a: radius,
+        b: radius,
+    })?;
+    let square = b.add(Op::Remap {
+        input: square,
+        from: [0.0, 1.0],
+        to: [0.0, 120.0],
+    })?;
+    let rings = b.add(Op::Add {
+        a: linear,
+        b: square,
     })?;
     let rings = cut.lift(b, rings)?;
     let zero = cut.constant(b, 0.0)?;
@@ -396,18 +454,21 @@ fn wood(b: &mut ProgramBuilder, cut: Cut) -> Result<NodeId, ProgramError> {
     let pores = b.add(Op::Mul { a: pores, b: early })?;
 
     // Rays: thin radial ribbons around the trunk. Each set is a stripe
-    // around every whole sector of the (swaying) angle; a noise field along
-    // the ribbon varies its width, so rays pinch off into flecks of varying
-    // length and thickness, and a sparse extent field keeps only some of
-    // them. Broad rays are few and pale; fine rays are many and faint.
-    // Extent varies faster around the trunk than rays are spaced, so
-    // neighboring rays start and stop independently.
+    // around every whole sector of the (gently swaying) angle; a noise
+    // field along the ribbon varies its width, so rays pinch off into
+    // flecks of varying length and thickness, and a sparse extent field
+    // keeps only some of them, fading in and out. Broad rays are few and
+    // pale; fine rays are many and faint. Extent varies faster around the
+    // trunk than rays are spaced, so neighboring rays start and stop
+    // independently, and both fields are on oblique lattices, so flecks do
+    // not end together across a face. A face nearly along the rays
+    // (quarter-sawn) shows them as long tapering flakes.
     let angle = b.add(Op::Atan2 { y, x })?;
     let sway = fractal(b, Basis::Gradient, [12.0, 12.0, 10.0], SEED + 12, 3)?;
     let sway = b.add(Op::Remap {
         input: sway,
         from: [-1.0, 1.0],
-        to: [-0.12, 0.12],
+        to: [-0.06, 0.06],
     })?;
     let angle = b.add(Op::Add { a: angle, b: sway })?;
     let angle = cut.lift(b, angle)?;
@@ -417,6 +478,7 @@ fn wood(b: &mut ProgramBuilder, cut: Cut) -> Result<NodeId, ProgramError> {
                 width_frequency: [f32; 3],
                 extent_frequency: [f32; 3],
                 extent_cut: [f32; 2],
+                each: Option<[f32; 3]>,
                 seed: u64|
      -> Result<NodeId, ProgramError> {
         // A phase keeps the sawn test planes, which pass through angle 0,
@@ -428,7 +490,7 @@ fn wood(b: &mut ProgramBuilder, cut: Cut) -> Result<NodeId, ProgramError> {
         })?;
         // Width varies along each ribbon: within `edge` of a whole sector
         // at most, thinning to nothing where the noise is low.
-        let width = noise(b, Basis::Gradient, width_frequency, seed)?;
+        let width = oblique(b, Basis::Gradient, width_frequency, seed)?;
         let width = b.add(Op::Remap {
             input: width,
             from: [-1.0, 1.0],
@@ -441,14 +503,24 @@ fn wood(b: &mut ProgramBuilder, cut: Cut) -> Result<NodeId, ProgramError> {
             from: [edge, edge * 0.6],
             to: [0.0, 1.0],
         })?;
-        let extent = noise(b, Basis::Value, extent_frequency, seed + 1)?;
+        let extent = oblique(b, Basis::Value, extent_frequency, seed + 1)?;
         let extent = ramp(b, extent, extent_cut, [0.0, 1.0])?;
-        b.add(Op::Mul { a: ray, b: extent })
+        let ray = b.add(Op::Mul { a: ray, b: extent })?;
+        // Within the extent, each ray comes and goes by itself: a field
+        // that varies about as fast as rays are spaced, ramped
+        // symmetrically about its mean so that, faded under a coarse
+        // footprint, it leaves every ray at half strength rather than none.
+        let Some(each) = each else {
+            return Ok(ray);
+        };
+        let each = oblique(b, Basis::Value, each, seed + 5)?;
+        let each = ramp(b, each, [-0.15, 0.15], [0.0, 1.0])?;
+        b.add(Op::Mul { a: ray, b: each })
     };
-    // Broad rays run centimeters radially and along the trunk, so their
-    // extent varies slowly (40 cells a meter): on end grain they read as
-    // radial streaks, not flecks. They are about a millimeter wide at a
-    // 15 cm radius.
+    // Broad rays run centimeters along the trunk, so their extent varies
+    // slowly along it (25 cells a meter) and around it (60 a meter), and
+    // each ray within it comes and goes on 150 cells a meter around, about
+    // one per ray. They are about a millimeter wide at a 15 cm radius.
     let broad = rays(
         b,
         131.0,
@@ -456,6 +528,7 @@ fn wood(b: &mut ProgramBuilder, cut: Cut) -> Result<NodeId, ProgramError> {
         [60.0, 60.0, 30.0],
         [60.0, 60.0, 25.0],
         [0.05, 0.3],
+        Some([150.0, 150.0, 25.0]),
         SEED + 16,
     )?;
     let fine = rays(
@@ -465,6 +538,7 @@ fn wood(b: &mut ProgramBuilder, cut: Cut) -> Result<NodeId, ProgramError> {
         [160.0, 160.0, 90.0],
         [900.0, 900.0, 80.0],
         [0.0, 0.2],
+        None,
         SEED + 18,
     )?;
     let faint = cut.constant(b, 0.45)?;

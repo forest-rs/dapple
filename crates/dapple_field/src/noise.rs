@@ -360,8 +360,10 @@ pub(crate) fn lattice_noise_gradient(
 /// [`lattice_lanes3`](crate::solid::lattice_lanes3) is: the chunk's points
 /// are located together; [`Basis::Value`] hashes the four corners of every
 /// point in a scalar loop (or copies those of the point before, in the same
-/// cell) and blends them over the chunk, and
-/// [`Basis::Gradient`] sums each point's corners as [`lattice_eval`] does.
+/// cell) and blends them over the chunk, and [`Basis::Gradient`] sums a run
+/// of lanes in one cell together, corner by corner, by [`gradient_chunk`]:
+/// the cell's corners hashed once for the run, and the lanes' terms in
+/// loops that vectorize.
 pub(crate) fn lattice_lanes(
     basis: Basis,
     lattice: Lattice,
@@ -386,13 +388,230 @@ pub(crate) fn lattice_lanes(
         match basis {
             Basis::Value => value_lanes(lattice, seed, &cells, &fracs, &mut out[..n]),
             Basis::Gradient => {
-                let [fx, fy] = &fracs;
-                for (i, out) in out[..n].iter_mut().enumerate() {
+                let out = &mut out[..n];
+                gradient_chunk::<false>(lattice, seed, &cells, &fracs, out, Default::default());
+            }
+        }
+    }
+}
+
+/// One octave of lattice noise and its gradient at the points `(x[i],
+/// y[i])`, into `values` and the gradient's `gradients[axis]`: at each
+/// point the bits [`lattice_noise_gradient`] gives there.
+///
+/// The chunk's points are located together as [`lattice_lanes`] locates
+/// them; [`Basis::Gradient`] sums them as [`lattice_lanes`] does, and
+/// [`Basis::Value`] blends each lane's corners as the point kernel does.
+pub(crate) fn lattice_gradient_lanes(
+    basis: Basis,
+    lattice: Lattice,
+    seed: u64,
+    offset: Vec2,
+    points: [&[f32]; 2],
+    values: &mut [f32],
+    gradients: [&mut [f32]; 2],
+) {
+    let [gx, gy] = gradients;
+    for (start, (points, values)) in lanes::chunks(points, values).enumerate() {
+        let n = values.len().min(lanes::WIDTH);
+        let (start, end) = (start * lanes::WIDTH, start * lanes::WIDTH + n);
+        let mut cells = [[0_i64; lanes::WIDTH]; 2];
+        let mut fracs = [[0.0_f32; lanes::WIDTH]; 2];
+        for (axis, (cells, fracs)) in cells.iter_mut().zip(&mut fracs).enumerate() {
+            lanes::locate(
+                points[axis],
+                lattice.frequency[axis],
+                offset[axis],
+                &mut cells[..n],
+                &mut fracs[..n],
+            );
+        }
+        let (gx, gy) = (&mut gx[start..end], &mut gy[start..end]);
+        match basis {
+            Basis::Value => {
+                for i in 0..n {
                     let cell = [cells[0][i], cells[1][i]];
-                    let f = Vec2::new(fx[i], fy[i]);
-                    *out = eval_located::<false>(basis, lattice, seed, cell, f).0;
+                    let f = Vec2::new(fracs[0][i], fracs[1][i]);
+                    let (value, gradient) = eval_located::<true>(basis, lattice, seed, cell, f);
+                    values[i] = value;
+                    (gx[i], gy[i]) = gradient.into();
                 }
             }
+            Basis::Gradient => {
+                gradient_chunk::<true>(lattice, seed, &cells, &fracs, values, [gx, gy]);
+            }
+        }
+    }
+}
+
+/// The fewest lanes in one cell that [`gradient_chunk`] sums together.
+const SHARED: usize = 3;
+
+/// [`Basis::Gradient`] noise, with its gradient when `GRADIENT`, at the
+/// first `values.len()` located points of a chunk, `cells` and `fracs`,
+/// into `values` and `gradients`: at each point the bits [`eval_located`]
+/// gives there.
+///
+/// A cell's corners are a function of the cell alone, and neighboring
+/// points often share a cell (at low frequencies, a run of them): each run
+/// of [`SHARED`] lanes or more in one cell hashes its corners once, and
+/// [`gradient_run`] sums them over the run's lanes together. A shorter run
+/// goes lane by lane through [`eval_located`], which costs it less.
+#[inline(always)]
+fn gradient_chunk<const GRADIENT: bool>(
+    lattice: Lattice,
+    seed: u64,
+    cells: &[[i64; lanes::WIDTH]; 2],
+    fracs: &[[f32; lanes::WIDTH]; 2],
+    values: &mut [f32],
+    [gx, gy]: [&mut [f32]; 2],
+) {
+    let n = values.len().min(lanes::WIDTH);
+    let [cx, cy] = cells;
+    // Lanes in the cell of the lane before. When runs average fewer than
+    // `SHARED` lanes, the whole chunk goes lane by lane, without finding
+    // where each run ends, a branch that mispredicts.
+    let repeats = (1..n)
+        .filter(|&i| cx[i] == cx[i - 1] && cy[i] == cy[i - 1])
+        .count();
+    let mut i = if repeats * SHARED < (SHARED - 1) * n {
+        for l in 0..n {
+            let (cell, f) = ([cx[l], cy[l]], Vec2::new(fracs[0][l], fracs[1][l]));
+            let (value, gradient) =
+                eval_located::<GRADIENT>(Basis::Gradient, lattice, seed, cell, f);
+            values[l] = value;
+            if GRADIENT {
+                (gx[l], gy[l]) = gradient.into();
+            }
+        }
+        n
+    } else {
+        0
+    };
+    while i < n {
+        let cell = [cx[i], cy[i]];
+        let mut end = i + 1;
+        while end < n && [cx[end], cy[end]] == cell {
+            end += 1;
+        }
+        if end - i < SHARED {
+            for l in i..end {
+                let f = Vec2::new(fracs[0][l], fracs[1][l]);
+                let (value, gradient) =
+                    eval_located::<GRADIENT>(Basis::Gradient, lattice, seed, cell, f);
+                values[l] = value;
+                if GRADIENT {
+                    (gx[l], gy[l]) = gradient.into();
+                }
+            }
+            i = end;
+            continue;
+        }
+        let corners = gradient_corners(lattice, mix(seed, LATTICE_TAG), cell);
+        let f = [&fracs[0][i..end], &fracs[1][i..end]];
+        let values = &mut values[i..end];
+        if GRADIENT {
+            let gradients = [&mut gx[i..end], &mut gy[i..end]];
+            gradient_run::<true>(lattice, &corners, f, values, gradients);
+        } else {
+            gradient_run::<false>(lattice, &corners, f, values, Default::default());
+        }
+        i = end;
+    }
+}
+
+/// The gradients and values [`Basis::Gradient`] gives the 16 corners it
+/// sums around `cell`, hashed as [`eval_located`] hashes them from
+/// `prefix`, its seed and tag mixed: corner `(i, j)`, `i - 1` and `j - 1`
+/// cells from the cell, has its gradient's `x` and `y` and its value at
+/// `[0][i + 4j]`, `[1][i + 4j]` and `[2][i + 4j]`.
+#[inline(always)]
+fn gradient_corners(lattice: Lattice, prefix: u64, cell: [i64; 2]) -> [[f32; 16]; 3] {
+    let column = |dx: i64| mix(prefix, key(lattice.wrap_axis(0, cell[0] + dx)));
+    let row = |dy: i64| key(lattice.wrap_axis(1, cell[1] + dy));
+    // Written out rather than `array::map`, which is not always inlined.
+    let columns = [column(-1), column(0), column(1), column(2)];
+    let rows = [row(-1), row(0), row(1), row(2)];
+    let mut corners = [[0.0; 16]; 3];
+    for (j, row) in rows.into_iter().enumerate() {
+        for (i, column) in columns.into_iter().enumerate() {
+            let h = mix(column, row);
+            let [gx, gy] = GRADIENTS[(h >> 56) as usize];
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a 24-bit integer is exact in f32"
+            )]
+            let value = ((h >> 32) & 0xFF_FFFF) as f32 * (1.0 / 16_777_216.0) * 2.0 - 1.0;
+            [
+                corners[0][i + 4 * j],
+                corners[1][i + 4 * j],
+                corners[2][i + 4 * j],
+            ] = [gx, gy, value];
+        }
+    }
+    corners
+}
+
+/// [`Basis::Gradient`] noise, with its gradient when `GRADIENT`, at points
+/// `f` in one cell whose corners are `corners`, as [`gradient_corners`]
+/// gives them, into `values` and `gradients`: each lane the bits
+/// [`eval_located`] gives.
+///
+/// The lanes go through the corners together, in [`eval_located`]'s order,
+/// each adding a corner's terms, or zero where it is outside the corner's
+/// kernel, as [`eval_located`] adds them.
+#[inline(never)]
+fn gradient_run<const GRADIENT: bool>(
+    lattice: Lattice,
+    corners: &[[f32; 16]; 3],
+    [fx, fy]: [&[f32]; 2],
+    values: &mut [f32],
+    [gx, gy]: [&mut [f32]; 2],
+) {
+    let n = values.len().min(lanes::WIDTH);
+    let (fx, fy) = (&fx[..n], &fy[..n]);
+    let mut sum = [0.0_f32; lanes::WIDTH];
+    let mut gradient = [[0.0_f32; lanes::WIDTH]; 2];
+    for (c, ((&cx, &cy), &value)) in corners[0]
+        .iter()
+        .zip(&corners[1])
+        .zip(&corners[2])
+        .enumerate()
+    {
+        // The corner's offset from the cell, -1 to 2 on each axis, exactly.
+        #[expect(clippy::cast_precision_loss, reason = "offsets are small integers")]
+        let (dx, dy) = ((c & 3) as f32 - 1.0, (c >> 2) as f32 - 1.0);
+        let weighted = VALUE_WEIGHT * value;
+        for l in 0..n {
+            let d = Vec2::new(fx[l] - dx, fy[l] - dy);
+            let r2 = d.length_squared();
+            // All ones where the lane is inside the kernel (a NaN distance
+            // is not outside): the term outside is a zero by its bits, as a
+            // select is not left one.
+            let outside = r2 >= KERNEL_RADIUS_SQ;
+            let inside = u32::from(outside).wrapping_sub(1);
+            let within = |term: f32| f32::from_bits(term.to_bits() & inside);
+            let t = 1.0 - r2 / KERNEL_RADIUS_SQ;
+            let t2 = t * t;
+            let term = cx * d.x + cy * d.y + weighted;
+            let kernel = t2 * t2;
+            sum[l] += within(kernel * term);
+            if GRADIENT {
+                // d/dd of t⁴·term, as `eval_located` takes it.
+                let dk = -8.0 * t2 * t / KERNEL_RADIUS_SQ;
+                let along = dk * term;
+                gradient[0][l] += within(d.x * along + cx * kernel);
+                gradient[1][l] += within(d.y * along + cy * kernel);
+            }
+        }
+    }
+    for (value, &sum) in values.iter_mut().zip(&sum) {
+        *value = sum * GRADIENT_SCALE;
+    }
+    if GRADIENT {
+        for (l, (gx, gy)) in gx.iter_mut().zip(gy.iter_mut()).enumerate().take(n) {
+            let g = Vec2::new(gradient[0][l], gradient[1][l]) * GRADIENT_SCALE * lattice.frequency;
+            (*gx, *gy) = g.into();
         }
     }
 }
@@ -678,6 +897,44 @@ impl Noise {
             *value *= weight;
         }
     }
+
+    /// The noise and its gradient at the points `(x[i], y[i])`, all with
+    /// `footprint`, into `values` and `gradients`: each the bits
+    /// [`ScalarField::eval_gradient`] gives at its point.
+    pub(crate) fn eval_gradient_lanes(
+        &self,
+        points: [&[f32]; 2],
+        footprint: Footprint,
+        values: &mut [f32],
+        gradients: [&mut [f32]; 2],
+    ) {
+        let weight = footprint.band_weight(self.lattice.max_frequency());
+        let [gx, gy] = gradients;
+        if weight == 0.0 {
+            for out in [&mut *values, gx, gy] {
+                out.fill(0.0);
+            }
+            return;
+        }
+        let gradients = [&mut *gx, &mut *gy];
+        lattice_gradient_lanes(
+            self.basis,
+            self.lattice,
+            self.seed,
+            Vec2::ZERO,
+            points,
+            values,
+            gradients,
+        );
+        for value in values {
+            *value *= weight;
+        }
+        for g in [gx, gy] {
+            for g in g {
+                *g *= weight;
+            }
+        }
+    }
 }
 
 impl ScalarField for Noise {
@@ -711,7 +968,7 @@ mod tests {
 
     use super::*;
     use crate::hash::hash;
-    use crate::lanes::tests::{RUNS, coherent_cells, same_bits};
+    use crate::lanes::tests::{RUNS, coherent_cells, rows, same_bits};
 
     /// [`lattice_eval`] as first written, hashing every corner in full:
     /// the reference its hoisted hashing must match bit for bit.
@@ -864,16 +1121,24 @@ mod tests {
         points
     }
 
+    /// The points the lane kernels are checked at on `lattice`: first the
+    /// patterns of cells a kernel reuses a lane's cell across, so that runs
+    /// begin where they do, then rows of lanes close together in their
+    /// cells, then the awkward points.
+    fn kernel_points(lattice: Lattice) -> Vec<Vec2> {
+        let mut points: Vec<Vec2> = coherent_cells(lattice.wrap)
+            .into_iter()
+            .chain(rows())
+            .map(|cells| Vec2::from_array(cells) / lattice.frequency)
+            .collect();
+        points.extend(lane_points(lattice));
+        points
+    }
+
     #[test]
     fn lane_kernels_match_the_point_kernel() {
         for lattice in test_lattices() {
-            // First the patterns of cells the kernel reuses a lane's cell
-            // across, so that runs begin where they do.
-            let mut points: Vec<Vec2> = coherent_cells(lattice.wrap)
-                .into_iter()
-                .map(|cells| Vec2::from_array(cells) / lattice.frequency)
-                .collect();
-            points.extend(lane_points(lattice));
+            let points = kernel_points(lattice);
             let [x, y] = [0, 1].map(|axis| points.iter().map(|p| p[axis]).collect::<Vec<_>>());
             for basis in [Basis::Value, Basis::Gradient] {
                 for (seed, offset) in [0, 7, u64::MAX].into_iter().zip(OFFSETS) {
@@ -1014,5 +1279,105 @@ mod tests {
             noise.eval(Vec2::new(0.3, 0.1), fine),
             noise.eval(Vec2::new(0.3, 0.1), Footprint::POINT)
         );
+    }
+
+    /// With their gradients, the lane kernels give each point the bits the
+    /// point kernel gives it, value and gradient, in runs of every length.
+    #[test]
+    fn gradient_lane_kernels_match_the_point_kernel() {
+        for lattice in test_lattices() {
+            let points = kernel_points(lattice);
+            let [x, y] = [0, 1].map(|axis| points.iter().map(|p| p[axis]).collect::<Vec<_>>());
+            for basis in [Basis::Value, Basis::Gradient] {
+                for (seed, offset) in [0, 7, u64::MAX].into_iter().zip(OFFSETS) {
+                    let none = [&mut [][..], &mut [][..]];
+                    lattice_gradient_lanes(basis, lattice, seed, offset, [&[], &[]], &mut [], none);
+                    for run in RUNS.into_iter().filter(|&run| run > 0) {
+                        let mut values = vec![-7.0; points.len()];
+                        let mut gradients = [(); 2].map(|()| vec![-7.0; points.len()]);
+                        for (start, values) in (0..).step_by(run).zip(values.chunks_mut(run)) {
+                            let span = start..start + values.len();
+                            let p = [&x[span.clone()], &y[span.clone()]];
+                            let [gx, gy] = &mut gradients;
+                            let g = [&mut gx[span.clone()], &mut gy[span.clone()]];
+                            lattice_gradient_lanes(basis, lattice, seed, offset, p, values, g);
+                        }
+                        for (i, &p) in points.iter().enumerate() {
+                            let (value, gradient) =
+                                lattice_noise_gradient(basis, lattice, seed, offset, p);
+                            let got = [values[i], gradients[0][i], gradients[1][i]];
+                            let want = [value, gradient.x, gradient.y];
+                            assert!(
+                                got.iter().zip(want).all(|(&a, b)| same_bits(a, b)),
+                                "{basis:?} {lattice:?} seed {seed} in runs of {run} at {p}: \
+                                 {got:?} for {want:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Noise and fractals with their gradients over lanes give each point
+    /// the bits [`ScalarField::eval_gradient`] gives it, at footprints that
+    /// keep, fade and drop octaves.
+    #[test]
+    fn gradients_over_lanes_match_their_points() {
+        use crate::fractal::{Fractal, FractalKind, FractalParams};
+        let footprints =
+            [0.0, 1.0 / 256.0, 0.05, 0.085, 0.3, 1e6].map(|w| Footprint::new(w).unwrap());
+        let lattices = [
+            (Domain::Plane, Vec2::new(0.37, 5.0)),
+            (Domain::periodic(1, 1).unwrap(), Vec2::new(8.0, 3.0)),
+            (Domain::periodic(2, 3).unwrap(), Vec2::new(1.5, 2.0)),
+        ];
+        for (domain, frequency) in lattices {
+            let points = kernel_points(Lattice::new(domain, frequency).unwrap());
+            let [x, y] = [0, 1].map(|axis| points.iter().map(|p| p[axis]).collect::<Vec<_>>());
+            for basis in [Basis::Value, Basis::Gradient] {
+                let noise = Noise::new(basis, domain, frequency, 3).unwrap();
+                let fractals = [FractalKind::Fbm, FractalKind::Ridged].map(|kind| {
+                    let params = FractalParams {
+                        kind,
+                        octaves: 4,
+                        gain: 0.6,
+                        ..FractalParams::default()
+                    };
+                    Fractal::new(basis, domain, frequency, 11, params).unwrap()
+                });
+                for footprint in footprints {
+                    for run in [1, 3, 63, 64, 65, 131] {
+                        let mut got = [(); 3].map(|()| [(); 3].map(|()| vec![-7.0; points.len()]));
+                        for start in (0..points.len()).step_by(run) {
+                            let span = start..(start + run).min(points.len());
+                            let p = [&x[span.clone()], &y[span.clone()]];
+                            for (field, [v, gx, gy]) in got.iter_mut().enumerate() {
+                                let v = &mut v[span.clone()];
+                                let g = [&mut gx[span.clone()], &mut gy[span.clone()]];
+                                match field {
+                                    0 => noise.eval_gradient_lanes(p, footprint, v, g),
+                                    k => fractals[k - 1].eval_gradient_lanes(p, footprint, v, g),
+                                }
+                            }
+                        }
+                        for (i, &p) in points.iter().enumerate() {
+                            for (field, got) in got.iter().enumerate() {
+                                let (value, gradient) = match field {
+                                    0 => noise.eval_gradient(p, footprint),
+                                    k => fractals[k - 1].eval_gradient(p, footprint),
+                                };
+                                let want = [value, gradient.x, gradient.y];
+                                assert!(
+                                    (0..3).all(|c| same_bits(got[c][i], want[c])),
+                                    "{basis:?} {domain:?} field {field} in runs of {run} \
+                                     at {p} with {footprint:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

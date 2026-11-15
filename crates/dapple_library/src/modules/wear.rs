@@ -66,7 +66,8 @@ pub(super) fn convexity(base: &Material, radius: f32) -> Result<Raster, ModuleEr
 /// as that mask allows: an edge outside it does not wear, so wear can come
 /// in patches ([`Patches`]) rather than evenly along every edge. Without
 /// `worn`, the base itself wears: its coat goes, it roughens by
-/// `roughening` and lightens by `lighten`.
+/// `roughening` and lightens by `lighten`. A `coverage` or `strength` of 0
+/// wears nothing and gives the base as it is.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct EdgeWear;
 
@@ -120,6 +121,11 @@ impl Module for EdgeWear {
     fn build(&self, cx: &mut Context<'_>, args: &Args) -> Result<Outputs, ModuleError> {
         let grid = cx.grid();
         let base = args.material("base").ok_or_else(|| fail("base"))?;
+        // Where nothing wears, the base is what selecting nothing over it
+        // gives: skip finding where it would.
+        if args.scalar("coverage") == 0.0 || args.scalar("strength") == 0.0 {
+            return Ok(Outputs::new().with("material", Output::Material(base.clone())));
+        }
         let convex = convexity(base, args.scalar("radius"))?;
         let breakup = realize_scalar(grid, |b, d| {
             fbm(b, d, [60.0, 60.0], args.seed("breakup"), 3)

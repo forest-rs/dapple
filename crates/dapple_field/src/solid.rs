@@ -16,6 +16,7 @@ use glam::Vec3;
 use crate::domain::{Domain3, DomainError, Footprint, Lattice3};
 use crate::fractal::{FractalKind, FractalParams, MAX_OCTAVES};
 use crate::hash::{hash, key, mix, unit_f32};
+use crate::lanes;
 use crate::noise::Basis;
 
 /// Purpose tag for 3D lattice-corner hashes.
@@ -391,6 +392,19 @@ fn lattice_eval3<const GRADIENT: bool>(
             cell[axis] += 1;
         }
     }
+    eval_located3::<GRADIENT>(basis, lattice, seed, cell, f)
+}
+
+/// [`lattice_eval3`] once its point is located: at `f` in `cell`, the
+/// lattice offset applied.
+#[inline(always)]
+fn eval_located3<const GRADIENT: bool>(
+    basis: Basis,
+    lattice: Lattice3,
+    seed: u64,
+    cell: [i64; 3],
+    f: Vec3,
+) -> (f32, Vec3) {
     // A corner's hash is `hash(seed, [LATTICE_TAG, x, y, z])` of its
     // wrapped cell. The hash folds its keys from the left, so every corner
     // shares the seed-and-tag prefix, every corner of a column its `x`
@@ -503,6 +517,122 @@ fn lattice_eval3<const GRADIENT: bool>(
     }
 }
 
+/// One octave of 3D lattice noise at the points `(x[i], y[i], z[i])`, into
+/// `out`: at each point the bits of [`lattice_eval3`]'s value there.
+///
+/// A lane kernel, run a chunk of [`lanes::WIDTH`] points at a time. The
+/// chunk's points are located on the lattice together, in loops that
+/// vectorize. [`Basis::Value`] then hashes the eight corners of every point
+/// in a loop of its own, scalar since the hash's 64-bit multiplies have no
+/// vector form, and blends them over the chunk, vectorized again.
+/// [`Basis::Gradient`], whose corners inside the kernel vary from point to
+/// point, sums each point's corners as [`lattice_eval3`] does.
+pub(crate) fn lattice_lanes3(
+    basis: Basis,
+    lattice: Lattice3,
+    seed: u64,
+    offset: Vec3,
+    points: [&[f32]; 3],
+    out: &mut [f32],
+) {
+    for (points, out) in lanes::chunks(points, out) {
+        let n = out.len().min(lanes::WIDTH);
+        let mut cells = [[0_i64; lanes::WIDTH]; 3];
+        let mut fracs = [[0.0_f32; lanes::WIDTH]; 3];
+        for (axis, (cells, fracs)) in cells.iter_mut().zip(&mut fracs).enumerate() {
+            lanes::locate(
+                points[axis],
+                lattice.frequency[axis],
+                offset[axis],
+                &mut cells[..n],
+                &mut fracs[..n],
+            );
+        }
+        match basis {
+            Basis::Value => value_lanes3(lattice, seed, &cells, &fracs, &mut out[..n]),
+            Basis::Gradient => {
+                let [fx, fy, fz] = &fracs;
+                for (i, out) in out[..n].iter_mut().enumerate() {
+                    let cell = [cells[0][i], cells[1][i], cells[2][i]];
+                    let f = Vec3::new(fx[i], fy[i], fz[i]);
+                    *out = eval_located3::<false>(basis, lattice, seed, cell, f).0;
+                }
+            }
+        }
+    }
+}
+
+/// [`Basis::Value`] noise at the located points of a chunk, the first
+/// `out.len()` of `cells` and `fracs`.
+fn value_lanes3(
+    lattice: Lattice3,
+    seed: u64,
+    cells: &[[i64; lanes::WIDTH]; 3],
+    fracs: &[[f32; lanes::WIDTH]; 3],
+    out: &mut [f32],
+) {
+    let n = out.len().min(lanes::WIDTH);
+    // The corners' values, `c[i + 2j + 4k]` for corner `(i, j, k)`, with a
+    // loop of its own for each kind of lattice, so that neither tests the
+    // kind per point.
+    let mut c = [[0.0_f32; lanes::WIDTH]; 8];
+    let prefix = mix(seed, LATTICE_TAG);
+    match lattice.wrap {
+        None => value_corners3(prefix, cells, n, |_, index| index, &mut c),
+        Some(period) => value_corners3(
+            prefix,
+            cells,
+            n,
+            |axis, index: i64| index.rem_euclid(period[axis]),
+            &mut c,
+        ),
+    }
+    let [fx, fy, fz] = fracs;
+    for (i, out) in out[..n].iter_mut().enumerate() {
+        let (u, v, w) = (fade(fx[i]), fade(fy[i]), fade(fz[i]));
+        let x00 = lerp(c[0][i], c[1][i], u);
+        let x10 = lerp(c[2][i], c[3][i], u);
+        let x01 = lerp(c[4][i], c[5][i], u);
+        let x11 = lerp(c[6][i], c[7][i], u);
+        let y0 = lerp(x00, x10, v);
+        let y1 = lerp(x01, x11, v);
+        *out = lerp(y0, y1, w);
+    }
+}
+
+/// The values of the eight corners of each of the first `n` cells, into
+/// `out[i + 2j + 4k]` for corner `(i, j, k)`, hashed as [`lattice_eval3`]
+/// hashes them from `prefix`, its seed and tag mixed, with `wrap(axis,
+/// index)` wrapping a coordinate as the lattice does.
+#[inline(always)]
+fn value_corners3(
+    prefix: u64,
+    cells: &[[i64; lanes::WIDTH]; 3],
+    n: usize,
+    wrap: impl Fn(usize, i64) -> i64,
+    out: &mut [[f32; lanes::WIDTH]; 8],
+) {
+    for i in 0..n.min(lanes::WIDTH) {
+        let [x, y, z] = [cells[0][i], cells[1][i], cells[2][i]];
+        let (x0, x1) = (
+            mix(prefix, key(wrap(0, x))),
+            mix(prefix, key(wrap(0, x + 1))),
+        );
+        let (y0, y1) = (key(wrap(1, y)), key(wrap(1, y + 1)));
+        let (z0, z1) = (key(wrap(2, z)), key(wrap(2, z + 1)));
+        let [x0y0, x1y0, x0y1, x1y1] = [mix(x0, y0), mix(x1, y0), mix(x0, y1), mix(x1, y1)];
+        let value = |xy: u64, z: u64| unit_f32(mix(xy, z)) * 2.0 - 1.0;
+        out[0][i] = value(x0y0, z0);
+        out[1][i] = value(x1y0, z0);
+        out[2][i] = value(x0y1, z0);
+        out[3][i] = value(x1y1, z0);
+        out[4][i] = value(x0y0, z1);
+        out[5][i] = value(x1y0, z1);
+        out[6][i] = value(x0y1, z1);
+        out[7][i] = value(x1y1, z1);
+    }
+}
+
 /// One octave of 3D lattice noise in about `[-1, 1]`, with mean zero.
 ///
 /// The solid counterpart of [`Noise`](crate::Noise): the same bases, radial
@@ -550,6 +680,21 @@ impl Noise3 {
     #[must_use]
     pub const fn basis(&self) -> Basis {
         self.basis
+    }
+
+    /// The noise at the points `(x[i], y[i], z[i])`, all with `footprint`,
+    /// into `out`: each value the bits [`SolidField::eval`] gives at its
+    /// point.
+    pub(crate) fn eval_lanes(&self, points: [&[f32]; 3], footprint: Footprint, out: &mut [f32]) {
+        let weight = footprint.band_weight(self.lattice.max_frequency());
+        if weight == 0.0 {
+            out.fill(0.0);
+            return;
+        }
+        lattice_lanes3(self.basis, self.lattice, self.seed, Vec3::ZERO, points, out);
+        for value in out {
+            *value *= weight;
+        }
     }
 }
 
@@ -664,42 +809,45 @@ impl Fractal3 {
     }
 
     /// The fractal at the points `(x[i], y[i], z[i])`, all with
-    /// `footprint`, into `out`: octave by octave over every point, each
-    /// octave's band weight taken once, and each value the bits
+    /// `footprint`, into `out`: octave by octave over each chunk of
+    /// [`lanes::WIDTH`] points, each octave's band weight taken once and its
+    /// noise by the lane kernel, and each value the bits
     /// [`SolidField::eval`] gives at its point.
     pub(crate) fn eval_lanes(&self, [x, y, z]: [&[f32]; 3], footprint: Footprint, out: &mut [f32]) {
         let mean = self.mean();
-        out.fill(0.0);
-        for octave in &self.octaves {
-            let weight = footprint.band_weight(octave.lattice.max_frequency());
-            if weight == 0.0 {
-                for sum in &mut *out {
-                    *sum += mean * octave.amplitude;
+        let mut noise = [0.0; lanes::WIDTH];
+        for (points, out) in lanes::chunks([x, y, z], out) {
+            let noise = &mut noise[..out.len()];
+            out.fill(0.0);
+            for octave in &self.octaves {
+                let weight = footprint.band_weight(octave.lattice.max_frequency());
+                if weight == 0.0 {
+                    for sum in &mut *out {
+                        *sum += mean * octave.amplitude;
+                    }
+                    continue;
                 }
-                continue;
-            }
-            let noise = |p| {
-                lattice_eval3::<false>(self.basis, octave.lattice, octave.seed, octave.offset, p).0
-            };
-            let lanes = out.iter_mut().zip(x.iter().zip(y).zip(z));
-            match self.kind {
-                FractalKind::Fbm => {
-                    for (sum, ((&x, &y), &z)) in lanes {
-                        let detail = noise(Vec3::new(x, y, z));
-                        *sum += (mean + (detail - mean) * weight) * octave.amplitude;
+                let (lattice, seed, offset) = (octave.lattice, octave.seed, octave.offset);
+                lattice_lanes3(self.basis, lattice, seed, offset, points, noise);
+                let lanes = out.iter_mut().zip(&*noise);
+                match self.kind {
+                    FractalKind::Fbm => {
+                        for (sum, &detail) in lanes {
+                            *sum += (mean + (detail - mean) * weight) * octave.amplitude;
+                        }
+                    }
+                    FractalKind::Ridged => {
+                        for (sum, &n) in lanes {
+                            let r = 1.0 - n.abs();
+                            let detail = r * r;
+                            *sum += (mean + (detail - mean) * weight) * octave.amplitude;
+                        }
                     }
                 }
-                FractalKind::Ridged => {
-                    for (sum, ((&x, &y), &z)) in lanes {
-                        let r = 1.0 - noise(Vec3::new(x, y, z)).abs();
-                        let detail = r * r;
-                        *sum += (mean + (detail - mean) * weight) * octave.amplitude;
-                    }
-                }
             }
-        }
-        for sum in out {
-            *sum /= self.total_amplitude;
+            for sum in out {
+                *sum /= self.total_amplitude;
+            }
         }
     }
 
@@ -1036,9 +1184,12 @@ impl SolidField for CellularField3 {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
     use crate::CellOutput;
     use crate::hash::hash;
+    use crate::lanes::tests::{RUNS, same_bits};
 
     /// [`lattice_eval3`] as first written, hashing every corner in full and
     /// skipping the corners outside the kernel by a branch: the reference
@@ -1328,6 +1479,131 @@ mod tests {
                                 "{basis:?} {:?} at {p} with {footprint:?}",
                                 fractal.kind
                             );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `points` as `x`, `y` and `z` columns.
+    fn columns(points: &[Vec3]) -> [Vec<f32>; 3] {
+        [0, 1, 2].map(|axis| points.iter().map(|p| p[axis]).collect())
+    }
+
+    /// The awkward points, then edges a lane meets beside other lanes:
+    /// signed zeros, NaN and coordinates of 10¹⁵ on each axis, lattice
+    /// boundaries in cells and just either side of them, and negatives.
+    fn lane_points(frequency: Vec3) -> Vec<Vec3> {
+        let mut points = awkward_points(frequency);
+        for v in [0.0, -0.0, f32::NAN, 1e15, -1e15, -3.0, -2.5, -1e-7] {
+            points.extend([
+                Vec3::new(v, 0.4, 0.6),
+                Vec3::new(0.6, v, -0.4),
+                Vec3::new(-0.4, 0.6, v),
+            ]);
+        }
+        for cells in [1.0_f32, 2.0, -1.0, -3.0, 17.0] {
+            for step in [-1, 0, 1] {
+                let p = Vec3::splat(cells) / frequency;
+                let nudge = |c: f32| f32::from_bits(c.to_bits().wrapping_add_signed(step));
+                points.push(Vec3::from_array(p.to_array().map(nudge)));
+            }
+        }
+        points
+    }
+
+    #[test]
+    fn lane_kernels_match_the_point_kernel() {
+        let offsets = [
+            Vec3::ZERO,
+            Vec3::new(0.5, 0.25, 0.75),
+            Vec3::splat(1.0 - f32::EPSILON),
+        ];
+        for (domain, frequency) in test_lattices() {
+            let lattice = Lattice3::new(domain, frequency).unwrap();
+            let points = lane_points(frequency);
+            let [x, y, z] = columns(&points);
+            for basis in [Basis::Value, Basis::Gradient] {
+                for (seed, offset) in [0, 7, u64::MAX].into_iter().zip(offsets) {
+                    lattice_lanes3(basis, lattice, seed, offset, [&[]; 3], &mut []);
+                    for run in RUNS.into_iter().filter(|&run| run > 0) {
+                        let mut out = vec![-7.0; points.len()];
+                        for (start, out) in (0..).step_by(run).zip(out.chunks_mut(run)) {
+                            let span = start..start + out.len();
+                            let p = [&x[span.clone()], &y[span.clone()], &z[span]];
+                            lattice_lanes3(basis, lattice, seed, offset, p, out);
+                        }
+                        for (&p, &got) in points.iter().zip(&out) {
+                            let want = lattice_eval3::<false>(basis, lattice, seed, offset, p).0;
+                            assert!(
+                                same_bits(got, want),
+                                "{basis:?} {lattice:?} seed {seed} in runs of {run} at {p}: \
+                                 {got} for {want}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn noise_and_fractals_over_lanes_match_their_points() {
+        // Footprints that keep, fade (by weights either side of a half) and
+        // drop each octave.
+        let footprints = [
+            0.0,
+            1e-6,
+            1.0 / 256.0,
+            0.02,
+            0.05,
+            0.07,
+            0.085,
+            0.2,
+            0.3,
+            0.4,
+            1e6,
+        ]
+        .map(|w| Footprint::new(w).unwrap());
+        for (domain, frequency) in test_lattices() {
+            let points = lane_points(frequency);
+            let [x, y, z] = columns(&points);
+            for basis in [Basis::Value, Basis::Gradient] {
+                let noise = Noise3::new(basis, domain, frequency, 3).unwrap();
+                let fractals = [FractalKind::Fbm, FractalKind::Ridged].map(|kind| {
+                    let params = FractalParams {
+                        kind,
+                        octaves: 4,
+                        ..FractalParams::default()
+                    };
+                    Fractal3::new(basis, domain, frequency, 11, params).unwrap()
+                });
+                for footprint in footprints {
+                    for run in RUNS.into_iter().filter(|&run| run > 0) {
+                        let mut noises = vec![-7.0; points.len()];
+                        let mut sums = [(); 2].map(|()| vec![-7.0; points.len()]);
+                        for (start, out) in (0..).step_by(run).zip(noises.chunks_mut(run)) {
+                            let span = start..start + out.len();
+                            let p = [&x[span.clone()], &y[span.clone()], &z[span.clone()]];
+                            noise.eval_lanes(p, footprint, out);
+                            for (fractal, sums) in fractals.iter().zip(&mut sums) {
+                                fractal.eval_lanes(p, footprint, &mut sums[span.clone()]);
+                            }
+                        }
+                        for (i, &p) in points.iter().enumerate() {
+                            let want = noise.eval(p, footprint);
+                            assert!(
+                                same_bits(noises[i], want),
+                                "{noise:?} in runs of {run} at {p} with {footprint:?}"
+                            );
+                            for (fractal, sums) in fractals.iter().zip(&sums) {
+                                assert!(
+                                    same_bits(sums[i], fractal.eval(p, footprint)),
+                                    "{basis:?} {:?} in runs of {run} at {p} with {footprint:?}",
+                                    fractal.kind
+                                );
+                            }
                         }
                     }
                 }

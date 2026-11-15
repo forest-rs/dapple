@@ -21,9 +21,9 @@
 //! as a column of its own.
 //!
 //! Every step computes, per lane, the operations the point evaluation
-//! computes, in the same order and through the same functions, so each lane
-//! is the bits [`Evaluator::eval_value`](super::Evaluator::eval_value) gives
-//! at its point:
+//! computes, in the same order, so each lane is the bits
+//! [`Evaluator::eval_value`](super::Evaluator::eval_value) gives at its
+//! point:
 //!
 //! - context steps (transforms, slices, warps) and chain steps are loops
 //!   over the context's and register's columns;
@@ -34,6 +34,9 @@
 //!   loop of their own; with their gradient, the fused value-and-gradient
 //!   evaluation; a fractal whose block shares one footprint goes octave by
 //!   octave over the lanes, taking each octave's band weight once;
+//! - solid lattice noise, alone and in fractals, runs a lane kernel when
+//!   its block shares one footprint: the block's points are located on the
+//!   lattice together, and value noise's corners blended together;
 //! - the gradients of arithmetic on scalars are loops over the operands'
 //!   gradient columns.
 //!
@@ -706,7 +709,12 @@ fn eval_value(
         Kernel::Sample(ref image) => {
             at.planar(|i, p, footprint| out.store(i, image.sample_value(p, footprint)));
         }
-        Kernel::Noise3(ref noise) => solid(out, at, |p, fp| noise.eval(p, fp)),
+        Kernel::Noise3(ref noise) => match at.footprints {
+            Footprints::Uniform(footprint) => {
+                noise.eval_lanes([at.x, at.y, at.z], footprint, out.component(0));
+            }
+            Footprints::Lanes(_) => solid(out, at, |p, fp| noise.eval(p, fp)),
+        },
         Kernel::Fractal3(ref fractal) => match at.footprints {
             Footprints::Uniform(footprint) => {
                 fractal.eval_lanes([at.x, at.y, at.z], footprint, out.component(0));

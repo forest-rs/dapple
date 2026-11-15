@@ -2,7 +2,7 @@
   "format": "dapple.package",
   "version": 1,
   "interface": {
-    "module": { "name": "dapple_library.packages.weathered_copper", "version": 1 },
+    "module": { "name": "dapple_library.packages.weathered_copper", "version": 2 },
     "doc": "copper cladding, as a package: copper sheet under a patina that tarnishes it, then grows verdigris where water stays and runs",
     "params": [
       {
@@ -40,7 +40,7 @@
     ],
     "modules": [
       { "name": "dapple_library.copper", "version": 1 },
-      { "name": "dapple_library.patina", "version": 1 }
+      { "name": "dapple_library.patina", "version": 2 }
     ]
   },
   "presets": [
@@ -74,7 +74,7 @@
       },
       {
         "name": "patina",
-        "module": { "name": "dapple_library.patina", "version": 1 },
+        "module": { "name": "dapple_library.patina", "version": 2 },
         "params": { "age": { "param": "age" }, "wetness": { "param": "wetness" } },
         "inputs": { "base": { "output": { "step": "copper", "output": "material" } } }
       }

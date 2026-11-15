@@ -218,10 +218,13 @@ fn product(
 /// unevenly toward a brown cuprite film (`tarnish`) and then near black
 /// (`dark`), soonest where it stays wet; then pale blue-green verdigris
 /// (`color`) crusts over it where water stays, `thickness` thick and
-/// chalky, from crevices and below laps outward, until at `age` 1 it
-/// covers some 85% of the surface; and where it has formed, rain washes
-/// it down in thin green trails over the metal below, as strongly as
-/// `wetness` says.
+/// chalky: first in crevices and where water hangs above a drip edge,
+/// spreading slowly at first and then over most of the face, until at
+/// `age` 1 it covers some 85% of the surface; and where it has formed,
+/// rain washes it down in thin, dull green stains over the metal below,
+/// strongest under their source and fading down the face, as strongly as
+/// `wetness` says. The stains are a film, not a crust: no relief, and
+/// only a little rougher than the metal.
 ///
 /// Verdigris is a dielectric: where it covers, metalness is 0 and
 /// roughness near 0.9. The tarnish is a thin film the metal shows
@@ -245,7 +248,7 @@ impl Module for Patina {
             seed(),
         ]);
         Interface {
-            id: ModuleId::new("dapple_library.patina", 1),
+            id: ModuleId::new("dapple_library.patina", 2),
             doc: "copper's tarnish, then verdigris where water stays and runs".into(),
             params,
             inputs: vec![base_input()],
@@ -334,14 +337,16 @@ impl Module for Patina {
         m.set_param(Param::BaseColor, color_map(grid, &colors)?)?;
         m.set_param(Param::SpecularRoughness, scalar_channel(grid, &rough)?)?;
 
-        // Verdigris: where water stays, drawn down into streaks by its
-        // runs and broken up into a granular crust at its edges.
-        let share = 0.85 * libm::powf(smoothstep(0.2, 1.0, age), 1.2);
+        // Verdigris: where water stays, broken up into a granular crust
+        // at its edges. Its edge is not drawn into streaks: a contour of
+        // where water stays, drawn out vertically, hangs upward from a
+        // drip edge in flames; streaks are what the wash below carries
+        // down. It holds to the wettest places well into middle age.
+        let share = 0.85 * libm::powf(smoothstep(0.2, 1.0, age), 2.2);
         let score: Vec<f32> = (0..n)
             .map(|i| {
                 wet.metal.values()[i]
                     * (wet.score.values()[i]
-                        + 0.22 * wet.runs.values()[i]
                         + 0.1 * grain.values()[i]
                         + 0.06 * fine.values()[i]
                         + 0.1 * stain.values()[i])
@@ -403,7 +408,8 @@ impl Module for Patina {
         )?);
 
         // Wash: verdigris carried down by rain in thin trails, once there
-        // is enough of it to carry.
+        // is enough of it to carry: a dull stain, deeper than the crust,
+        // strongest under its source and narrowing as it fades.
         let wetness = args.scalar("wetness");
         let sources = grid.raster(
             (0..n)
@@ -411,19 +417,23 @@ impl Module for Patina {
                 .collect(),
         )?;
         let sources = GaussianBlur { sigma: 0.002 }.apply(&sources)?;
-        let trails = runoff(grid, args, &sources, args.scalar("runoff"), base.tiling())?;
+        let length = args.scalar("runoff") * (0.5 + 0.8 * wetness);
+        let trails = runoff(grid, args, &sources, length, base.tiling())?;
         let carried = smoothstep(0.3, 0.75, age);
         let wash: Vec<f32> = (0..n)
             .map(|i| {
-                let t = wet.stain(i, wetness * trails.values()[i]);
-                0.6 * carried * t * (1.0 - covered.values()[i]) * wet.metal.values()[i]
+                let tr = trails.values()[i].min(1.0);
+                let t = wet.stain(i, 1.5 * wetness * tr) * (0.4 + 0.6 * tr);
+                0.9 * carried * t * (1.0 - covered.values()[i]) * wet.metal.values()[i]
             })
             .collect();
         if wash.iter().any(|&w| w > 0.0) {
             let wash_colors: Vec<Vec3> = (0..n)
-                .map(|i| verdigris.lerp(bloom, 0.4) * (0.92 + 0.12 * grain.values()[i]))
+                .map(|i| {
+                    deep.lerp(verdigris, 0.35).lerp(grey, 0.15) * (0.92 + 0.12 * grain.values()[i])
+                })
                 .collect();
-            let washed = product(&m, &wash_colors, &vec![0.6; n], PATINA)?;
+            let washed = product(&m, &wash_colors, &vec![0.5; n], PATINA)?;
             m = cx.record(ops::deposit(
                 &m,
                 &Deposit {

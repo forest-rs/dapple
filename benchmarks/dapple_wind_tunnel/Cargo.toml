@@ -15,6 +15,7 @@ glam.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+dapple_elements.workspace = true
 dapple_encode.workspace = true
 dapple_graph.workspace = true
 dapple_material.workspace = true
@@ -29,6 +30,10 @@ bench = false
 
 [[bench]]
 name = "build"
+harness = false
+
+[[bench]]
+name = "elements"
 harness = false
 
 [[bench]]

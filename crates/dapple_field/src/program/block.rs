@@ -35,13 +35,14 @@
 //!   evaluation; a fractal whose block shares one footprint goes octave by
 //!   octave over the lanes, taking each octave's band weight once;
 //! - lattice noise, planar and solid, alone and in fractals, runs a lane
-//!   kernel when its block shares one footprint: the block's points are
-//!   located on the lattice together, and value noise's corners blended
-//!   together;
+//!   kernel when its block shares one footprint (solid noise with its
+//!   gradient too): the block's points are located on the lattice
+//!   together, and value noise's corners blended together;
 //! - cellular noise, planar and solid, looks up each lane in turn but
 //!   hashes a cell's neighborhood once for a run of lanes in that cell;
 //! - the gradients of arithmetic on scalars are loops over the operands'
-//!   gradient columns;
+//!   gradient columns, and a coordinate of the solid position's gradient
+//!   is an axis;
 //! - a wave reads its phase's gradient columns, which its phase always
 //!   has, for its footprint in phase.
 //!
@@ -935,14 +936,50 @@ fn eval_gradient(
         Kernel::Disk(ref disk) => {
             return planar_gradient(out, at, |p, fp| disk.eval_gradient(p, fp));
         }
+        // Solid noise of one footprint goes a block of lanes at a time.
         Kernel::Noise3(ref noise) => {
-            return solid_gradient(out, at, |p, fp| noise.eval_gradient(p, fp));
+            return match at.footprints {
+                Footprints::Uniform(footprint) => {
+                    let (v, [gx, gy, gz]) = out.scalar_gradient();
+                    noise.eval_gradient_lanes(
+                        [at.x, at.y, at.z],
+                        footprint,
+                        &mut v[..at.x.len()],
+                        [gx, gy, gz].map(|g| &mut g[..at.x.len()]),
+                    );
+                }
+                Footprints::Lanes(_) => {
+                    solid_gradient(out, at, |p, fp| noise.eval_gradient(p, fp));
+                }
+            };
         }
         Kernel::Fractal3(ref fractal) => {
-            return solid_gradient(out, at, |p, fp| fractal.eval_gradient(p, fp));
+            return match at.footprints {
+                Footprints::Uniform(footprint) => {
+                    let (v, [gx, gy, gz]) = out.scalar_gradient();
+                    fractal.eval_gradient_lanes(
+                        [at.x, at.y, at.z],
+                        footprint,
+                        &mut v[..at.x.len()],
+                        [gx, gy, gz].map(|g| &mut g[..at.x.len()]),
+                    );
+                }
+                Footprints::Lanes(_) => {
+                    solid_gradient(out, at, |p, fp| fractal.eval_gradient(p, fp));
+                }
+            };
         }
         Kernel::Cellular3(ref cellular) => {
             return solid_gradient(out, at, |p, fp| cellular.eval_gradient(p, fp));
+        }
+        // A coordinate of the solid position: its gradient is an axis.
+        Kernel::Component(input, index) if program.is_position(input) => {
+            let (v, mut g) = out.scalar_gradient();
+            v[..operands.len].copy_from_slice(operands.component(0, index));
+            for i in lanes(operands.len) {
+                store3(&mut g, i, Vec3::AXES[index]);
+            }
+            return;
         }
         // A wave reads its phase's gradient for its footprint.
         Kernel::Wave(_, _, ref ramp) => {

@@ -85,6 +85,28 @@ pub(crate) fn locate(p: &[f32], frequency: f32, offset: f32, cell: &mut [i64], f
     }
 }
 
+/// Whether the first `n` lanes of `cells`, a cell index per axis, are worth
+/// a kernel that reuses a lane's cell for the next lane in it: checking
+/// every lane costs about as much as reusing one lane in eight saves.
+///
+/// Judged from 8 lanes spread over the chunk, each against the lane before,
+/// so the judgment costs little: it decides only how the corners are
+/// computed, never their bits.
+#[inline(always)]
+pub(crate) fn worth_reusing<const N: usize>(cells: &[[i64; WIDTH]; N], n: usize) -> bool {
+    let n = n.min(WIDTH);
+    let mut repeats = 0;
+    for k in 0..8 {
+        let i = 1 + k * (WIDTH / 8);
+        let mut same = i < n;
+        for axis in cells {
+            same &= axis[i] == axis[i - 1];
+        }
+        repeats += usize::from(same);
+    }
+    repeats >= 1
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use alloc::vec::Vec;

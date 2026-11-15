@@ -558,7 +558,9 @@ fn gradient_sum3<const GRADIENT: bool>(
 /// chunk's points are located on the lattice together, in loops that
 /// vectorize. [`Basis::Value`] then hashes the eight corners of every point
 /// in a loop of its own, scalar since the hash's 64-bit multiplies have no
-/// vector form, and blends them over the chunk, vectorized again.
+/// vector form (a point in the cell of the point before copies its corners
+/// instead, when enough do), and blends them over the chunk, vectorized
+/// again.
 /// [`Basis::Gradient`], whose corners inside the kernel vary from point to
 /// point, sums each point's corners as [`lattice_eval3`] does, hashing the
 /// prefixes of its 16 lines of corners only when a lane's column of cells
@@ -629,15 +631,13 @@ fn value_lanes3(
     // kind per point.
     let mut c = [[0.0_f32; lanes::WIDTH]; 8];
     let prefix = mix(seed, LATTICE_TAG);
-    match lattice.wrap {
-        None => value_corners3(prefix, cells, n, |_, index| index, &mut c),
-        Some(period) => value_corners3(
-            prefix,
-            cells,
-            n,
-            |axis, index: i64| index.rem_euclid(period[axis]),
-            &mut c,
-        ),
+    // A cell's corners are a function of the cell alone, so a lane in the
+    // cell of the lane before can copy its values rather than hash them,
+    // when enough lanes do to pay for checking each.
+    if lanes::worth_reusing(cells, n) {
+        value_corners_reusing3(prefix, lattice.wrap, cells, n, &mut c);
+    } else {
+        value_corners_by3::<false>(prefix, lattice.wrap, cells, n, &mut c);
     }
     let [fx, fy, fz] = fracs;
     for (i, out) in out[..n].iter_mut().enumerate() {
@@ -654,10 +654,49 @@ fn value_lanes3(
 
 /// The values of the eight corners of each of the first `n` cells, into
 /// `out[i + 2j + 4k]` for corner `(i, j, k)`, hashed as [`lattice_eval3`]
-/// hashes them from `prefix`, its seed and tag mixed, with `wrap(axis,
-/// index)` wrapping a coordinate as the lattice does.
+/// hashes them from `prefix`, its seed and tag mixed, on a lattice of
+/// `wrap` cells per period, if periodic.
 #[inline(always)]
-fn value_corners3(
+fn value_corners_by3<const REUSE: bool>(
+    prefix: u64,
+    wrap: Option<[i64; 3]>,
+    cells: &[[i64; lanes::WIDTH]; 3],
+    n: usize,
+    out: &mut [[f32; lanes::WIDTH]; 8],
+) {
+    match wrap {
+        None => value_corners3::<REUSE>(prefix, cells, n, |_, index| index, out),
+        Some(period) => value_corners3::<REUSE>(
+            prefix,
+            cells,
+            n,
+            |axis, index: i64| index.rem_euclid(period[axis]),
+            out,
+        ),
+    }
+}
+
+/// [`value_corners_by3`] reusing a lane's corners for the next lane in
+/// its cell, out of line so that the loop without reuse compiles as it
+/// would alone.
+#[inline(never)]
+fn value_corners_reusing3(
+    prefix: u64,
+    wrap: Option<[i64; 3]>,
+    cells: &[[i64; lanes::WIDTH]; 3],
+    n: usize,
+    out: &mut [[f32; lanes::WIDTH]; 8],
+) {
+    value_corners_by3::<true>(prefix, wrap, cells, n, out);
+}
+
+/// The values of the corners of each of the first `n` cells, as
+/// [`value_corners_by3`] gives them, with `wrap(axis, index)` wrapping a
+/// coordinate as the lattice does.
+///
+/// When `REUSE`, a lane in the cell of the lane before copies its values.
+#[inline(always)]
+fn value_corners3<const REUSE: bool>(
     prefix: u64,
     cells: &[[i64; lanes::WIDTH]; 3],
     n: usize,
@@ -666,6 +705,12 @@ fn value_corners3(
 ) {
     for i in 0..n.min(lanes::WIDTH) {
         let [x, y, z] = [cells[0][i], cells[1][i], cells[2][i]];
+        if REUSE && i > 0 && [x, y, z] == [cells[0][i - 1], cells[1][i - 1], cells[2][i - 1]] {
+            for corner in &mut *out {
+                corner[i] = corner[i - 1];
+            }
+            continue;
+        }
         let (x0, x1) = (
             mix(prefix, key(wrap(0, x))),
             mix(prefix, key(wrap(0, x + 1))),

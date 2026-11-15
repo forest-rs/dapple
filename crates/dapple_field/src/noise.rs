@@ -359,7 +359,8 @@ pub(crate) fn lattice_noise_gradient(
 /// A lane kernel, run a chunk of [`lanes::WIDTH`] points at a time, as
 /// [`lattice_lanes3`](crate::solid::lattice_lanes3) is: the chunk's points
 /// are located together; [`Basis::Value`] hashes the four corners of every
-/// point in a scalar loop and blends them over the chunk, and
+/// point in a scalar loop (or copies those of the point before, in the same
+/// cell) and blends them over the chunk, and
 /// [`Basis::Gradient`] sums each point's corners as [`lattice_eval`] does.
 pub(crate) fn lattice_lanes(
     basis: Basis,
@@ -411,15 +412,13 @@ fn value_lanes(
     // point.
     let mut c = [[0.0_f32; lanes::WIDTH]; 4];
     let prefix = mix(seed, LATTICE_TAG);
-    match lattice.wrap {
-        None => value_corners(prefix, cells, n, |_, index| index, &mut c),
-        Some(period) => value_corners(
-            prefix,
-            cells,
-            n,
-            |axis, index: i64| index.rem_euclid(period[axis]),
-            &mut c,
-        ),
+    // A cell's corners are a function of the cell alone, so a lane in the
+    // cell of the lane before can copy its values rather than hash them,
+    // when enough lanes do to pay for checking each.
+    if lanes::worth_reusing(cells, n) {
+        value_corners_reusing(prefix, lattice.wrap, cells, n, &mut c);
+    } else {
+        value_corners_by::<false>(prefix, lattice.wrap, cells, n, &mut c);
     }
     let [fx, fy] = fracs;
     for (i, out) in out[..n].iter_mut().enumerate() {
@@ -432,10 +431,49 @@ fn value_lanes(
 
 /// The values of the four corners of each of the first `n` cells, into
 /// `out[i + 2j]` for corner `(i, j)`, hashed as [`lattice_eval`] hashes
-/// them from `prefix`, its seed and tag mixed, with `wrap(axis, index)`
-/// wrapping a coordinate as the lattice does.
+/// them from `prefix`, its seed and tag mixed, on a lattice of `wrap`
+/// cells per period, if periodic.
 #[inline(always)]
-fn value_corners(
+fn value_corners_by<const REUSE: bool>(
+    prefix: u64,
+    wrap: Option<[i64; 2]>,
+    cells: &[[i64; lanes::WIDTH]; 2],
+    n: usize,
+    out: &mut [[f32; lanes::WIDTH]; 4],
+) {
+    match wrap {
+        None => value_corners::<REUSE>(prefix, cells, n, |_, index| index, out),
+        Some(period) => value_corners::<REUSE>(
+            prefix,
+            cells,
+            n,
+            |axis, index: i64| index.rem_euclid(period[axis]),
+            out,
+        ),
+    }
+}
+
+/// [`value_corners_by`] reusing a lane's corners for the next lane in
+/// its cell, out of line so that the loop without reuse compiles as it
+/// would alone.
+#[inline(never)]
+fn value_corners_reusing(
+    prefix: u64,
+    wrap: Option<[i64; 2]>,
+    cells: &[[i64; lanes::WIDTH]; 2],
+    n: usize,
+    out: &mut [[f32; lanes::WIDTH]; 4],
+) {
+    value_corners_by::<true>(prefix, wrap, cells, n, out);
+}
+
+/// The values of the corners of each of the first `n` cells, as
+/// [`value_corners_by`] gives them, with `wrap(axis, index)` wrapping a
+/// coordinate as the lattice does.
+///
+/// When `REUSE`, a lane in the cell of the lane before copies its values.
+#[inline(always)]
+fn value_corners<const REUSE: bool>(
     prefix: u64,
     cells: &[[i64; lanes::WIDTH]; 2],
     n: usize,
@@ -444,6 +482,12 @@ fn value_corners(
 ) {
     for i in 0..n.min(lanes::WIDTH) {
         let [x, y] = [cells[0][i], cells[1][i]];
+        if REUSE && i > 0 && [x, y] == [cells[0][i - 1], cells[1][i - 1]] {
+            for corner in &mut *out {
+                corner[i] = corner[i - 1];
+            }
+            continue;
+        }
         let (x0, x1) = (
             mix(prefix, key(wrap(0, x))),
             mix(prefix, key(wrap(0, x + 1))),
@@ -667,7 +711,7 @@ mod tests {
 
     use super::*;
     use crate::hash::hash;
-    use crate::lanes::tests::{RUNS, same_bits};
+    use crate::lanes::tests::{RUNS, coherent_cells, same_bits};
 
     /// [`lattice_eval`] as first written, hashing every corner in full:
     /// the reference its hoisted hashing must match bit for bit.
@@ -823,7 +867,13 @@ mod tests {
     #[test]
     fn lane_kernels_match_the_point_kernel() {
         for lattice in test_lattices() {
-            let points = lane_points(lattice);
+            // First the patterns of cells the kernel reuses a lane's cell
+            // across, so that runs begin where they do.
+            let mut points: Vec<Vec2> = coherent_cells(lattice.wrap)
+                .into_iter()
+                .map(|cells| Vec2::from_array(cells) / lattice.frequency)
+                .collect();
+            points.extend(lane_points(lattice));
             let [x, y] = [0, 1].map(|axis| points.iter().map(|p| p[axis]).collect::<Vec<_>>());
             for basis in [Basis::Value, Basis::Gradient] {
                 for (seed, offset) in [0, 7, u64::MAX].into_iter().zip(OFFSETS) {

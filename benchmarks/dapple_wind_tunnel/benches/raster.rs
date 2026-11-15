@@ -6,13 +6,17 @@
 //! Sizes are 256 and 1024 texels a side, reported as texels per second.
 //! `small` programs are cheap enough that the realization loop itself shows;
 //! `bark` is the library's oak bark, a realistic program, at 256 only to keep
-//! the suite short.
+//! the suite short; `parquet_color` is the library's parquet, whose waves
+//! take the gradients of the fractals under them, at both sizes, since what
+//! its waves cost depends on the footprint.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use dapple_field::program::{FieldProgram, ValueProgram};
 use dapple_raster::typed::realize_value;
 use dapple_raster::{HeightToNormal, RasterOp, Realization, realize, realize_normals};
-use dapple_wind_tunnel::{deep_color, deep_scalar, period, small_color, small_scalar};
+use dapple_wind_tunnel::{
+    deep_color, deep_scalar, parquet_color, period, small_color, small_scalar,
+};
 
 const SIZES: [u32; 2] = [256, 1024];
 
@@ -82,6 +86,7 @@ fn bench_raster(c: &mut Criterion) {
     scalar(c, "bark", &deep_scalar(), &[256]);
     typed(c, "small_color", &small_color(), &SIZES);
     typed(c, "bark_color", &deep_color(), &[256]);
+    typed(c, "parquet_color", &parquet_color(), &SIZES);
     normals(c, "small", &small_scalar(), &SIZES);
     normals(c, "bark", &deep_scalar(), &[256]);
     height_to_normal(c);

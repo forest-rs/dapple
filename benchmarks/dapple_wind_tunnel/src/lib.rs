@@ -10,7 +10,7 @@
 
 use dapple_field::program::{FieldProgram, NodeId, Op, ProgramBuilder, SolidProgram, ValueProgram};
 use dapple_field::{Basis, Domain, Domain3, FractalParams};
-use dapple_library::oak;
+use dapple_library::{oak, parquet};
 use glam::{Vec2, Vec3};
 
 /// The unit period every fixture program is defined over.
@@ -151,6 +151,18 @@ pub fn deep_scalar() -> FieldProgram {
 #[must_use]
 pub fn deep_color() -> ValueProgram {
     oak::bark_color(period(), &deep_scalar()).expect("the library's bark color builds")
+}
+
+/// The library's parquet color: oak planks in herringbone, their latewood
+/// rings and joints [`Op::Wave`]s band-limited by the footprint, over
+/// planar fractals whose gradients the rings' waves read.
+///
+/// # Panics
+///
+/// Never: the library builds it on a valid domain.
+#[must_use]
+pub fn parquet_color() -> ValueProgram {
+    parquet::color(period()).expect("the library's parquet color builds")
 }
 
 /// The unit solid period every solid fixture is defined over.

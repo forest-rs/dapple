@@ -79,7 +79,10 @@ across lengths.
 Realizing fields over one period, reported as texels per second. The `small`
 fixtures are cheap enough that the realization loop itself shows; `bark` and
 `bark_color` are the library's oak bark at 256 texels a side only, to keep the
-suite short.
+suite short. `parquet_color` is the library's parquet, at both sizes: its
+latewood rings and joints are waves band-limited by the footprint, which read
+the gradients of the fractals under them, so what they cost depends on the
+texel size.
 
 - `raster/realize_scalar/<program>/<size>`: `dapple_raster::realize`.
 - `raster/realize_value/<program>/<size>`: `typed::realize_value` of a color

@@ -32,14 +32,20 @@ under the low light; its UVs follow arc length along both axes, so the
 texture is not stretched. Rows start at domain `y = 0` at the image top
 (glTF's convention), so `v = 1 - y`, and domain `+y` is up the wall.
 
-Light: the surroundings are a procedural sky behind the camera, dark below
-the horizon and bright above it, with two softboxes in it (a broad warm one
-above the horizon, a narrow cool one low to the right), so a mirror-like
-metal shows a horizon line, the softboxes and dark ground; a low sun from
-the upper left rakes across the wall to show relief; the swatches hang on a
-near-black board. The camera is orthographic, square on to the wall. The
-view transform is Khronos PBR Neutral, which keeps base colors' hue and
-saturation where AgX bleaches bright metals toward white.
+Light: a metal shows only what it mirrors, so the surroundings behind the
+camera are a dim studio rather than a bright sky: a dark floor rising
+smoothly to a dim gray ceiling, a tall softbox to the left (the key, a
+little warm) and a narrow neutral strip to the right (the fill). Across
+each pillow a polished metal shows a bright band of the key, its own
+color in the dim surround between, and the strip at its right edge; a
+rougher one blurs them, so gloss reads as well as color, and a coat or
+glaze shows the bands over the color beneath it. A low sun from the upper
+left rakes across the wall to show relief and lights the dielectrics; the
+swatches hang on a near-black board. The camera is orthographic, square
+on to the wall. The view transform is Khronos PBR Neutral at its default
+exposure: below its compression knee it shows linear color as it is, and
+above it, in the key's highlight on a metal, it keeps the hue where AgX
+bleaches bright metals toward white.
 
 Each material is built from its manifest by the repository's
 `tools/blender/dapple_export.py`, displaced by its height where the export
@@ -79,7 +85,7 @@ LABEL = 0.34  # below each swatch, for its two label lines
 ROW_GAP = 0.12  # between a row's labels and the next row's swatches
 MARGIN = 0.3  # around the wall
 CAPTION = 0.16  # below the last row, for the sheet's caption
-RX, RZ = 2.6, 4.0  # the pillow's radii of curvature across and up
+RX, RZ = 1.8, 2.8  # the pillow's radii of curvature across and up (±16°, ±10°)
 DENSITY = 256  # mesh vertices per meter, before the bump on top
 
 families = []
@@ -141,15 +147,19 @@ scene.view_settings.exposure = 0.0
 
 
 def world():
-    """The surroundings the metals mirror: by direction, dark ground,
-    a bright horizon fading to a blue zenith, and two softboxes."""
+    """The surroundings the metals mirror: by direction, a dark floor
+    rising to a dim ceiling, a tall key softbox to the left and a fill
+    strip to the right. The camera looks along +y, so a swatch mirrors
+    directions with y < 0, and its curvature spreads them over
+    |x| < 0.53, |z| < 0.35."""
     w = bpy.data.worlds.new("surroundings")
     tree = w.node_tree
     nodes, links = tree.nodes, tree.links
     coords = nodes.new("ShaderNodeTexCoord")
     xyz = nodes.new("ShaderNodeSeparateXYZ")
     links.new(coords.outputs["Generated"], xyz.inputs["Vector"])
-    # Sky by elevation (z of the direction).
+    # The dim surround by elevation (z of the direction), with no hard
+    # horizon: it would cut every polished metal in two.
     ramp = nodes.new("ShaderNodeValToRGB")
     elevation = nodes.new("ShaderNodeMapRange")
     elevation.inputs["From Min"].default_value = -1.0
@@ -157,11 +167,11 @@ def world():
     links.new(xyz.outputs["Z"], elevation.inputs["Value"])
     links.new(elevation.outputs["Result"], ramp.inputs["Fac"])
     stops = [
-        (0.0, (0.012, 0.011, 0.010)),
-        (0.40, (0.035, 0.032, 0.029)),
-        (0.43, (0.22, 0.22, 0.21)),
-        (0.52, (0.17, 0.19, 0.22)),
-        (1.0, (0.10, 0.14, 0.22)),
+        (0.0, (0.012, 0.012, 0.012)),
+        (0.30, (0.026, 0.026, 0.026)),
+        (0.50, (0.050, 0.050, 0.051)),
+        (0.70, (0.090, 0.090, 0.094)),
+        (1.0, (0.120, 0.122, 0.130)),
     ]
     elements = ramp.color_ramp.elements
     for e, (position, color) in zip(elements, (stops[0], stops[-1])):
@@ -188,13 +198,14 @@ def world():
         links.new(b.outputs["Result"], m.inputs[1])
         return m.outputs["Value"]
 
-    def softbox(x_range, z_range, behind, radiance, tint, base):
-        """Adds a softbox seen in directions with x and z in the ranges and
-        y below `behind` (behind the camera, which looks along +y)."""
+    def softbox(x_range, z_range, soft, behind, radiance, tint, base):
+        """Adds a softbox seen in directions with x and z in the ranges,
+        its edges fading over `soft`, and y below `behind` (behind the
+        camera, which looks along +y)."""
         mask = nodes.new("ShaderNodeMath")
         mask.operation = "MULTIPLY"
-        links.new(window(xyz.outputs["X"], *x_range, 0.03), mask.inputs[0])
-        links.new(window(xyz.outputs["Z"], *z_range, 0.02), mask.inputs[1])
+        links.new(window(xyz.outputs["X"], *x_range, soft), mask.inputs[0])
+        links.new(window(xyz.outputs["Z"], *z_range, soft), mask.inputs[1])
         back = nodes.new("ShaderNodeMath")
         back.operation = "LESS_THAN"
         links.new(xyz.outputs["Y"], back.inputs[0])
@@ -211,10 +222,11 @@ def world():
         mix.inputs["B"].default_value = tuple(radiance * c for c in tint) + (1.0,)
         return mix.outputs["Result"]
 
-    # A broad warm softbox above the horizon, a little left of the camera.
-    color = softbox((-0.45, 0.2), (0.06, 0.32), -0.3, 0.7, (1.0, 0.95, 0.88), color)
-    # A narrow cool strip low and to the right.
-    color = softbox((0.42, 0.55), (-0.02, 0.22), -0.3, 0.8, (0.85, 0.92, 1.0), color)
+    # The key: a tall, slightly warm softbox to the left of the camera,
+    # mirrored as a band down the left of each pillow.
+    color = softbox((-0.40, -0.14), (-0.25, 0.50), 0.10, -0.3, 1.6, (1.0, 0.95, 0.88), color)
+    # The fill: a narrow neutral strip to the right.
+    color = softbox((0.30, 0.42), (-0.20, 0.40), 0.05, -0.3, 0.6, (0.97, 0.98, 1.0), color)
     background = nodes["Background"]
     background.inputs["Strength"].default_value = 1.0
     links.new(color, background.inputs["Color"])
@@ -223,12 +235,15 @@ def world():
 
 world()
 
-# The key: a low sun from the upper left, raking across the wall.
-sun_data = bpy.data.lights.new("key", type="SUN")
+# The sun: low from the upper left, 66° off the wall's normal, raking
+# across it to show relief. It lights the dielectrics; no pillow is curved
+# enough to mirror it toward the camera, so polished metals show the
+# surroundings alone.
+sun_data = bpy.data.lights.new("sun", type="SUN")
 sun_data.energy = 3.2
 sun_data.angle = math.radians(2.0)
-sun_data.color = (1.0, 0.94, 0.86)
-sun = bpy.data.objects.new("key", sun_data)
+sun_data.color = (1.0, 0.96, 0.91)
+sun = bpy.data.objects.new("sun", sun_data)
 toward_sun = Vector((-0.50, -0.40, 0.77)).normalized()
 sun.rotation_euler = toward_sun.to_track_quat("Z", "Y").to_euler()
 scene.collection.objects.link(sun)

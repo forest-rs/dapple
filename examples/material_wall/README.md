@@ -86,8 +86,15 @@ family shares a row with the one before it when both fit in the widest
 family's width. Every swatch shows the same 1 m of material, so scales
 compare across the wall, on a shallow pillow curved across both axes so
 metals mirror a band of the surroundings and relief reads under a low sun
-from the upper left. Each material is built from its manifest by the
-repository's `tools/blender/dapple_export.py` and displaced by its height.
+from the upper left. The surroundings are a dim studio, not a bright sky:
+a tall key softbox to the left and a fill strip to the right over a dark
+floor and a dim ceiling, so a polished metal shows a highlight band that
+keeps its hue, its own color in the dim surround, and its roughness in
+how far the bands blur; a coat or glaze shows the same bands over the
+color beneath. The view transform is Khronos PBR Neutral at its default
+exposure, the same for every swatch. Each material is built from its
+manifest by the repository's `tools/blender/dapple_export.py` and
+displaced by its height.
 Under each swatch are its label and family; a failing swatch is labeled
 in red. The layout follows `wall.json`, so new packages, presets and
 modules need no edit here.

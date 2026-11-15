@@ -448,9 +448,12 @@ fn wood(b: &mut ProgramBuilder, cut: Cut) -> Result<NodeId, ProgramError> {
         to: [1.0, 0.0],
     })?;
 
-    // Large earlywood pores, drawn out along the grain.
+    // Large earlywood pores, drawn out along the grain. The noise is
+    // symmetric about 0 and fades to 0 as the pores pass the footprint, so
+    // a ramp symmetric about 0 fades them to their mean (0.45), not to a
+    // floor.
     let pores = noise(b, Basis::Value, [700.0, 700.0, 60.0], SEED + 11)?;
-    let pores = ramp(b, pores, [0.1, 0.5], [0.3, 0.9])?;
+    let pores = ramp(b, pores, [-0.5, 0.5], [0.15, 0.75])?;
     let pores = b.add(Op::Mul { a: pores, b: early })?;
 
     // Rays: thin radial ribbons around the trunk. Each set is a stripe

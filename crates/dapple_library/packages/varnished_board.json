@@ -2,7 +2,7 @@
   "format": "dapple.package",
   "version": 1,
   "interface": {
-    "module": { "name": "dapple_library.packages.varnished_board", "version": 5 },
+    "module": { "name": "dapple_library.packages.varnished_board", "version": 6 },
     "doc": "varnished oak, as a package: wood, an amber varnish, a little dirt and wear",
     "params": [
       {
@@ -51,7 +51,7 @@
       { "name": "dapple.semantics", "version": 1 }
     ],
     "modules": [
-      { "name": "dapple_library.wood", "version": 4 },
+      { "name": "dapple_library.wood", "version": 5 },
       { "name": "dapple_library.finish", "version": 1 },
       { "name": "dapple_library.patches", "version": 1 },
       { "name": "dapple_library.edge_wear", "version": 1 },
@@ -76,7 +76,7 @@
     "steps": [
       {
         "name": "oak",
-        "module": { "name": "dapple_library.wood", "version": 4 }
+        "module": { "name": "dapple_library.wood", "version": 5 }
       },
       {
         "name": "varnish",

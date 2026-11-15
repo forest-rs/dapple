@@ -181,76 +181,110 @@ impl Cellular {
     /// Looks up the nearest feature points around `p`.
     #[must_use]
     pub fn sample(&self, p: Vec2) -> CellSample {
-        self.sample_gradient::<false>(p).0
+        self.sample_gradient::<false>(p, true).0
     }
 
     /// [`Cellular::sample`], and when `GRADIENT` the gradients of `f1`,
     /// `f2` and `border` with respect to the in-cell position.
-    fn sample_gradient<const GRADIENT: bool>(&self, p: Vec2) -> (CellSample, [Vec2; 3]) {
+    ///
+    /// The border distance, by far the costliest part, is searched for only
+    /// when `border`; otherwise it and its gradient are left infinite and
+    /// zero.
+    fn sample_gradient<const GRADIENT: bool>(
+        &self,
+        p: Vec2,
+        border: bool,
+    ) -> (CellSample, [Vec2; 3]) {
         let at = self.lattice.locate(p);
-        let q = at.frac;
-
-        let points = self.neighborhood(at.cell);
-        let mut nearest = (f32::INFINITY, 0);
-        let mut second = f32::INFINITY;
-        let mut second_index = 0;
-        for (index, (point, _)) in points.iter().enumerate() {
-            let d = (*point - q).length_squared();
-            if d < nearest.0 {
-                second = nearest.0;
-                second_index = nearest.1;
-                nearest = (d, index);
-            } else if d < second {
-                second = d;
-                second_index = index;
-            }
-        }
-        let (near_point, id) = points[nearest.1];
-        let mut border = f32::INFINITY;
-        let mut border_axis = Vec2::ZERO;
-        for (index, (point, _)) in points.iter().enumerate() {
-            if index == nearest.1 {
-                continue;
-            }
-            // Distance from q to the bisector between the nearest point and this one.
-            let axis = *point - near_point;
-            let length = axis.length();
-            if length > 0.0 {
-                let midpoint = (*point + near_point) * 0.5;
-                let distance = (midpoint - q).dot(axis) / length;
-                if GRADIENT && distance < border {
-                    border_axis = axis / length;
-                }
-                border = border.min(distance);
-            }
-        }
-        let sample = CellSample {
-            f1: libm::sqrtf(nearest.0),
-            f2: libm::sqrtf(second),
-            border,
-            id,
-            value: unit_f32(hash(id, &[VALUE_TAG])),
-        };
-        if !GRADIENT {
-            return (sample, [Vec2::ZERO; 3]);
-        }
-        // A distance's gradient is the unit vector away from its point.
-        let away = |point: Vec2, distance: f32| {
-            if distance > 0.0 {
-                (q - point) / distance
-            } else {
-                Vec2::ZERO
-            }
-        };
-        (
-            sample,
-            [
-                away(near_point, sample.f1),
-                away(points[second_index].0, sample.f2),
-                -border_axis,
-            ],
-        )
+        search::<GRADIENT>(&self.neighborhood(at.cell), at.frac, border)
     }
+}
+
+/// [`Cellular::sample_gradient`] at `q` in a cell whose
+/// [`Cellular::neighborhood`] is `points`.
+#[inline(always)]
+fn search<const GRADIENT: bool>(
+    points: &[(Vec2, u64); 25],
+    q: Vec2,
+    border: bool,
+) -> (CellSample, [Vec2; 3]) {
+    let mut nearest = (f32::INFINITY, 0);
+    let mut second = f32::INFINITY;
+    let mut second_index = 0;
+    for (index, (point, _)) in points.iter().enumerate() {
+        let d = (*point - q).length_squared();
+        if d < nearest.0 {
+            second = nearest.0;
+            second_index = nearest.1;
+            nearest = (d, index);
+        } else if d < second {
+            second = d;
+            second_index = index;
+        }
+    }
+    let (near_point, id) = points[nearest.1];
+    let (border, border_axis) = if border {
+        border_search::<GRADIENT>(points, nearest.1, q)
+    } else {
+        (f32::INFINITY, Vec2::ZERO)
+    };
+    let sample = CellSample {
+        f1: libm::sqrtf(nearest.0),
+        f2: libm::sqrtf(second),
+        border,
+        id,
+        value: unit_f32(hash(id, &[VALUE_TAG])),
+    };
+    if !GRADIENT {
+        return (sample, [Vec2::ZERO; 3]);
+    }
+    // A distance's gradient is the unit vector away from its point.
+    let away = |point: Vec2, distance: f32| {
+        if distance > 0.0 {
+            (q - point) / distance
+        } else {
+            Vec2::ZERO
+        }
+    };
+    (
+        sample,
+        [
+            away(near_point, sample.f1),
+            away(points[second_index].0, sample.f2),
+            -border_axis,
+        ],
+    )
+}
+
+/// The distance from `q` to the nearest bisector between `points[nearest]`
+/// and another of `points`, and when `GRADIENT` that bisector's unit normal
+/// away from the nearest point.
+#[inline(always)]
+fn border_search<const GRADIENT: bool>(
+    points: &[(Vec2, u64); 25],
+    nearest: usize,
+    q: Vec2,
+) -> (f32, Vec2) {
+    let near_point = points[nearest].0;
+    let mut border = f32::INFINITY;
+    let mut border_axis = Vec2::ZERO;
+    for (index, (point, _)) in points.iter().enumerate() {
+        if index == nearest {
+            continue;
+        }
+        // Distance from q to the bisector between the nearest point and this one.
+        let axis = *point - near_point;
+        let length = axis.length();
+        if length > 0.0 {
+            let midpoint = (*point + near_point) * 0.5;
+            let distance = (midpoint - q).dot(axis) / length;
+            if GRADIENT && distance < border {
+                border_axis = axis / length;
+            }
+            border = border.min(distance);
+        }
+    }
+    (border, border_axis)
 }
 
 fn select(output: CellOutput, s: &CellSample) -> f32 {
@@ -302,7 +336,11 @@ impl ScalarField for CellularField {
         if weight == 0.0 {
             return self.mean;
         }
-        let value = select(self.output, &self.cellular.sample(p));
+        let border = self.output == CellOutput::Border;
+        let value = select(
+            self.output,
+            &self.cellular.sample_gradient::<false>(p, border).0,
+        );
         if weight == 1.0 {
             value
         } else {
@@ -315,7 +353,8 @@ impl ScalarField for CellularField {
         if weight == 0.0 {
             return (self.mean, Vec2::ZERO);
         }
-        let (sample, [df1, df2, dborder]) = self.cellular.sample_gradient::<true>(p);
+        let border = self.output == CellOutput::Border;
+        let (sample, [df1, df2, dborder]) = self.cellular.sample_gradient::<true>(p, border);
         let value = select(self.output, &sample);
         let gradient = match self.output {
             CellOutput::F1 => df1,
@@ -334,7 +373,104 @@ impl ScalarField for CellularField {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use super::*;
+    use crate::lanes::tests::same_bits;
+
+    const OUTPUTS: [CellOutput; 5] = [
+        CellOutput::F1,
+        CellOutput::F2,
+        CellOutput::F2MinusF1,
+        CellOutput::Border,
+        CellOutput::CellValue,
+    ];
+
+    /// Random points near and far, then cell boundaries, signed zeros,
+    /// NaN and huge coordinates, for `frequency` cells per unit.
+    fn awkward_points(frequency: Vec2) -> Vec<Vec2> {
+        let mut points = Vec::new();
+        for i in 0..300_u64 {
+            let h = hash(0x6365_6c6c_7074, &[i]);
+            let unit = |shift: u32| unit_f32(h.rotate_left(shift)) * 2.0 - 1.0;
+            let scale = [1.0, 3.0, 1e3, 1e6][(i % 4) as usize];
+            points.push(Vec2::new(unit(0), unit(32)) * scale);
+        }
+        let below_one = 1.0 - f32::EPSILON;
+        for cells in [0.0, 1.0, -1.0, 0.5, below_one, -below_one, 17.0] {
+            points.push(Vec2::new(cells, 0.5) / frequency);
+            points.push(Vec2::new(0.5, cells) / frequency);
+        }
+        for v in [0.0, -0.0, f32::NAN, 1e15, -1e15, 1e-30] {
+            points.extend([Vec2::splat(v), Vec2::new(v, 0.3), Vec2::new(-0.7, v)]);
+        }
+        points
+    }
+
+    /// Each output, with and without its gradient, keeps the bits of the
+    /// full lookup, though only a border output searches for the border.
+    #[test]
+    fn fields_match_the_full_sample() {
+        let domains = [
+            (Domain::Plane, Vec2::new(0.37, 5.0)),
+            (Domain::periodic(2, 3).unwrap(), Vec2::new(1.5, 2.0)),
+        ];
+        let footprints = [0.0, 1.0 / 64.0, 0.12, 0.4].map(|w| Footprint::new(w).unwrap());
+        for (domain, frequency) in domains {
+            let cellular = Cellular::new(domain, frequency, 0.8, 5).unwrap();
+            for output in OUTPUTS {
+                let field = cellular.output(output);
+                for p in awkward_points(frequency) {
+                    for footprint in footprints {
+                        let weight = footprint.band_weight(cellular.lattice.max_frequency());
+                        let fade = |v: f32| {
+                            if weight == 0.0 {
+                                field.mean
+                            } else if weight == 1.0 {
+                                v
+                            } else {
+                                field.mean + (v - field.mean) * weight
+                            }
+                        };
+                        let (sample, [df1, df2, dborder]) =
+                            cellular.sample_gradient::<true>(p, true);
+                        let want = fade(select(output, &sample));
+                        let got = field.eval(p, footprint);
+                        assert!(
+                            same_bits(got, want),
+                            "{output:?} at {p} with {footprint:?}: {got} for {want}"
+                        );
+                        assert!(same_bits(
+                            select(output, &cellular.sample(p)),
+                            select(output, &sample)
+                        ));
+                        let (value, gradient) = field.eval_gradient(p, footprint);
+                        assert!(same_bits(value, want), "{output:?} at {p}, with gradient");
+                        if weight > 0.0 {
+                            let in_cell = match output {
+                                CellOutput::F1 => df1,
+                                CellOutput::F2 => df2,
+                                CellOutput::F2MinusF1 => df2 - df1,
+                                CellOutput::Border => dborder,
+                                CellOutput::CellValue => Vec2::ZERO,
+                            } * frequency;
+                            let want = if weight == 1.0 {
+                                in_cell
+                            } else {
+                                in_cell * weight
+                            };
+                            for axis in 0..2 {
+                                assert!(
+                                    same_bits(gradient[axis], want[axis]),
+                                    "{output:?} at {p}: gradient {gradient} for {want}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn neighborhoods_match_cells_hashed_one_by_one() {

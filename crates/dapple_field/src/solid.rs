@@ -962,7 +962,7 @@ impl Cellular3 {
                                 (j as f32 + 0.5) * CELLS / SIDE as f32,
                                 (k as f32 + 0.5) * CELLS / SIDE as f32,
                             );
-                            let s = self.sample::<false>(cell / self.lattice.frequency).0;
+                            let s = self.sample::<false>(cell / self.lattice.frequency, true).0;
                             sum += f64::from(select(output, &s));
                         }
                     }
@@ -1051,64 +1051,95 @@ impl Cellular3 {
 
     /// The lookup at `p` and, when `GRADIENT`, the in-cell gradients of
     /// `f1`, `f2` and the border distance.
-    fn sample<const GRADIENT: bool>(&self, p: Vec3) -> (CellSample3, [Vec3; 3]) {
+    ///
+    /// The border distance, by far the costliest part, is searched for only
+    /// when `border`; otherwise it and its gradient are left infinite and
+    /// zero.
+    fn sample<const GRADIENT: bool>(&self, p: Vec3, border: bool) -> (CellSample3, [Vec3; 3]) {
         let at = self.lattice.locate(p);
-        let q = at.frac;
-        let points = self.neighborhood(at.cell);
-        let mut nearest = (f32::INFINITY, 0);
-        let mut second = (f32::INFINITY, 0);
-        for (index, (point, _)) in points.iter().enumerate() {
-            let d = (*point - q).length_squared();
-            if d < nearest.0 {
-                second = nearest;
-                nearest = (d, index);
-            } else if d < second.0 {
-                second = (d, index);
-            }
-        }
-        let (near_point, id) = points[nearest.1];
-        let mut border = f32::INFINITY;
-        let mut border_axis = Vec3::ZERO;
-        for (index, (point, _)) in points.iter().enumerate() {
-            if index == nearest.1 {
-                continue;
-            }
-            let axis = *point - near_point;
-            let length = axis.length();
-            if length > 0.0 {
-                let midpoint = (*point + near_point) * 0.5;
-                let distance = (midpoint - q).dot(axis) / length;
-                if GRADIENT && distance < border {
-                    border_axis = axis / length;
-                }
-                border = border.min(distance);
-            }
-        }
-        let sample = CellSample3 {
-            f1: libm::sqrtf(nearest.0),
-            f2: libm::sqrtf(second.0),
-            border,
-            value: unit_f32(hash(id, &[VALUE_TAG])),
-        };
-        if !GRADIENT {
-            return (sample, [Vec3::ZERO; 3]);
-        }
-        let away = |point: Vec3, distance: f32| {
-            if distance > 0.0 {
-                (q - point) / distance
-            } else {
-                Vec3::ZERO
-            }
-        };
-        (
-            sample,
-            [
-                away(near_point, sample.f1),
-                away(points[second.1].0, sample.f2),
-                -border_axis,
-            ],
-        )
+        search3::<GRADIENT>(&self.neighborhood(at.cell), at.frac, border)
     }
+}
+
+/// [`Cellular3::sample`] at `q` in a cell whose
+/// [`Cellular3::neighborhood`] is `points`.
+#[inline(always)]
+fn search3<const GRADIENT: bool>(
+    points: &[(Vec3, u64); 343],
+    q: Vec3,
+    border: bool,
+) -> (CellSample3, [Vec3; 3]) {
+    let mut nearest = (f32::INFINITY, 0);
+    let mut second = (f32::INFINITY, 0);
+    for (index, (point, _)) in points.iter().enumerate() {
+        let d = (*point - q).length_squared();
+        if d < nearest.0 {
+            second = nearest;
+            nearest = (d, index);
+        } else if d < second.0 {
+            second = (d, index);
+        }
+    }
+    let (near_point, id) = points[nearest.1];
+    let (border, border_axis) = if border {
+        border_search3::<GRADIENT>(points, nearest.1, q)
+    } else {
+        (f32::INFINITY, Vec3::ZERO)
+    };
+    let sample = CellSample3 {
+        f1: libm::sqrtf(nearest.0),
+        f2: libm::sqrtf(second.0),
+        border,
+        value: unit_f32(hash(id, &[VALUE_TAG])),
+    };
+    if !GRADIENT {
+        return (sample, [Vec3::ZERO; 3]);
+    }
+    let away = |point: Vec3, distance: f32| {
+        if distance > 0.0 {
+            (q - point) / distance
+        } else {
+            Vec3::ZERO
+        }
+    };
+    (
+        sample,
+        [
+            away(near_point, sample.f1),
+            away(points[second.1].0, sample.f2),
+            -border_axis,
+        ],
+    )
+}
+
+/// The distance from `q` to the nearest bisector between `points[nearest]`
+/// and another of `points`, and when `GRADIENT` that bisector's unit normal
+/// away from the nearest point.
+#[inline(always)]
+fn border_search3<const GRADIENT: bool>(
+    points: &[(Vec3, u64); 343],
+    nearest: usize,
+    q: Vec3,
+) -> (f32, Vec3) {
+    let near_point = points[nearest].0;
+    let mut border = f32::INFINITY;
+    let mut border_axis = Vec3::ZERO;
+    for (index, (point, _)) in points.iter().enumerate() {
+        if index == nearest {
+            continue;
+        }
+        let axis = *point - near_point;
+        let length = axis.length();
+        if length > 0.0 {
+            let midpoint = (*point + near_point) * 0.5;
+            let distance = (midpoint - q).dot(axis) / length;
+            if GRADIENT && distance < border {
+                border_axis = axis / length;
+            }
+            border = border.min(distance);
+        }
+    }
+    (border, border_axis)
 }
 
 fn select(output: crate::CellOutput, s: &CellSample3) -> f32 {
@@ -1149,7 +1180,8 @@ impl SolidField for CellularField3 {
         if weight == 0.0 {
             return self.mean;
         }
-        let value = select(self.output, &self.cellular.sample::<false>(p).0);
+        let border = self.output == crate::CellOutput::Border;
+        let value = select(self.output, &self.cellular.sample::<false>(p, border).0);
         if weight == 1.0 {
             value
         } else {
@@ -1163,7 +1195,8 @@ impl SolidField for CellularField3 {
         if weight == 0.0 {
             return (self.mean, Vec3::ZERO);
         }
-        let (sample, [df1, df2, dborder]) = self.cellular.sample::<true>(p);
+        let border = self.output == CellOutput::Border;
+        let (sample, [df1, df2, dborder]) = self.cellular.sample::<true>(p, border);
         let value = select(self.output, &sample);
         let in_cell = match self.output {
             CellOutput::F1 => df1,
@@ -1730,12 +1763,85 @@ mod tests {
         }
     }
 
+    /// Each output, with and without its gradient, keeps the bits of the
+    /// full lookup, though only a border output searches for the border.
+    #[test]
+    fn cellular_fields_match_the_full_sample() {
+        let domains = [
+            (Domain3::Space, Vec3::new(0.37, 5.0, 1.5)),
+            (
+                Domain3::periodic(2, 3, 1).unwrap(),
+                Vec3::new(1.5, 2.0, 3.0),
+            ),
+        ];
+        let footprints = [0.0, 0.12, 0.4].map(|w| Footprint::new(w).unwrap());
+        for (domain, frequency) in domains {
+            let cellular = Cellular3::new(domain, frequency, 0.8, 5).unwrap();
+            for output in [
+                CellOutput::F1,
+                CellOutput::F2,
+                CellOutput::F2MinusF1,
+                CellOutput::Border,
+                CellOutput::CellValue,
+            ] {
+                let field = cellular.output(output);
+                for p in awkward_points(frequency).into_iter().step_by(3) {
+                    let (sample, [df1, df2, dborder]) = cellular.sample::<true>(p, true);
+                    assert!(same_bits(
+                        select(output, &cellular.sample::<false>(p, true).0),
+                        select(output, &sample)
+                    ));
+                    for footprint in footprints {
+                        let weight = footprint.band_weight(cellular.lattice.max_frequency());
+                        let fade = |v: f32| {
+                            if weight == 0.0 {
+                                field.mean
+                            } else if weight == 1.0 {
+                                v
+                            } else {
+                                field.mean + (v - field.mean) * weight
+                            }
+                        };
+                        let want = fade(select(output, &sample));
+                        let got = field.eval(p, footprint);
+                        assert!(
+                            same_bits(got, want),
+                            "{output:?} at {p} with {footprint:?}: {got} for {want}"
+                        );
+                        let (value, gradient) = field.eval_gradient(p, footprint);
+                        assert!(same_bits(value, want), "{output:?} at {p}, with gradient");
+                        if weight > 0.0 {
+                            let in_cell = match output {
+                                CellOutput::F1 => df1,
+                                CellOutput::F2 => df2,
+                                CellOutput::F2MinusF1 => df2 - df1,
+                                CellOutput::Border => dborder,
+                                CellOutput::CellValue => Vec3::ZERO,
+                            } * frequency;
+                            let want = if weight == 1.0 {
+                                in_cell
+                            } else {
+                                in_cell * weight
+                            };
+                            for axis in 0..3 {
+                                assert!(
+                                    same_bits(gradient[axis], want[axis]),
+                                    "{output:?} at {p}: gradient {gradient} for {want}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn cellular_search_is_exact() {
         // Brute force over a 11³ block agrees with the 7³ search.
         let cellular = Cellular3::new(Domain3::Space, Vec3::ONE, 1.0, 12).unwrap();
         for p in points(200, 4.0, 4) {
-            let (sample, _) = cellular.sample::<false>(p);
+            let (sample, _) = cellular.sample::<false>(p, true);
             let at = cellular.lattice.locate(p);
             let mut d: Vec<f32> = Vec::new();
             for dz in -5..=5_i8 {

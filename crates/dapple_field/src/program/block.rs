@@ -34,9 +34,10 @@
 //!   loop of their own; with their gradient, the fused value-and-gradient
 //!   evaluation; a fractal whose block shares one footprint goes octave by
 //!   octave over the lanes, taking each octave's band weight once;
-//! - solid lattice noise, alone and in fractals, runs a lane kernel when
-//!   its block shares one footprint: the block's points are located on the
-//!   lattice together, and value noise's corners blended together;
+//! - lattice noise, planar and solid, alone and in fractals, runs a lane
+//!   kernel when its block shares one footprint: the block's points are
+//!   located on the lattice together, and value noise's corners blended
+//!   together;
 //! - the gradients of arithmetic on scalars are loops over the operands'
 //!   gradient columns.
 //!
@@ -693,7 +694,12 @@ fn eval_value(
 ) {
     let scalar = |k: usize| operands.component(k, 0);
     match *kernel {
-        Kernel::Noise(ref noise) => planar(out, at, |p, fp| noise.eval(p, fp)),
+        Kernel::Noise(ref noise) => match at.footprints {
+            Footprints::Uniform(footprint) => {
+                noise.eval_lanes([at.x, at.y], footprint, out.component(0));
+            }
+            Footprints::Lanes(_) => planar(out, at, |p, fp| noise.eval(p, fp)),
+        },
         // A fractal of one footprint goes octave by octave over the lanes.
         Kernel::Fractal(ref fractal) => match at.footprints {
             Footprints::Uniform(footprint) => {

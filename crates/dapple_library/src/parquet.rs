@@ -4,7 +4,7 @@
 //! Parquet: oak planks laid in herringbone.
 
 use dapple_field::program::{FieldProgram, NodeId, Op, ProgramBuilder, ProgramError, ValueProgram};
-use dapple_field::{Basis, Domain, FractalParams, Pattern, TileOutput};
+use dapple_field::{Basis, Domain, FractalParams, Pattern, TileOutput, WaveShape};
 
 use crate::ramp;
 
@@ -65,6 +65,10 @@ fn along_grain(
 
 /// Latewood lines: a plank's growth rings cut at a shallow angle, each plank
 /// cut from its own place in its log.
+///
+/// The rings repeat through an [`Op::Wave`], so they are band-limited by
+/// the footprint: where they crowd toward its size they fade to their mean
+/// rather than alias.
 fn figure(b: &mut ProgramBuilder, domain: Domain) -> Result<NodeId, ProgramError> {
     let vertical = layout(b, domain, TileOutput::Vertical)?;
     let offset = layout(b, domain, TileOutput::TileValue)?;
@@ -83,14 +87,32 @@ fn figure(b: &mut ProgramBuilder, domain: Domain) -> Result<NodeId, ProgramError
         a: rings,
         b: offset,
     })?;
-    let phase = b.add(Op::Fract { input: rings })?;
-    ramp(b, phase, [0.62, 0.86], [0.0, 1.0])
+    let zero = b.add(Op::Constant { domain, value: 0.0 })?;
+    b.add(Op::Wave {
+        input: rings,
+        shift: zero,
+        shape: WaveShape::Sawtooth,
+        from: [0.62, 0.86],
+        to: [0.0, 1.0],
+    })
 }
 
 /// How far into a plank a point is: 0 in the joint, 1 half a millimeter in.
+///
+/// Averaged over the footprint, so a joint narrower than a texel is a faint
+/// line rather than hit or missed: the distance to the edge is a triangle
+/// wave's phase (planks are far narrower than its period), which mirrors
+/// the footprint's part beyond the joint back onto the plank across it.
 fn plank(b: &mut ProgramBuilder, domain: Domain) -> Result<NodeId, ProgramError> {
     let edge = layout(b, domain, TileOutput::Edge)?;
-    ramp(b, edge, [0.0002, 0.0008], [0.0, 1.0])
+    let zero = b.add(Op::Constant { domain, value: 0.0 })?;
+    b.add(Op::Wave {
+        input: edge,
+        shift: zero,
+        shape: WaveShape::Triangle,
+        from: [0.0002, 0.0008],
+        to: [0.0, 1.0],
+    })
 }
 
 /// Parquet height in `[0, 1]`: flat planks with fine grain relief and

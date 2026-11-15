@@ -495,7 +495,7 @@ pub struct WeatheredCopper;
 impl Module for WeatheredCopper {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId::new("dapple_library.weathered_copper", 3),
+            id: ModuleId::new("dapple_library.weathered_copper", 4),
             doc: "copper cladding, tarnished and grown with verdigris".into(),
             params: vec![
                 fraction("brushing", 0.3, "how deeply the copper is brushed"),

@@ -42,8 +42,8 @@
 //! - cellular noise, planar and solid, looks up each lane in turn but
 //!   hashes a cell's neighborhood once for a run of lanes in that cell;
 //! - the gradients of arithmetic on scalars are loops over the operands'
-//!   gradient columns, and a coordinate of the solid position's gradient
-//!   is an axis;
+//!   gradient columns; a coordinate of the solid position's gradient is an
+//!   axis, and its length's the direction to the point;
 //! - a wave reads its phase's gradient columns, which its phase always
 //!   has, for its footprint in phase.
 //!
@@ -1007,6 +1007,33 @@ fn eval_gradient(
         }
         Kernel::Cellular3(ref cellular) => {
             return solid_gradient(out, at, |p, fp| cellular.eval_gradient(p, fp));
+        }
+        // The solid position, a vector, whose gradient no rule carries: it
+        // is zero, as `FieldProgram::pure_gradient` leaves it.
+        Kernel::Position3 => {
+            let len = at.x.len();
+            for (c, column) in [at.x, at.y, at.z].into_iter().enumerate() {
+                out.component(c).copy_from_slice(column);
+                out.columns[3 + c][..len].fill(0.0);
+            }
+            return;
+        }
+        // The length of the solid position: its gradient is the direction
+        // to the point, or zero at the origin, as `pure_gradient` has it.
+        Kernel::Length(input) if program.is_position(input) => {
+            let [x, y, z] = [0, 1, 2].map(|c| operands.column(0, c));
+            let (v, mut g) = out.scalar_gradient();
+            for i in lanes(operands.len) {
+                let p = vec3([x, y, z], i);
+                let length = p.length();
+                v[i] = length;
+                store3(
+                    &mut g,
+                    i,
+                    if length > 0.0 { p / length } else { Vec3::ZERO },
+                );
+            }
+            return;
         }
         // A coordinate of the solid position: its gradient is an axis.
         Kernel::Component(input, index) if program.is_position(input) => {

@@ -8,7 +8,9 @@
 //! [`dapple_package`] packages. [`VARNISHED_BOARD`] is
 //! [`crate::modules::VarnishedBoard`] written as a package: the same
 //! modules under the same instance names, so it realizes the same bits as
-//! the native module. So are the metals: [`WEATHERED_COPPER`],
+//! the native module, and, like it, makes its traffic patches and wear only
+//! when `wear > 0.0` (guarded steps; the wear's `otherwise` passes the
+//! varnish through). So are the metals: [`WEATHERED_COPPER`],
 //! [`RUSTED_STEEL`] and [`PAINTED_STEEL`], each with presets from fresh to
 //! heavily weathered.
 
@@ -23,7 +25,8 @@ use crate::modules::{
     TerracottaTile, Threshold, VarnishedBoard, WeatheredCopper, Wood,
 };
 
-/// The varnished board's package source.
+/// The varnished board's package source, with preset `dark_and_worn`. Its
+/// traffic patches and edge wear are guarded on `wear > 0.0`.
 pub const VARNISHED_BOARD: &str = include_str!("../packages/varnished_board.json");
 /// [`WeatheredCopper`]'s package source, with presets `bright`,
 /// `tarnished`, `streaked` and `verdigris`.

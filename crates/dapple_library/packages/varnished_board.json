@@ -2,7 +2,7 @@
   "format": "dapple.package",
   "version": 1,
   "interface": {
-    "module": { "name": "dapple_library.packages.varnished_board", "version": 6 },
+    "module": { "name": "dapple_library.packages.varnished_board", "version": 7 },
     "doc": "varnished oak, as a package: wood, an amber varnish, a little dirt and wear",
     "params": [
       {
@@ -48,7 +48,8 @@
   "requires": {
     "capabilities": [
       { "name": "dapple.graph", "version": 1 },
-      { "name": "dapple.semantics", "version": 1 }
+      { "name": "dapple.semantics", "version": 1 },
+      { "name": "dapple.logic", "version": 2 }
     ],
     "modules": [
       { "name": "dapple_library.wood", "version": 5 },
@@ -95,6 +96,7 @@
       {
         "name": "traffic",
         "module": { "name": "dapple_library.patches", "version": 1 },
+        "when": "wear > 0.0",
         "params": {
           "size": { "value": { "scalar": 0.35 } },
           "coverage": { "value": { "scalar": 0.4 } },
@@ -104,6 +106,7 @@
       {
         "name": "wear",
         "module": { "name": "dapple_library.edge_wear", "version": 1 },
+        "when": "wear > 0.0",
         "params": {
           "coverage": { "param": "wear" },
           "radius": { "value": { "scalar": 0.004 } },
@@ -113,7 +116,8 @@
         "inputs": {
           "base": { "output": { "step": "varnish", "output": "material" } },
           "where": { "output": { "step": "traffic", "output": "mask" } }
-        }
+        },
+        "otherwise": { "material": "base" }
       },
       {
         "name": "dirt",

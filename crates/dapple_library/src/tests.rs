@@ -614,8 +614,12 @@ mod tiling {
 }
 
 mod packages {
+    use alloc::format;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
     use dapple_field::Edge;
-    use dapple_material::module::{Bind, Context, Module};
+    use dapple_material::module::{Bind, Context, Diagnostics, InstanceCache, Module};
     use dapple_material::resource::NoResources;
     use dapple_material::{Grid, Material};
     use dapple_package::{Package, PackageError};
@@ -676,6 +680,95 @@ mod packages {
         );
         assert_eq!(worn.digest(), native_worn.digest());
         assert_ne!(worn.digest(), packaged.digest());
+    }
+
+    fn diagnose(module: &dyn Module, bind: Bind) -> (Material, Diagnostics) {
+        let mut cx = Context::new(grid(), &NoResources);
+        let m = cx
+            .instantiate(module, "board", bind)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .take_material("material")
+            .expect("a material");
+        (m, cx.into_diagnostics())
+    }
+
+    fn listed<'a>(
+        it: impl Iterator<Item = (&'a str, &'a dapple_material::module::ModuleId)>,
+    ) -> Vec<String> {
+        it.map(|(p, m)| format!("{p} {}", m.name)).collect()
+    }
+
+    /// The package does the native board's work, no more: where `wear` is
+    /// 0 it makes neither the traffic patches nor the wear, as the native
+    /// module does not, and every step it makes is keyed as the native
+    /// module's child of that name is. Where the board wears, both are made.
+    #[test]
+    fn the_packaged_board_skips_the_wear_where_the_native_one_does() {
+        let compiled = registry()
+            .compile(&Package::from_json(VARNISHED_BOARD).expect("reads"))
+            .expect("compiles");
+        for wear in [0.0, 0.05, 0.3] {
+            let bind = || Bind::new().scalar("wear", wear);
+            let (packaged, package_d) = diagnose(&compiled, bind());
+            let (native, native_d) = diagnose(&VarnishedBoard, bind());
+            assert_eq!(packaged, native, "wear {wear}");
+            let instances = listed(package_d.instances());
+            assert_eq!(
+                instances[1..],
+                listed(native_d.instances())[1..],
+                "wear {wear}"
+            );
+            for (path, _) in native_d.instances().skip(1) {
+                assert_eq!(
+                    package_d.fingerprint_at(path),
+                    native_d.fingerprint_at(path),
+                    "{path}"
+                );
+            }
+            assert_eq!(
+                listed(package_d.skipped()),
+                listed(native_d.skipped()),
+                "wear {wear}"
+            );
+            let skipped = if wear == 0.0 {
+                alloc::vec![
+                    "board/traffic dapple_library.patches",
+                    "board/wear dapple_library.edge_wear",
+                ]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(listed(package_d.skipped()), skipped, "wear {wear}");
+            assert_eq!(instances.len(), if wear == 0.0 { 4 } else { 6 });
+        }
+        // Through a cache: four instances built at the defaults, none of
+        // them the patches or the wear; the worn preset then reuses the oak
+        // alone (its varnish differs) and builds the rest.
+        let mut cache = InstanceCache::new(usize::MAX);
+        let mut build = |bind: Bind| {
+            let mut cx = Context::new(grid(), &NoResources).with_cache(&mut cache);
+            cx.instantiate(&compiled, "board", bind).expect("builds");
+        };
+        build(Bind::new());
+        build(compiled.preset("dark_and_worn").expect("a preset"));
+        let s = cache.stats();
+        let stats = |name: &str| {
+            s.modules
+                .iter()
+                .find(|m| m.module.name == name)
+                .map_or((0, 0), |m| (m.hits, m.misses))
+        };
+        assert_eq!((s.hits, s.misses), (1, 9), "{s}");
+        assert_eq!(
+            stats("dapple_library.patches"),
+            (0, 1),
+            "made only for the worn"
+        );
+        assert_eq!(
+            stats("dapple_library.edge_wear"),
+            (0, 1),
+            "made only for the worn"
+        );
     }
 
     /// An engine without a module the package needs refuses it by name.

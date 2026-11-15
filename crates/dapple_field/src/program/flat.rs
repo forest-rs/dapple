@@ -8,14 +8,19 @@ use alloc::vec::Vec;
 
 use glam::{Mat2, Mat3, Vec2, Vec3};
 
-use super::{FieldProgram, Kernel, Node, NodeId, slice_chain, slice_point, warp_chain, warp_move};
+use super::block::{Block, LANES, Layout};
+use super::{
+    ChartSample, FieldProgram, Kernel, Node, NodeId, slice_chain, slice_point, warp_chain,
+    warp_move,
+};
 use crate::domain::Footprint;
 use crate::field::{Affine2, Affine3};
+use crate::scoped::Shape;
 use crate::types::Value;
 
 /// How a context's point and footprint follow from its parent's.
 #[derive(Clone, Debug, PartialEq)]
-enum Move {
+pub(super) enum Move {
     Transform {
         transform: Affine2,
         stretch: f32,
@@ -40,7 +45,7 @@ enum Move {
 
 /// How a chain step turns a moved context's gradient into its parent's.
 #[derive(Clone, Debug, PartialEq)]
-enum Chain {
+pub(super) enum Chain {
     /// Through a transform: the transposed matrix.
     Linear(Mat2),
     /// Through a solid transform: the transposed matrix.
@@ -52,7 +57,7 @@ enum Chain {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum Step {
+pub(super) enum Step {
     /// Computes context `ctx` from `parent`.
     Context { ctx: usize, parent: usize, by: Move },
     /// Evaluates a pure node in `ctx` into register `reg`, with its gradient
@@ -80,15 +85,17 @@ enum Step {
 /// a gradient register too.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Plan {
-    steps: Vec<Step>,
+    pub(super) steps: Vec<Step>,
     /// Registers whose values do not depend on the point, with those
     /// values: constants, and arithmetic on constants alone. An evaluator
     /// holds them from its construction; no step writes them.
-    constants: Vec<(usize, Value)>,
+    pub(super) constants: Vec<(usize, Value)>,
     registers: usize,
-    contexts: usize,
-    output: usize,
+    pub(super) contexts: usize,
+    pub(super) output: usize,
     tree_evaluations: u64,
+    /// Where each register and context lives in a block of points.
+    pub(super) layout: Layout,
 }
 
 /// Evaluation counts of a [`FieldProgram`], for reports.
@@ -107,7 +114,8 @@ pub struct EvaluationStats {
 struct Compiler<'a> {
     nodes: &'a [Node],
     steps: Vec<Step>,
-    registers: usize,
+    /// The shape of each register's value.
+    shapes: Vec<Shape>,
     /// Registers by node, context, and whether they carry a gradient.
     instances: BTreeMap<(NodeId, usize, bool), usize>,
     /// Contexts by parent and the transform or warp node that moves them.
@@ -128,10 +136,9 @@ impl Compiler<'_> {
         ctx
     }
 
-    fn register(&mut self) -> usize {
-        let reg = self.registers;
-        self.registers += 1;
-        reg
+    fn register(&mut self, shape: Shape) -> usize {
+        self.shapes.push(shape);
+        self.shapes.len() - 1
     }
 
     /// The register holding `node`'s value in `ctx`, with its gradient when
@@ -150,7 +157,7 @@ impl Compiler<'_> {
                 let child = self.context(ctx, node, Move::Transform { transform, stretch });
                 let from = self.compile(input, child, gradient);
                 if gradient {
-                    let reg = self.register();
+                    let reg = self.register(self.shapes[from]);
                     self.steps.push(Step::Chain {
                         reg,
                         from,
@@ -205,7 +212,7 @@ impl Compiler<'_> {
                 let child = self.context(ctx, node, Move::Warp { center, amount });
                 let from = self.compile(input, child, gradient);
                 if gradient {
-                    let reg = self.register();
+                    let reg = self.register(self.shapes[from]);
                     self.steps.push(Step::Chain {
                         reg,
                         from,
@@ -226,7 +233,7 @@ impl Compiler<'_> {
                     args[count] = self.compile(input, ctx, gradient);
                     count += 1;
                 }
-                let reg = self.register();
+                let reg = self.register(Shape::of(entry.port));
                 self.steps.push(Step::Eval {
                     reg,
                     node,
@@ -247,7 +254,7 @@ impl Compiler<'_> {
     fn chained(&mut self, input: NodeId, child: usize, gradient: bool, by: Chain) -> usize {
         let from = self.compile(input, child, gradient);
         if gradient {
-            let reg = self.register();
+            let reg = self.register(self.shapes[from]);
             self.steps.push(Step::Chain { reg, from, by });
             reg
         } else {
@@ -334,7 +341,7 @@ impl Plan {
         let mut compiler = Compiler {
             nodes,
             steps: Vec::new(),
-            registers: 0,
+            shapes: Vec::new(),
             instances: BTreeMap::new(),
             contexts: BTreeMap::new(),
             context_count: 1,
@@ -342,14 +349,17 @@ impl Plan {
         };
         let register = compiler.compile(output, 0, false);
         let tree_evaluations = compiler.tree_count(output, 0);
-        let (steps, constants) = fold(nodes, compiler.steps, compiler.registers);
+        let registers = compiler.shapes.len();
+        let (steps, constants) = fold(nodes, compiler.steps, registers);
+        let layout = Layout::new(&steps, &compiler.shapes);
         Self {
             steps,
             constants,
-            registers: compiler.registers,
+            registers,
             contexts: compiler.context_count,
             output: register,
             tree_evaluations,
+            layout,
         }
     }
 
@@ -377,12 +387,20 @@ impl Plan {
 /// constants alone) is computed once, when the plan is built.
 /// Obtain one from [`FieldProgram::evaluator`] and keep it for a batch of
 /// points, such as a raster.
+///
+/// [`Self::eval_value`] and [`Self::eval`] run the plan at one point. The
+/// batch entry points, [`Self::eval_value_batch`] and [`Self::eval_batch`],
+/// run it over blocks of points one step at a time, choosing each step's
+/// work once per block rather than once per point, with each point's
+/// operations unchanged; their scratch is made at the first batch and kept.
 #[derive(Clone, Debug)]
 pub struct Evaluator<'a> {
     program: &'a FieldProgram,
     registers: Slots<Value, INLINE_REGISTERS>,
     gradients: Slots<Vec3, INLINE_REGISTERS>,
     points: Slots<(Vec3, Footprint), INLINE_CONTEXTS>,
+    /// Block scratch, made at the first batch.
+    block: Option<Block>,
 }
 
 /// Registers an [`Evaluator`] holds without allocating.
@@ -439,6 +457,7 @@ impl<'a> Evaluator<'a> {
             registers,
             gradients: Slots::filled(Vec3::ZERO, program.plan.registers),
             points: Slots::filled((Vec3::ZERO, Footprint::POINT), program.plan.contexts),
+            block: None,
         }
     }
 
@@ -553,8 +572,14 @@ impl<'a> Evaluator<'a> {
     /// Panics if `out` is shorter than `points`.
     pub fn eval_value_batch(&mut self, points: &[Vec2], footprint: Footprint, out: &mut [Value]) {
         assert!(out.len() >= points.len(), "output shorter than the points");
-        for (value, &p) in out.iter_mut().zip(points) {
-            *value = self.eval_value_at(p.extend(0.0), footprint);
+        let plan = &self.program.plan;
+        let block = self.block.get_or_insert_with(|| Block::new(plan));
+        for (points, out) in points.chunks(LANES).zip(out.chunks_mut(LANES)) {
+            block.set_points(points, footprint);
+            block.run(self.program, points.len());
+            for (i, value) in out[..points.len()].iter_mut().enumerate() {
+                *value = block.output(plan, i);
+            }
         }
     }
 
@@ -574,11 +599,25 @@ impl<'a> Evaluator<'a> {
                 .is_scalar(),
             "the output is a scalar or mask"
         );
-        for (value, &p) in out.iter_mut().zip(points) {
-            *value = match self.eval_value_at(p.extend(0.0), footprint) {
-                Value::Scalar(v) => v,
-                _ => unreachable!("a scalar node's values are scalars"),
-            };
+        let plan = &self.program.plan;
+        let block = self.block.get_or_insert_with(|| Block::new(plan));
+        for (points, out) in points.chunks(LANES).zip(out.chunks_mut(LANES)) {
+            block.set_points(points, footprint);
+            block.run(self.program, points.len());
+            out[..points.len()].copy_from_slice(&block.scalars(plan)[..points.len()]);
+        }
+    }
+
+    /// The scalar output at each chart sample's point and footprint, into
+    /// the first `samples.len()` slots of `out`, each the bits
+    /// [`Self::eval_value_at`] gives.
+    pub(super) fn eval_samples(&mut self, samples: &[ChartSample], out: &mut [f32]) {
+        let plan = &self.program.plan;
+        let block = self.block.get_or_insert_with(|| Block::new(plan));
+        for (samples, out) in samples.chunks(LANES).zip(out.chunks_mut(LANES)) {
+            block.set_samples(samples);
+            block.run(self.program, samples.len());
+            out[..samples.len()].copy_from_slice(&block.scalars(plan)[..samples.len()]);
         }
     }
 }

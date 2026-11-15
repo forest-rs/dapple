@@ -72,6 +72,7 @@ use crate::types::{NormalFrame, PortType, Primaries, Value};
 
 #[cfg(test)]
 mod batch_tests;
+mod block;
 mod bounds;
 mod flat;
 pub mod sampling;
@@ -2377,67 +2378,16 @@ impl Kernel {
                 s(0)?;
                 gradients[0]
             }
-            Self::Atan2(..) => {
-                let (y, x) = (s(0)?, s(1)?);
-                let r2 = x * x + y * y;
-                if r2 > 0.0 {
-                    (gradients[0] * x - gradients[1] * y) / r2
-                } else {
-                    Vec3::ZERO
-                }
-            }
-            Self::Binary(op, ..) => {
-                let (a, b) = (s(0)?, s(1)?);
-                let (ga, gb) = (gradients[0], gradients[1]);
-                match op {
-                    BinaryOp::Add => ga + gb,
-                    BinaryOp::Sub => ga - gb,
-                    BinaryOp::Mul => ga * b + gb * a,
-                    BinaryOp::Min => {
-                        if a <= b {
-                            ga
-                        } else {
-                            gb
-                        }
-                    }
-                    BinaryOp::Max => {
-                        if a >= b {
-                            ga
-                        } else {
-                            gb
-                        }
-                    }
-                }
-            }
-            Self::Abs(_) => {
-                let a = s(0)?;
-                if a == 0.0 {
-                    Vec3::ZERO
-                } else {
-                    gradients[0] * a.signum()
-                }
-            }
-            Self::Clamp(_, min, max) => {
-                let a = s(0)?;
-                if a > min && a < max {
-                    gradients[0]
-                } else {
-                    Vec3::ZERO
-                }
-            }
-            Self::AsMask(_) => {
-                let a = s(0)?;
-                if a > 0.0 && a < 1.0 {
-                    gradients[0]
-                } else {
-                    Vec3::ZERO
-                }
-            }
+            Self::Atan2(..) => atan2_gradient(s(0)?, s(1)?, gradients[0], gradients[1]),
+            Self::Binary(op, ..) => binary_gradient(op, s(0)?, s(1)?, gradients[0], gradients[1]),
+            Self::Abs(_) => abs_gradient(s(0)?, gradients[0]),
+            Self::Clamp(_, min, max) => clamp_gradient(s(0)?, min, max, gradients[0]),
+            Self::AsMask(_) => clamp_gradient(s(0)?, 0.0, 1.0, gradients[0]),
             Self::Remap { scale, .. } => gradients[0] * scale,
-            Self::Mix(..) => {
-                let (a, b, t) = (s(0)?, s(1)?, s(2)?);
-                gradients[0] + (gradients[1] - gradients[0]) * t + gradients[2] * (b - a)
-            }
+            Self::Mix(..) => mix_gradient(
+                [s(0)?, s(1)?, s(2)?],
+                [gradients[0], gradients[1], gradients[2]],
+            ),
             _ => return None,
         })
     }
@@ -2532,21 +2482,15 @@ impl Kernel {
             }),
             Self::Fract(_) => Value::Scalar(fract(scalar(0))),
             Self::Atan2(..) => Value::Scalar(libm::atan2f(scalar(0), scalar(1))),
-            Self::Binary(op, ..) => componentwise(args[0], args[1], |a, b| match op {
-                BinaryOp::Add => a + b,
-                BinaryOp::Sub => a - b,
-                BinaryOp::Mul => a * b,
-                BinaryOp::Min => a.min(b),
-                BinaryOp::Max => a.max(b),
-            }),
+            Self::Binary(op, ..) => componentwise(args[0], args[1], |a, b| binary(op, a, b)),
             Self::Abs(_) => Value::Scalar(scalar(0).abs()),
             Self::Clamp(_, min, max) => Value::Scalar(scalar(0).clamp(min, max)),
             Self::Remap {
                 scale, from, to, ..
-            } => Value::Scalar(to + (scalar(0) - from) * scale),
+            } => Value::Scalar(remap(scalar(0), scale, from, to)),
             Self::Mix(..) => {
                 let t = scalar(2);
-                componentwise(args[0], args[1], |a, b| a + (b - a) * t)
+                componentwise(args[0], args[1], |a, b| mix(a, b, t))
             }
             Self::Vector2(..) => Value::Vector2(Vec2::new(scalar(0), scalar(1))),
             Self::Vector3(..) => Value::Vector3(Vec3::new(scalar(0), scalar(1), scalar(2))),
@@ -2556,40 +2500,19 @@ impl Kernel {
                     .expect("component index was checked"),
             ),
             Self::AsMask(_) => Value::Scalar(scalar(0).clamp(0.0, 1.0)),
-            Self::ToId(_, levels) => {
-                let v = scalar(0);
-                let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "v is in [0, 1], so the product is in [0, levels]"
-                )]
-                let id = libm::floorf(v * levels as f32) as u32;
-                Value::Id(id.min(levels - 1))
-            }
+            Self::ToId(_, levels) => Value::Id(identifier(scalar(0), levels)),
             Self::Normalize(_) => {
                 let Value::Vector3(v) = args[0] else {
                     unreachable!("normalize input was type-checked");
                 };
                 Value::Vector3(v.try_normalize().unwrap_or(Vec3::Z))
             }
-            Self::Direction(_) => {
-                let twice = 2.0 * scalar(0);
-                Value::Vector2(Vec2::new(libm::cosf(twice), libm::sinf(twice)))
-            }
+            Self::Direction(_) => Value::Vector2(direction(scalar(0))),
             Self::Angle(_) => {
                 let Value::Vector2(v) = args[0] else {
                     unreachable!("angle input was type-checked");
                 };
-                let mut angle = 0.5 * libm::atan2f(v.y, v.x);
-                if angle < 0.0 {
-                    angle += core::f32::consts::PI;
-                }
-                // A tiny negative angle rounds up to pi, which is angle 0.
-                if angle >= core::f32::consts::PI || v == Vec2::ZERO {
-                    angle = 0.0;
-                }
-                Value::Scalar(angle)
+                Value::Scalar(angle(v))
             }
             Self::Coherence(_) => {
                 let Value::Vector2(v) = args[0] else {
@@ -2606,6 +2529,117 @@ impl Kernel {
             }
         }
     }
+}
+
+/// A binary operation on one component.
+#[inline(always)]
+fn binary(op: BinaryOp, a: f32, b: f32) -> f32 {
+    match op {
+        BinaryOp::Add => a + b,
+        BinaryOp::Sub => a - b,
+        BinaryOp::Mul => a * b,
+        BinaryOp::Min => a.min(b),
+        BinaryOp::Max => a.max(b),
+    }
+}
+
+/// A remap of `x` from `from` by `scale` onto `to`.
+#[inline(always)]
+fn remap(x: f32, scale: f32, from: f32, to: f32) -> f32 {
+    to + (x - from) * scale
+}
+
+/// The blend of one component from `a` toward `b` by `t`.
+#[inline(always)]
+fn mix(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+/// The identifier of level `v` in `[0, 1]` among `levels`.
+#[inline(always)]
+fn identifier(v: f32, levels: u32) -> u32 {
+    let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "v is in [0, 1], so the product is in [0, levels]"
+    )]
+    let id = libm::floorf(v * levels as f32) as u32;
+    id.min(levels - 1)
+}
+
+/// The doubled-angle vector of the direction at `angle` radians.
+#[inline(always)]
+fn direction(angle: f32) -> Vec2 {
+    let twice = 2.0 * angle;
+    Vec2::new(libm::cosf(twice), libm::sinf(twice))
+}
+
+/// The angle in `[0, π)` of the direction stored as doubled-angle vector `v`.
+#[inline(always)]
+fn angle(v: Vec2) -> f32 {
+    let mut angle = 0.5 * libm::atan2f(v.y, v.x);
+    if angle < 0.0 {
+        angle += core::f32::consts::PI;
+    }
+    // A tiny negative angle rounds up to pi, which is angle 0.
+    if angle >= core::f32::consts::PI || v == Vec2::ZERO {
+        angle = 0.0;
+    }
+    angle
+}
+
+/// The gradient of `a op b` from the operands and their gradients.
+#[inline(always)]
+fn binary_gradient(op: BinaryOp, a: f32, b: f32, ga: Vec3, gb: Vec3) -> Vec3 {
+    match op {
+        BinaryOp::Add => ga + gb,
+        BinaryOp::Sub => ga - gb,
+        BinaryOp::Mul => ga * b + gb * a,
+        BinaryOp::Min => {
+            if a <= b {
+                ga
+            } else {
+                gb
+            }
+        }
+        BinaryOp::Max => {
+            if a >= b {
+                ga
+            } else {
+                gb
+            }
+        }
+    }
+}
+
+/// The gradient of `atan2(y, x)`.
+#[inline(always)]
+fn atan2_gradient(y: f32, x: f32, gy: Vec3, gx: Vec3) -> Vec3 {
+    let r2 = x * x + y * y;
+    if r2 > 0.0 {
+        (gy * x - gx * y) / r2
+    } else {
+        Vec3::ZERO
+    }
+}
+
+/// The gradient of `|a|`.
+#[inline(always)]
+fn abs_gradient(a: f32, g: Vec3) -> Vec3 {
+    if a == 0.0 { Vec3::ZERO } else { g * a.signum() }
+}
+
+/// The gradient of `a` clamped to `[min, max]`.
+#[inline(always)]
+fn clamp_gradient(a: f32, min: f32, max: f32, g: Vec3) -> Vec3 {
+    if a > min && a < max { g } else { Vec3::ZERO }
+}
+
+/// The gradient of `mix(a, b, t)` from `[a, b, t]` and their gradients.
+#[inline(always)]
+fn mix_gradient([a, b, t]: [f32; 3], [ga, gb, gt]: [Vec3; 3]) -> Vec3 {
+    ga + (gb - ga) * t + gt * (b - a)
 }
 
 /// Applies `f` per component; a scalar operand broadcasts over a vector.
@@ -2647,18 +2681,10 @@ impl ScalarField for FieldProgram {
         }
     }
 
-    /// Evaluates through one [`Evaluator`] when the plan saves work, so a
-    /// batch allocates its buffers once.
+    /// Evaluates through one [`Evaluator`]'s [`Evaluator::eval_batch`],
+    /// block by block, whether or not the plan shares work.
     fn eval_batch(&self, points: &[Vec2], footprint: Footprint, out: &mut [f32]) {
-        assert!(out.len() >= points.len(), "output shorter than the points");
-        let stats = self.plan.stats();
-        if stats.instances < stats.tree_evaluations {
-            self.evaluator().eval_batch(points, footprint, out);
-        } else {
-            for (value, &p) in out.iter_mut().zip(points) {
-                *value = self.eval_node(self.output, p, footprint);
-            }
-        }
+        self.evaluator().eval_batch(points, footprint, out);
     }
     /// Analytic where the program's ops allow; see
     /// [`FieldProgram::eval_node_gradient`].
@@ -2817,13 +2843,7 @@ impl SolidProgram {
             out.len() >= samples.len(),
             "output shorter than the samples"
         );
-        let mut evaluator = self.program.evaluator();
-        for (value, sample) in out.iter_mut().zip(samples) {
-            *value = evaluator
-                .eval_value_at(sample.position, sample.footprint)
-                .scalar()
-                .expect("finish_solid checks the output is scalar");
-        }
+        self.program.evaluator().eval_samples(samples, out);
     }
 }
 

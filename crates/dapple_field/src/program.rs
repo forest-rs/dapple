@@ -69,6 +69,7 @@ use crate::shape::Disk;
 use crate::solid::{Cellular3, CellularField3, Fractal3, Noise3, SolidField};
 use crate::tiling::{Pattern, TileOutput, Tiling, TilingField};
 use crate::types::{NormalFrame, PortType, Primaries, Value};
+use crate::wave::{WaveRamp, WaveShape};
 
 #[cfg(test)]
 mod batch_tests;
@@ -522,6 +523,43 @@ pub enum Op {
         /// The point's first coordinate.
         x: NodeId,
     },
+    /// A clamped ramp of a period-1 wave of a phase, averaged over the
+    /// footprint: the band-limited way to repeat, where [`Op::Fract`]
+    /// aliases.
+    ///
+    /// The value is `to[0] + (to[1] − to[0]) · clamp((w(input) − shift −
+    /// from[0]) / (from[1] − from[0]), 0, 1)`, with `w` the [`WaveShape`]
+    /// of `input`; equal `from` ends make a hard step. A sawtooth with a
+    /// ramp is a ring that darkens toward its end; a triangle with a falling
+    /// ramp is a stripe around each whole phase, and a varying `shift`
+    /// widens and narrows it along its length.
+    ///
+    /// **Footprint.** A footprint `w` wide covers `w · |∇input|` of phase,
+    /// with the phase's gradient as [`FieldProgram::eval_node_gradient`]
+    /// gives it, and the value is the ramp's mean over that interval of
+    /// phase, in closed form: as stripes approach and pass the footprint
+    /// they spread and fade to their mean over a period instead of turning
+    /// into moiré. The mean is exact under a box along the gradient where
+    /// the phase is linear and `shift` constant across the footprint; a
+    /// square footprint's diagonal extent and curved phases make it an
+    /// approximation, a close one for the phase's own scale. A solid wave's
+    /// gradient is three-dimensional, so a planar footprint sliced through
+    /// it is filtered as if it spanned the phase's steepest direction,
+    /// which blurs where the plane meets the stripes at a grazing angle:
+    /// slice the phase and take the wave in the plane to filter by the
+    /// plane's own gradient.
+    Wave {
+        /// The phase: one period per unit.
+        input: NodeId,
+        /// Subtracted from the wave before the ramp.
+        shift: NodeId,
+        /// The wave.
+        shape: WaveShape,
+        /// The wave values the ramp runs between.
+        from: [f32; 2],
+        /// The values at `from[0]` and `from[1]`, held beyond them.
+        to: [f32; 2],
+    },
 }
 
 /// Where replacing one node's operation, or an input's value, can change a
@@ -897,6 +935,15 @@ impl Op {
                 words.extend(origin.iter().chain(&u).chain(&v).map(|v| float(*v)));
                 domain(&mut words, d);
             }
+            Self::Wave {
+                shape, from, to, ..
+            } => {
+                words.push(match shape {
+                    WaveShape::Sawtooth => 0,
+                    WaveShape::Triangle => 1,
+                });
+                words.extend(from.iter().chain(&to).map(|v| float(*v)));
+            }
             Self::Position3 | Self::Length { .. } | Self::Fract { .. } | Self::Atan2 { .. } => {}
             Self::Vector2 { .. }
             | Self::Vector3 { .. }
@@ -986,6 +1033,9 @@ impl Op {
             | Self::Min { a, b }
             | Self::Max { a, b }
             | Self::Atan2 { y: a, x: b }
+            | Self::Wave {
+                input: a, shift: b, ..
+            }
             | Self::Vector2 { x: a, y: b } => {
                 inputs.push(a);
                 inputs.push(b);
@@ -1050,6 +1100,9 @@ impl Op {
             | Self::Min { a, b }
             | Self::Max { a, b }
             | Self::Atan2 { y: a, x: b }
+            | Self::Wave {
+                input: a, shift: b, ..
+            }
             | Self::Vector2 { x: a, y: b } => {
                 *a = f(*a);
                 *b = f(*b);
@@ -1117,6 +1170,7 @@ impl Op {
             Self::Length { .. } => "length",
             Self::Fract { .. } => "fract",
             Self::Atan2 { .. } => "atan2",
+            Self::Wave { .. } => "wave",
         }
     }
 }
@@ -1325,6 +1379,9 @@ enum Kernel {
     Length(NodeId),
     Fract(NodeId),
     Atan2(NodeId, NodeId),
+    /// Evaluated with its phase's gradient, which sets its footprint in
+    /// phase.
+    Wave(NodeId, NodeId, WaveRamp),
     Binary(BinaryOp, NodeId, NodeId),
     Abs(NodeId),
     Clamp(NodeId, f32, f32),
@@ -1814,6 +1871,16 @@ impl ProgramBuilder {
             Op::Length { input } => Kernel::Length(input),
             Op::Fract { input } => Kernel::Fract(input),
             Op::Atan2 { y, x } => Kernel::Atan2(y, x),
+            Op::Wave {
+                input,
+                shift,
+                shape,
+                from,
+                to,
+            } => {
+                finite("wave ramp", &[from, to].concat())?;
+                Kernel::Wave(input, shift, WaveRamp { shape, from, to })
+            }
         })
     }
 
@@ -1869,6 +1936,7 @@ fn op_tag(op: &Op) -> u64 {
         Op::Atan2 { .. } => 38,
         Op::Tiling { .. } => 39,
         Op::Scatter { .. } => 40,
+        Op::Wave { .. } => 41,
     }
 }
 
@@ -2116,6 +2184,12 @@ impl FieldProgram {
                 let (q, footprint) = self.warp_point(dx, dy, amount, p, footprint).0;
                 self.eval_at(input, q, footprint)
             }
+            // A wave's footprint in phase needs the phase's gradient.
+            Kernel::Wave(input, shift, ref ramp) => {
+                let (x, phase) = self.gradient_at(input, p, footprint);
+                let s = self.eval_at(shift, p, footprint);
+                wave_value(ramp, footprint, &[x, s], phase)
+            }
             ref kernel => {
                 let mut args = [Value::Scalar(0.0); 3];
                 let mut count = 0;
@@ -2265,6 +2339,12 @@ impl FieldProgram {
         gradients: &[Vec3],
     ) -> (Value, Vec3) {
         let kernel = &self.nodes[id.0 as usize].kernel;
+        if let Kernel::Wave(_, _, ref ramp) = *kernel {
+            let s = |i: usize| values[i].scalar().expect("wave operands are scalars");
+            let (value, gradient) =
+                wave(ramp, footprint, [s(0), s(1)], [gradients[0], gradients[1]]);
+            return (Value::Scalar(value), gradient);
+        }
         if let Some((value, gradient)) = kernel.value_and_gradient(p, footprint) {
             return (Value::Scalar(value), gradient);
         }
@@ -2335,6 +2415,34 @@ fn warp_move(
     let stretch = 1.0 + amount.abs() * row(0).max(row(1));
     let stretch = if stretch.is_finite() { stretch } else { 1.0 };
     (q, footprint.scaled(stretch))
+}
+
+/// A wave's value and gradient from its phase and shift, `[x, s]`, and
+/// their gradients: the ramp averaged over the footprint's extent in phase,
+/// `footprint · |∇x|`.
+#[inline(always)]
+pub(super) fn wave(
+    ramp: &WaveRamp,
+    footprint: Footprint,
+    [x, s]: [f32; 2],
+    [gx, gs]: [Vec3; 2],
+) -> (f32, Vec3) {
+    let width = footprint.width() * gx.length();
+    let (value, dx, ds) = ramp.eval(x, s, width);
+    (value, gx * dx + gs * ds)
+}
+
+/// A wave's value from its operands' values `[x, s]` and its phase's
+/// gradient: the bits [`wave`] gives, without the shift's gradient.
+#[inline(always)]
+pub(super) fn wave_value(
+    ramp: &WaveRamp,
+    footprint: Footprint,
+    values: &[Value],
+    phase: Vec3,
+) -> Value {
+    let s = |i: usize| values[i].scalar().expect("wave operands are scalars");
+    Value::Scalar(wave(ramp, footprint, [s(0), s(1)], [phase, Vec3::ZERO]).0)
 }
 
 /// A warp's gradient chain rule: `input(q(p))` with `q = p + a·d(p)` has
@@ -2454,7 +2562,8 @@ impl Kernel {
             | Self::Transform3 { .. }
             | Self::Slice { .. }
             | Self::Pass(_)
-            | Self::Warp { .. } => false,
+            | Self::Warp { .. }
+            | Self::Wave(..) => false,
         }
     }
 
@@ -2527,6 +2636,7 @@ impl Kernel {
             | Self::Warp { .. } => {
                 unreachable!("only pure kernels combine")
             }
+            Self::Wave(..) => unreachable!("a wave is evaluated with its phase's gradient"),
         }
     }
 }
@@ -3047,7 +3157,10 @@ fn derive_port(op: &Op, port: &dyn Fn(NodeId) -> PortType) -> Result<PortType, P
             scalar(input)?;
             PortType::Scalar
         }
-        Op::Atan2 { y, x } => {
+        Op::Atan2 { y, x }
+        | Op::Wave {
+            input: y, shift: x, ..
+        } => {
             scalar(y)?;
             scalar(x)?;
             PortType::Scalar

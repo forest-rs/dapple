@@ -41,7 +41,9 @@
 //! - cellular noise, planar and solid, looks up each lane in turn but
 //!   hashes a cell's neighborhood once for a run of lanes in that cell;
 //! - the gradients of arithmetic on scalars are loops over the operands'
-//!   gradient columns.
+//!   gradient columns;
+//! - a wave reads its phase's gradient columns, which its phase always
+//!   has, for its footprint in phase.
 //!
 //! Gradient instances of the other kernels (image samples, scatters,
 //! vectors, components and the like, whose gradients are taken by central
@@ -55,9 +57,9 @@ use glam::{Vec2, Vec3};
 
 use super::flat::{Chain, Move, Plan, Step};
 use super::{
-    BinaryOp, ChartSample, FieldProgram, Kernel, NodeId, abs_gradient, angle, atan2_gradient,
+    BinaryOp, ChartSample, FieldProgram, Kernel, Node, NodeId, abs_gradient, angle, atan2_gradient,
     binary, binary_gradient, clamp_gradient, direction, fract, identifier, mix, mix_gradient,
-    remap, slice_chain, slice_point, warp_chain, warp_move,
+    remap, slice_chain, slice_point, warp_chain, warp_move, wave, wave_value,
 };
 use crate::domain::Footprint;
 use crate::field::ScalarField;
@@ -130,8 +132,9 @@ pub(super) struct Layout {
 }
 
 impl Layout {
-    /// The layout of a plan's `steps`, whose registers have `shapes`.
-    pub(super) fn new(steps: &[Step], shapes: &[Shape]) -> Self {
+    /// The layout of a plan's `steps` over `nodes`, whose registers have
+    /// `shapes`.
+    pub(super) fn new(nodes: &[Node], steps: &[Step], shapes: &[Shape]) -> Self {
         // Registers whose gradient a step reads or writes.
         let mut gradient = vec![false; shapes.len()];
         for step in steps {
@@ -161,8 +164,18 @@ impl Layout {
                     }
                 }
                 Step::Eval {
-                    reg, args, count, ..
-                } => debug_assert!(args[..count].iter().all(|&arg| arg < reg), "{step:?}"),
+                    reg,
+                    node,
+                    args,
+                    count,
+                    ..
+                } => {
+                    debug_assert!(args[..count].iter().all(|&arg| arg < reg), "{step:?}");
+                    // A wave reads its phase's gradient for its footprint.
+                    if matches!(nodes[node.0 as usize].kernel, Kernel::Wave(..)) {
+                        gradient[args[0]] = true;
+                    }
+                }
                 Step::Context { .. } => {}
             }
         }
@@ -818,6 +831,20 @@ fn eval_value(
         | Kernel::Warp { .. } => {
             unreachable!("constants are folded, and moves are context steps")
         }
+        Kernel::Wave(_, _, ref ramp) => {
+            let (x, gx, s) = (
+                operands.column(0, 0),
+                operands.gradient(0),
+                operands.column(1, 0),
+            );
+            let out = out.component(0);
+            at.solid(|i, _, footprint| {
+                let values = [Value::Scalar(x[i]), Value::Scalar(s[i])];
+                out[i] = wave_value(ramp, footprint, &values, vec3(gx, i))
+                    .scalar()
+                    .expect("a wave is a scalar");
+            });
+        }
     }
 }
 
@@ -916,6 +943,19 @@ fn eval_gradient(
         }
         Kernel::Cellular3(ref cellular) => {
             return solid_gradient(out, at, |p, fp| cellular.eval_gradient(p, fp));
+        }
+        // A wave reads its phase's gradient for its footprint.
+        Kernel::Wave(_, _, ref ramp) => {
+            let (x, gx) = (operands.column(0, 0), operands.gradient(0));
+            let (s, gs) = (operands.column(1, 0), operands.gradient(1));
+            let (v, mut g) = out.scalar_gradient();
+            at.solid(|i, _, footprint| {
+                let (value, gradient) =
+                    wave(ramp, footprint, [x[i], s[i]], [vec3(gx, i), vec3(gs, i)]);
+                v[i] = value;
+                store3(&mut g, i, gradient);
+            });
+            return;
         }
         _ => {}
     }

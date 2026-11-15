@@ -15,7 +15,7 @@
 //! |---|---|---|
 //! | [`Exact`](Sampling::Exact) | exact integration under a box filter of the footprint's width | constants, the solid position, and linear combinations of exact nodes |
 //! | [`Attenuated`](Sampling::Attenuated) | components above the footprint's Nyquist limit fade, the rest pass: frequency attenuation, not integration | noise and fractal octaves, image samples through their mips, and linear combinations of them |
-//! | [`Heuristic`](Sampling::Heuristic) | detail fades toward a mean by a rule that is not an integral | cellular noise, scatter stamps, the antialiased disk, and every continuous nonlinear op of varying inputs (products, minima and maxima, clamps, lengths, warps) |
+//! | [`Heuristic`](Sampling::Heuristic) | detail fades toward a mean by a rule that is not an integral | cellular noise, scatter stamps, the antialiased disk, waves (a box mean along the phase, exact only where the phase is linear), and every continuous nonlinear op of varying inputs (products, minima and maxima, clamps, lengths, warps) |
 //! | [`PointOnly`](Sampling::PointOnly) | the footprint is not honored: values are point samples and alias | discontinuous ops of varying inputs (`fract`, quantization to identifiers) and tile layouts |
 //!
 //! Linear ops (sums, differences, scaling by a constant, affine remaps,
@@ -115,7 +115,8 @@ fn class(op: &Op) -> Class {
         | Op::Angle { .. }
         | Op::Coherence { .. }
         | Op::Length { .. }
-        | Op::Atan2 { .. } => Class::Nonlinear,
+        | Op::Atan2 { .. }
+        | Op::Wave { .. } => Class::Nonlinear,
         Op::Fract { .. } | Op::ToId { .. } => Class::Discontinuous,
     }
 }
@@ -253,7 +254,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::*;
-    use crate::program::ProgramBuilder;
+    use crate::program::{FieldProgram, ProgramBuilder};
     use crate::{Basis, Domain};
 
     fn noise(b: &mut ProgramBuilder, frequency: f32) -> NodeId {
@@ -335,6 +336,100 @@ mod tests {
         assert!(e.bias < -0.02, "average(f²) ≠ average(f)²: {e:?}");
         // A point footprint is exact for any expression.
         let point = measure(&program, &points(), Footprint::POINT, 1);
+        assert!(point.max < 1e-6, "{point:?}");
+    }
+
+    /// Rings ending in a sharp edge, 11 a unit along `(3, 1)`, as a ramp of
+    /// a `fract` and as a wave: planar, through a slice of the solid
+    /// position.
+    fn rings(wave: bool) -> FieldProgram {
+        let mut b = ProgramBuilder::new();
+        let position = b.add(Op::Position3).unwrap();
+        let [x, y] = [0, 1].map(|index| {
+            b.add(Op::Component {
+                input: position,
+                index,
+            })
+            .unwrap()
+        });
+        let x = b
+            .add(Op::Remap {
+                input: x,
+                from: [0.0, 1.0],
+                to: [0.0, 33.0],
+            })
+            .unwrap();
+        let y = b
+            .add(Op::Remap {
+                input: y,
+                from: [0.0, 1.0],
+                to: [0.0, 11.0],
+            })
+            .unwrap();
+        let phase = b.add(Op::Add { a: x, b: y }).unwrap();
+        let ring = if wave {
+            let zero = b
+                .add(Op::Constant3 {
+                    domain: crate::Domain3::Space,
+                    value: 0.0,
+                })
+                .unwrap();
+            b.add(Op::Wave {
+                input: phase,
+                shift: zero,
+                shape: crate::WaveShape::Sawtooth,
+                from: [0.4, 0.95],
+                to: [0.0, 1.0],
+            })
+            .unwrap()
+        } else {
+            let t = b.add(Op::Fract { input: phase }).unwrap();
+            let t = b
+                .add(Op::Remap {
+                    input: t,
+                    from: [0.4, 0.95],
+                    to: [0.0, 1.0],
+                })
+                .unwrap();
+            b.add(Op::Clamp {
+                input: t,
+                min: 0.0,
+                max: 1.0,
+            })
+            .unwrap()
+        };
+        let planar = b
+            .add(Op::Slice {
+                input: ring,
+                origin: [0.0; 3],
+                u: [1.0, 0.0, 0.0],
+                v: [0.0, 1.0, 0.0],
+                domain: Domain::Plane,
+            })
+            .unwrap();
+        b.finish(planar).unwrap()
+    }
+
+    #[test]
+    fn waves_fade_rings_to_their_mean_where_fract_aliases() {
+        let (wave, fract) = (rings(true), rings(false));
+        assert_eq!(wave.sampling(), Sampling::Heuristic);
+        assert_eq!(fract.sampling(), Sampling::PointOnly);
+        // From a fifth of a ring to many rings per footprint (the phase
+        // runs √(33² + 11²) ≈ 34.8 rings a unit).
+        for width in [0.006, 0.015, 0.03, 0.06, 0.2] {
+            let footprint = Footprint::new(width).unwrap();
+            let w = measure(&wave, &points(), footprint, 48);
+            let f = measure(&fract, &points(), footprint, 48);
+            assert!(w.rms < 0.03, "wave at {width}: {w:?}");
+            assert!(w.bias.abs() < 0.01, "wave at {width}: {w:?}");
+            assert!(
+                w.rms * 4.0 < f.rms,
+                "wave {w:?} against fract {f:?} at {width}"
+            );
+        }
+        // A point footprint is the ramp itself.
+        let point = measure(&wave, &points(), Footprint::POINT, 1);
         assert!(point.max < 1e-6, "{point:?}");
     }
 }

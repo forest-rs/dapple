@@ -542,7 +542,7 @@ pub struct RustedSteel;
 impl Module for RustedSteel {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId::new("dapple_library.rusted_steel", 1),
+            id: ModuleId::new("dapple_library.rusted_steel", 2),
             doc: "riveted steel plate, rusting".into(),
             params: vec![
                 fraction("brushing", 0.0, "how deeply the steel is ground"),
@@ -594,7 +594,7 @@ pub struct PaintedSteel;
 impl Module for PaintedSteel {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId::new("dapple_library.painted_steel", 1),
+            id: ModuleId::new("dapple_library.painted_steel", 2),
             doc: "painted riveted steel, chipped and rusting".into(),
             params: vec![
                 color(

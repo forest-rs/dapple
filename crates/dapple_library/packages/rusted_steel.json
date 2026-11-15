@@ -2,7 +2,7 @@
   "format": "dapple.package",
   "version": 1,
   "interface": {
-    "module": { "name": "dapple_library.packages.rusted_steel", "version": 1 },
+    "module": { "name": "dapple_library.packages.rusted_steel", "version": 2 },
     "doc": "riveted steel plate, as a package: bare steel under mill scale, rusting where water stays and runs",
     "params": [
       {
@@ -44,7 +44,7 @@
       { "name": "dapple.semantics", "version": 1 }
     ],
     "modules": [
-      { "name": "dapple_library.steel", "version": 1 },
+      { "name": "dapple_library.steel", "version": 2 },
       { "name": "dapple_library.rust", "version": 1 }
     ]
   },
@@ -78,7 +78,7 @@
     "steps": [
       {
         "name": "steel",
-        "module": { "name": "dapple_library.steel", "version": 1 },
+        "module": { "name": "dapple_library.steel", "version": 2 },
         "params": {
           "brushing": { "param": "brushing" },
           "mill_scale": { "param": "mill_scale" }

@@ -34,10 +34,11 @@
 //!   loop of their own; with their gradient, the fused value-and-gradient
 //!   evaluation; a fractal whose block shares one footprint goes octave by
 //!   octave over the lanes, taking each octave's band weight once;
-//! - lattice noise, planar and solid, alone and in fractals, runs a lane
-//!   kernel when its block shares one footprint (solid noise with its
-//!   gradient too): the block's points are located on the lattice
-//!   together, and value noise's corners blended together;
+//! - lattice noise, planar and solid, alone and in fractals, with its
+//!   gradient or without, runs a lane kernel when its block shares one
+//!   footprint: the block's points are located on the lattice together,
+//!   value noise's corners blended together, and gradient noise's lanes in
+//!   one cell summed together, corner by corner;
 //! - cellular noise, planar and solid, looks up each lane in turn but
 //!   hashes a cell's neighborhood once for a run of lanes in that cell;
 //! - the gradients of arithmetic on scalars are loops over the operands'
@@ -861,6 +862,30 @@ fn planar_gradient(out: &mut Out<'_>, at: Points<'_>, f: impl Fn(Vec2, Footprint
     });
 }
 
+/// A planar leaf's value and gradient: by `lanes` over the block when it
+/// shares one footprint, else `f(p, footprint)` at each lane's point; the
+/// gradient's `z` is zero.
+#[inline(always)]
+fn planar_gradient_lanes(
+    out: &mut Out<'_>,
+    at: Points<'_>,
+    lanes: impl Fn([&[f32]; 2], Footprint, &mut [f32], [&mut [f32]; 2]),
+    f: impl Fn(Vec2, Footprint) -> (f32, Vec2),
+) {
+    let Footprints::Uniform(footprint) = at.footprints else {
+        return planar_gradient(out, at, f);
+    };
+    let len = at.x.len();
+    let (v, [gx, gy, gz]) = out.scalar_gradient();
+    lanes(
+        [at.x, at.y],
+        footprint,
+        &mut v[..len],
+        [&mut gx[..len], &mut gy[..len]],
+    );
+    gz[..len].fill(0.0);
+}
+
 /// `(value, gradient) = f(p, footprint)` at each lane's point.
 #[inline(always)]
 fn solid_gradient(out: &mut Out<'_>, at: Points<'_>, f: impl Fn(Vec3, Footprint) -> (f32, Vec3)) {
@@ -921,11 +946,22 @@ fn eval_gradient(
     // Leaves evaluate their value and gradient at once, as
     // `Kernel::value_and_gradient` does.
     match *kernel {
+        // Planar noise of one footprint goes a block of lanes at a time.
         Kernel::Noise(ref noise) => {
-            return planar_gradient(out, at, |p, fp| noise.eval_gradient(p, fp));
+            return planar_gradient_lanes(
+                out,
+                at,
+                |points, footprint, v, g| noise.eval_gradient_lanes(points, footprint, v, g),
+                |p, fp| noise.eval_gradient(p, fp),
+            );
         }
         Kernel::Fractal(ref fractal) => {
-            return planar_gradient(out, at, |p, fp| fractal.eval_gradient(p, fp));
+            return planar_gradient_lanes(
+                out,
+                at,
+                |points, footprint, v, g| fractal.eval_gradient_lanes(points, footprint, v, g),
+                |p, fp| fractal.eval_gradient(p, fp),
+            );
         }
         Kernel::Cellular(ref cellular) => {
             return planar_gradient(out, at, |p, fp| cellular.eval_gradient(p, fp));

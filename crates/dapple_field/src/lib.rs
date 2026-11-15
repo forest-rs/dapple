@@ -90,6 +90,7 @@ mod field;
 mod fractal;
 pub mod hash;
 pub mod image;
+mod lanes;
 mod noise;
 pub mod program;
 pub mod raster;

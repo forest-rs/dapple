@@ -18,7 +18,9 @@ criterion.workspace = true
 dapple_elements.workspace = true
 dapple_encode.workspace = true
 dapple_graph.workspace = true
+dapple_logic.workspace = true
 dapple_material.workspace = true
+dapple_package.workspace = true
 dapple_raster.workspace = true
 execution_graph.workspace = true
 footfall = { features = ["runtime"], workspace = true }
@@ -50,6 +52,10 @@ harness = false
 
 [[bench]]
 name = "material"
+harness = false
+
+[[bench]]
+name = "package"
 harness = false
 
 [[bench]]

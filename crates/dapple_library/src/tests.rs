@@ -1373,6 +1373,32 @@ mod metals {
             }
         }
     }
+
+    /// Painted steel's `weather` derives four step parameters: through the
+    /// package's expressions (one tape program) and through the native
+    /// asset's Rust, the same bits, alone and over every preset; and at 0
+    /// it changes nothing.
+    #[test]
+    fn painted_steels_weather_derives_as_the_native_asset_does() {
+        let package = Package::from_json(PAINTED_STEEL).expect("reads");
+        let compiled = registry().compile(&package).expect("compiles");
+        let program = compiled.logic().expect("expressions");
+        assert_eq!(program.outputs().len(), 4);
+        let presets = package.presets.iter().map(|p| Some(p.name.as_str()));
+        for preset in core::iter::once(None).chain(presets) {
+            let base = preset.map_or_else(Bind::new, |p| compiled.preset(p).unwrap());
+            let unweathered = build(&compiled, 16, base.clone());
+            for weather in [0.0, 0.15, 0.5, 0.999, 1.0] {
+                let bind = base.clone().scalar("weather", weather);
+                let packaged = build(&compiled, 16, bind.clone());
+                let built = build(&PaintedSteel, 16, bind);
+                assert_eq!(packaged.digest(), built.digest(), "{preset:?} at {weather}");
+                if weather == 0.0 && preset != Some("weathered") {
+                    assert_eq!(packaged.digest(), unweathered.digest(), "{preset:?}");
+                }
+            }
+        }
+    }
 }
 
 /// The library's programs evaluated in runs, through the batch entry

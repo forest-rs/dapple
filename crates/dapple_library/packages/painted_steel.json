@@ -2,8 +2,8 @@
   "format": "dapple.package",
   "version": 1,
   "interface": {
-    "module": { "name": "dapple_library.packages.painted_steel", "version": 2 },
-    "doc": "painted riveted steel, as a package: steel under primer and topcoat, chipped, rusting where the chips bare the metal",
+    "module": { "name": "dapple_library.packages.painted_steel", "version": 3 },
+    "doc": "painted riveted steel, as a package: steel under primer and topcoat, chipped, rusting where the chips bare the metal, and weathered by one knob",
     "params": [
       {
         "name": "paint",
@@ -34,6 +34,11 @@
         "name": "wetness",
         "doc": "how much water's paths decide where",
         "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.6 } }
+      },
+      {
+        "name": "weather",
+        "doc": "years outdoors in one knob: the paint at least this chipped and chalked, the steel at least this rusted, the topcoat no glossier than this allows; 0 leaves the other parameters as set",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.0 } }
       }
     ],
     "outputs": [
@@ -51,7 +56,8 @@
   "requires": {
     "capabilities": [
       { "name": "dapple.graph", "version": 1 },
-      { "name": "dapple.semantics", "version": 1 }
+      { "name": "dapple.semantics", "version": 1 },
+      { "name": "dapple.logic", "version": 1 }
     ],
     "modules": [
       { "name": "dapple_library.steel", "version": 2 },
@@ -87,6 +93,11 @@
       }
     },
     {
+      "name": "weathered",
+      "doc": "one knob at 0.7: years outdoors, chipped in flakes that have rusted through, chalky and dull",
+      "values": { "weather": { "scalar": 0.7 } }
+    },
+    {
       "name": "derelict",
       "doc": "abandoned: paint in islands on a deep, pitted rust",
       "values": {
@@ -109,16 +120,19 @@
         "module": { "name": "dapple_library.paint", "version": 1 },
         "params": {
           "color": { "param": "paint" },
-          "gloss": { "param": "gloss" },
-          "chipping": { "param": "chipping" },
-          "fade": { "param": "fade" }
+          "gloss": { "expr": "min(gloss, 1.0 - 0.85 * weather)" },
+          "chipping": { "expr": "max(chipping, 0.5 * weather * weather)" },
+          "fade": { "expr": "max(fade, 0.9 * weather)" }
         },
         "inputs": { "base": { "output": { "step": "steel", "output": "material" } } }
       },
       {
         "name": "rust",
         "module": { "name": "dapple_library.rust", "version": 1 },
-        "params": { "age": { "param": "age" }, "wetness": { "param": "wetness" } },
+        "params": {
+          "age": { "expr": "max(age, weather)" },
+          "wetness": { "param": "wetness" }
+        },
         "inputs": { "base": { "output": { "step": "paint", "output": "material" } } }
       }
     ],

@@ -38,6 +38,8 @@
 //!   kernel when its block shares one footprint: the block's points are
 //!   located on the lattice together, and value noise's corners blended
 //!   together;
+//! - cellular noise, planar and solid, looks up each lane in turn but
+//!   hashes a cell's neighborhood once for a run of lanes in that cell;
 //! - the gradients of arithmetic on scalars are loops over the operands'
 //!   gradient columns.
 //!
@@ -707,7 +709,14 @@ fn eval_value(
             }
             Footprints::Lanes(_) => planar(out, at, |p, fp| fractal.eval(p, fp)),
         },
-        Kernel::Cellular(ref cellular) => planar(out, at, |p, fp| cellular.eval(p, fp)),
+        // Cellular noise reuses a cell's neighborhood for the next lane in it.
+        Kernel::Cellular(ref cellular) => {
+            let points = [at.x, at.y];
+            match at.footprints {
+                Footprints::Uniform(fp) => cellular.eval_lanes(points, |_| fp, out.component(0)),
+                Footprints::Lanes(fps) => cellular.eval_lanes(points, |i| fps[i], out.component(0)),
+            }
+        }
         Kernel::Tiling(ref tiling) => planar(out, at, |p, fp| tiling.eval(p, fp)),
         Kernel::Scatter(ref scatter) => planar(out, at, |p, fp| scatter.eval(p, fp)),
         Kernel::Disk(ref disk) => planar(out, at, |p, fp| disk.eval(p, fp)),
@@ -727,7 +736,13 @@ fn eval_value(
             }
             Footprints::Lanes(_) => solid(out, at, |p, fp| fractal.eval(p, fp)),
         },
-        Kernel::Cellular3(ref cellular) => solid(out, at, |p, fp| cellular.eval(p, fp)),
+        Kernel::Cellular3(ref cellular) => {
+            let points = [at.x, at.y, at.z];
+            match at.footprints {
+                Footprints::Uniform(fp) => cellular.eval_lanes(points, |_| fp, out.component(0)),
+                Footprints::Lanes(fps) => cellular.eval_lanes(points, |i| fps[i], out.component(0)),
+            }
+        }
         Kernel::Position3 => {
             out.component(0).copy_from_slice(at.x);
             out.component(1).copy_from_slice(at.y);

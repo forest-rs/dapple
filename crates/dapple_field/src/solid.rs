@@ -1102,6 +1102,14 @@ impl Cellular3 {
     /// copied out.
     #[inline]
     fn neighborhood(&self, cell: [i64; 3]) -> [(Vec3, u64); 343] {
+        let mut points = [(Vec3::ZERO, 0_u64); 343];
+        self.fill_neighborhood(cell, &mut points);
+        points
+    }
+
+    /// [`Self::neighborhood`], into `points`.
+    #[inline(always)]
+    fn fill_neighborhood(&self, cell: [i64; 3], points: &mut [(Vec3, u64); 343]) {
         // A cell's id is `hash(seed, [FEATURE_TAG, x, y, z])` of its wrapped
         // index. The hash folds its keys from the left, so the seed-and-tag
         // prefix is mixed once, each column's `x` once, each column and
@@ -1126,7 +1134,6 @@ impl Cellular3 {
                 *line = mix(column, row);
             }
         }
-        let mut points = [(Vec3::ZERO, 0_u64); 343];
         for ((dz, layer), block) in offsets
             .into_iter()
             .zip(layers)
@@ -1143,7 +1150,6 @@ impl Cellular3 {
                 }
             }
         }
-        points
     }
 
     /// The lookup at `p` and, when `GRADIENT`, the in-cell gradients of
@@ -1264,6 +1270,45 @@ impl CellularField3 {
     #[must_use]
     pub const fn mean(&self) -> f32 {
         self.mean
+    }
+
+    /// The field at the points `(x[i], y[i], z[i])`, point `i` with
+    /// footprint `footprint(i)`, into `out`: each value the bits
+    /// [`SolidField::eval`] gives at its point.
+    ///
+    /// A cell's neighborhood is a function of the cell alone, and
+    /// neighboring points often share a cell: a point in the cell of the
+    /// last point looked up reuses its neighborhood rather than hashing its
+    /// 343 cells again.
+    pub(crate) fn eval_lanes(
+        &self,
+        [x, y, z]: [&[f32]; 3],
+        footprint: impl Fn(usize) -> Footprint,
+        out: &mut [f32],
+    ) {
+        let lattice = self.cellular.lattice;
+        let border = self.output == crate::CellOutput::Border;
+        let mut cell = None;
+        let mut points = [(Vec3::ZERO, 0); 343];
+        let lanes = x.iter().zip(y).zip(z).zip(out);
+        for (i, (((&x, &y), &z), out)) in lanes.enumerate() {
+            let weight = footprint(i).band_weight(lattice.max_frequency());
+            if weight == 0.0 {
+                *out = self.mean;
+                continue;
+            }
+            let at = lattice.locate(Vec3::new(x, y, z));
+            if cell != Some(at.cell) {
+                cell = Some(at.cell);
+                self.cellular.fill_neighborhood(at.cell, &mut points);
+            }
+            let value = select(self.output, &search3::<false>(&points, at.frac, border).0);
+            *out = if weight == 1.0 {
+                value
+            } else {
+                self.mean + (value - self.mean) * weight
+            };
+        }
     }
 }
 
@@ -1877,9 +1922,12 @@ mod tests {
                 Vec3::new(1.5, 2.0, 3.0),
             ),
         ];
-        let footprints = [0.0, 0.12, 0.4].map(|w| Footprint::new(w).unwrap());
         for (domain, frequency) in domains {
             let cellular = Cellular3::new(domain, frequency, 0.8, 5).unwrap();
+            // Footprints that keep, fade (by weights either side of a half)
+            // and drop the noise.
+            let footprints = [0.0, 0.2, 0.33, 0.42, 0.6]
+                .map(|t| Footprint::new(t / frequency.max_element()).unwrap());
             for output in [
                 CellOutput::F1,
                 CellOutput::F2,
@@ -1932,6 +1980,74 @@ mod tests {
                                     "{output:?} at {p}: gradient {gradient} for {want}"
                                 );
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Runs of every length through [`CellularField3::eval_lanes`], from
+    /// the patterns of cells it reuses a neighborhood across, keep the bits
+    /// of each point alone, for every output, with one footprint per run and
+    /// with footprints that keep, fade and drop lanes in turn.
+    #[test]
+    fn cellular_lanes_match_points() {
+        let domains = [
+            (Domain3::Space, Vec3::new(0.37, 5.0, 1.5)),
+            (
+                Domain3::periodic(2, 3, 1).unwrap(),
+                Vec3::new(1.5, 2.0, 3.0),
+            ),
+        ];
+        for (domain, frequency) in domains {
+            let cellular = Cellular3::new(domain, frequency, 0.8, 5).unwrap();
+            let lattice = cellular.lattice;
+            let footprints = [0.0, 0.2, 0.33, 0.42, 0.6]
+                .map(|t| Footprint::new(t / frequency.max_element()).unwrap());
+            let mut points: Vec<Vec3> = coherent_cells(lattice.wrap)
+                .into_iter()
+                .map(|cells| Vec3::from_array(cells) / frequency)
+                .collect();
+            points.extend(awkward_points(frequency).into_iter().step_by(5));
+            let [x, y, z] = columns(&points);
+            for output in [
+                CellOutput::F1,
+                CellOutput::F2,
+                CellOutput::F2MinusF1,
+                CellOutput::Border,
+                CellOutput::CellValue,
+            ] {
+                let field = cellular.output(output);
+                // Each point alone, at each footprint.
+                let want = footprints.map(|footprint| {
+                    let eval = |&p: &Vec3| field.eval(p, footprint);
+                    points.iter().map(eval).collect::<Vec<_>>()
+                });
+                field.eval_lanes([&[]; 3], |_| Footprint::POINT, &mut []);
+                for run in RUNS.into_iter().filter(|&run| run > 0) {
+                    for kind in ["per lane", "per run"] {
+                        let pick = |i: usize| {
+                            let k = if kind == "per lane" {
+                                i * 7 / 3
+                            } else {
+                                i / run
+                            };
+                            k % footprints.len()
+                        };
+                        let mut out = vec![-7.0; points.len()];
+                        for (start, out) in (0..).step_by(run).zip(out.chunks_mut(run)) {
+                            let span = start..start + out.len();
+                            let p = [&x[span.clone()], &y[span.clone()], &z[span]];
+                            field.eval_lanes(p, |i| footprints[pick(start + i)], out);
+                        }
+                        for (i, &p) in points.iter().enumerate() {
+                            let (got, want) = (out[i], want[pick(i)][i]);
+                            assert!(
+                                same_bits(got, want),
+                                "{output:?} {lattice:?} in runs of {run} at {p} ({kind}): \
+                                 {got} for {want}"
+                            );
                         }
                     }
                 }

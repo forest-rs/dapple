@@ -165,6 +165,9 @@ pub(super) fn zoo() -> Vec<ValueProgram> {
     let mask = b.add(Op::AsMask { input: diff }).unwrap();
     programs.push(b.clone().finish_value(height).unwrap());
     programs.push(b.clone().finish_value(mask).unwrap());
+    // The fractals themselves, without their gradients.
+    let crests = b.add(Op::Mul { a: ridged, b: fbm }).unwrap();
+    let crests = b.clone().finish_value(crests).unwrap();
 
     // Colors from constants and a ramp, an identifier, and directions.
     let color = |b: &mut ProgramBuilder, rgb: [f32; 3]| {
@@ -336,6 +339,7 @@ pub(super) fn zoo() -> Vec<ValueProgram> {
         })
         .unwrap();
     programs.push(b.finish_value(board).unwrap());
+    programs.push(crests);
     programs.extend(leaves());
     programs
 }

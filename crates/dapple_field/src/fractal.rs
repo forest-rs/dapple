@@ -149,6 +149,48 @@ impl Fractal {
         })
     }
 
+    /// The fractal at the points `(x[i], y[i])`, all with `footprint`, into
+    /// `out`: octave by octave over every point, each octave's band weight
+    /// taken once, and each value the bits [`ScalarField::eval`] gives at
+    /// its point.
+    pub(crate) fn eval_lanes(&self, x: &[f32], y: &[f32], footprint: Footprint, out: &mut [f32]) {
+        let mean = match self.kind {
+            FractalKind::Fbm => 0.0,
+            FractalKind::Ridged => ridged_mean(self.basis),
+        };
+        out.fill(0.0);
+        for octave in &self.octaves {
+            let weight = footprint.band_weight(octave.lattice.max_frequency());
+            if weight == 0.0 {
+                for sum in &mut *out {
+                    *sum += mean * octave.amplitude;
+                }
+                continue;
+            }
+            let noise =
+                |p| lattice_noise(self.basis, octave.lattice, octave.seed, octave.offset, p);
+            let lanes = out.iter_mut().zip(x.iter().zip(y));
+            match self.kind {
+                FractalKind::Fbm => {
+                    for (sum, (&x, &y)) in lanes {
+                        let detail = noise(Vec2::new(x, y));
+                        *sum += (mean + (detail - mean) * weight) * octave.amplitude;
+                    }
+                }
+                FractalKind::Ridged => {
+                    for (sum, (&x, &y)) in lanes {
+                        let r = 1.0 - noise(Vec2::new(x, y)).abs();
+                        let detail = r * r;
+                        *sum += (mean + (detail - mean) * weight) * octave.amplitude;
+                    }
+                }
+            }
+        }
+        for sum in out {
+            *sum /= self.total_amplitude;
+        }
+    }
+
     /// The number of octaves that contribute detail at `footprint`.
     #[must_use]
     pub fn active_octaves(&self, footprint: Footprint) -> usize {

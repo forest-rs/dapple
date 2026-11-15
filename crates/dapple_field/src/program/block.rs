@@ -32,7 +32,8 @@
 //! - leaf kernels (noise, fractal, cellular, tiling, scatter, disk, image
 //!   sample, and the solid ones) call their scalar kernel per lane in a
 //!   loop of their own; with their gradient, the fused value-and-gradient
-//!   evaluation;
+//!   evaluation; a fractal whose block shares one footprint goes octave by
+//!   octave over the lanes, taking each octave's band weight once;
 //! - the gradients of arithmetic on scalars are loops over the operands'
 //!   gradient columns.
 //!
@@ -62,7 +63,9 @@ use crate::types::Value;
 ///
 /// 64 lanes keep a block's columns of the library's largest programs (the
 /// oak's wood, of about 60 registers) within a few tens of kilobytes, and
-/// make the per-step choice negligible beside a step's work.
+/// make the per-step choice negligible beside a step's work. Blocks of 32
+/// to 256 lanes measured within 1% of each other on the library's
+/// programs; 64 was the cheapest for a program whose work is all setup.
 pub(super) const LANES: usize = 64;
 
 /// One component of a register, or one coordinate of a context's point,
@@ -688,7 +691,13 @@ fn eval_value(
     let scalar = |k: usize| operands.component(k, 0);
     match *kernel {
         Kernel::Noise(ref noise) => planar(out, at, |p, fp| noise.eval(p, fp)),
-        Kernel::Fractal(ref fractal) => planar(out, at, |p, fp| fractal.eval(p, fp)),
+        // A fractal of one footprint goes octave by octave over the lanes.
+        Kernel::Fractal(ref fractal) => match at.footprints {
+            Footprints::Uniform(footprint) => {
+                fractal.eval_lanes(at.x, at.y, footprint, out.component(0));
+            }
+            Footprints::Lanes(_) => planar(out, at, |p, fp| fractal.eval(p, fp)),
+        },
         Kernel::Cellular(ref cellular) => planar(out, at, |p, fp| cellular.eval(p, fp)),
         Kernel::Tiling(ref tiling) => planar(out, at, |p, fp| tiling.eval(p, fp)),
         Kernel::Scatter(ref scatter) => planar(out, at, |p, fp| scatter.eval(p, fp)),
@@ -698,7 +707,12 @@ fn eval_value(
             at.planar(|i, p, footprint| out.store(i, image.sample_value(p, footprint)));
         }
         Kernel::Noise3(ref noise) => solid(out, at, |p, fp| noise.eval(p, fp)),
-        Kernel::Fractal3(ref fractal) => solid(out, at, |p, fp| fractal.eval(p, fp)),
+        Kernel::Fractal3(ref fractal) => match at.footprints {
+            Footprints::Uniform(footprint) => {
+                fractal.eval_lanes([at.x, at.y, at.z], footprint, out.component(0));
+            }
+            Footprints::Lanes(_) => solid(out, at, |p, fp| fractal.eval(p, fp)),
+        },
         Kernel::Cellular3(ref cellular) => solid(out, at, |p, fp| cellular.eval(p, fp)),
         Kernel::Position3 => {
             out.component(0).copy_from_slice(at.x);

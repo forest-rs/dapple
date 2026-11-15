@@ -663,6 +663,46 @@ impl Fractal3 {
         }
     }
 
+    /// The fractal at the points `(x[i], y[i], z[i])`, all with
+    /// `footprint`, into `out`: octave by octave over every point, each
+    /// octave's band weight taken once, and each value the bits
+    /// [`SolidField::eval`] gives at its point.
+    pub(crate) fn eval_lanes(&self, [x, y, z]: [&[f32]; 3], footprint: Footprint, out: &mut [f32]) {
+        let mean = self.mean();
+        out.fill(0.0);
+        for octave in &self.octaves {
+            let weight = footprint.band_weight(octave.lattice.max_frequency());
+            if weight == 0.0 {
+                for sum in &mut *out {
+                    *sum += mean * octave.amplitude;
+                }
+                continue;
+            }
+            let noise = |p| {
+                lattice_eval3::<false>(self.basis, octave.lattice, octave.seed, octave.offset, p).0
+            };
+            let lanes = out.iter_mut().zip(x.iter().zip(y).zip(z));
+            match self.kind {
+                FractalKind::Fbm => {
+                    for (sum, ((&x, &y), &z)) in lanes {
+                        let detail = noise(Vec3::new(x, y, z));
+                        *sum += (mean + (detail - mean) * weight) * octave.amplitude;
+                    }
+                }
+                FractalKind::Ridged => {
+                    for (sum, ((&x, &y), &z)) in lanes {
+                        let r = 1.0 - noise(Vec3::new(x, y, z)).abs();
+                        let detail = r * r;
+                        *sum += (mean + (detail - mean) * weight) * octave.amplitude;
+                    }
+                }
+            }
+        }
+        for sum in out {
+            *sum /= self.total_amplitude;
+        }
+    }
+
     fn sum<const GRADIENT: bool>(&self, p: Vec3, footprint: Footprint) -> (f32, Vec3) {
         let mean = self.mean();
         let mut sum = 0.0;

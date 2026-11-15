@@ -438,31 +438,32 @@ impl Module for VarnishedBoard {
                     .scalar("peel_size", 0.006),
             )?,
         )?;
-        let traffic = cx
-            .instantiate(
-                &Patches,
-                "traffic",
-                Bind::new()
-                    .scalar("size", 0.35)
-                    .scalar("coverage", 0.4)
-                    .scalar("softness", 0.4),
-            )?
-            .map("mask")
-            .cloned()
-            .ok_or_else(|| fail("traffic"))?;
-        let worn = take(
-            cx.instantiate(
-                &EdgeWear,
-                "wear",
-                Bind::new()
-                    .material("base", varnished)
-                    .input("where", Input::Map(traffic))
-                    .scalar("coverage", args.scalar("wear"))
-                    .scalar("radius", 0.004)
-                    .scalar("roughening", 0.3)
-                    .scalar("lighten", 0.1),
-            )?,
-        )?;
+        let wear = Bind::new()
+            .material("base", varnished)
+            .scalar("coverage", args.scalar("wear"))
+            .scalar("radius", 0.004)
+            .scalar("roughening", 0.3)
+            .scalar("lighten", 0.1);
+        // Where nothing wears, edge wear gives the varnish as it is, the
+        // patches it would wear in unread: they are not made.
+        let wear = if args.scalar("wear") == 0.0 {
+            wear
+        } else {
+            let traffic = cx
+                .instantiate(
+                    &Patches,
+                    "traffic",
+                    Bind::new()
+                        .scalar("size", 0.35)
+                        .scalar("coverage", 0.4)
+                        .scalar("softness", 0.4),
+                )?
+                .map("mask")
+                .cloned()
+                .ok_or_else(|| fail("traffic"))?;
+            wear.input("where", Input::Map(traffic))
+        };
+        let worn = take(cx.instantiate(&EdgeWear, "wear", wear)?)?;
         let m = take(
             cx.instantiate(
                 &Grime,

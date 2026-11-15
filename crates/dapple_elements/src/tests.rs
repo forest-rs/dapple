@@ -1099,3 +1099,325 @@ fn region_scope_runs_once_per_region_and_keeps_its_identity() {
         "regions cannot supply element bindings"
     );
 }
+
+// The batched compositor against the per-sample reference.
+
+/// A second program: a per-sample input fed by an element attribute, a
+/// per-element noise sample (at a point footprint), and a per-sample one.
+fn mixed_instance() -> ProgramInstance {
+    let mut noise = ProgramBuilder::new();
+    let n = noise
+        .add(Op::Noise {
+            basis: Basis::Gradient,
+            domain: Domain::Plane,
+            frequency: [9.0, 9.0],
+            seed: 3,
+        })
+        .unwrap();
+    let noise = noise.finish_value(n).unwrap();
+    let mut disk = ProgramBuilder::new();
+    let d = disk
+        .add(Op::Disk {
+            domain: Domain::Plane,
+            center: [0.0, 0.0],
+            radius: 0.1,
+            softness: 0.05,
+        })
+        .unwrap();
+    let disk = disk.finish_value(d).unwrap();
+    let mut b = ScopedBuilder::new("test.mixed");
+    let tone = b.input("tone", PortType::Scalar, Scope::Sample).unwrap();
+    let half = b.input("half", PortType::Vector2, Scope::Element).unwrap();
+    let local = b.input("local", PortType::Vector2, Scope::Sample).unwrap();
+    let variant = b
+        .input("variant", PortType::Scalar, Scope::Element)
+        .unwrap();
+    let k = b.input("k", PortType::Scalar, Scope::Material).unwrap();
+    let grain = b.resource("grain", noise);
+    let rim = b.resource("rim", disk);
+    let band = b
+        .node(Node::Sample {
+            resource: rim,
+            at: half,
+        })
+        .unwrap();
+    let per_element = b
+        .node(Node::Sample {
+            resource: grain,
+            at: half,
+        })
+        .unwrap();
+    let scaled = b.node(Node::Mul(per_element, k)).unwrap();
+    let scaled = b.node(Node::Add(scaled, band)).unwrap();
+    let at = b.node(Node::Add(local, half)).unwrap();
+    let per_sample = b
+        .node(Node::Sample {
+            resource: grain,
+            at,
+        })
+        .unwrap();
+    let at_rim = b.node(Node::Add(local, band)).unwrap();
+    let rim_sample = b
+        .node(Node::Sample {
+            resource: rim,
+            at: at_rim,
+        })
+        .unwrap();
+    let mixed = b.node(Node::Add(per_sample, scaled)).unwrap();
+    let mixed = b.node(Node::Add(mixed, rim_sample)).unwrap();
+    let blend = b.node(Node::Mul(mixed, tone)).unwrap();
+    let blend = b.node(Node::Add(blend, variant)).unwrap();
+    let id = b.constant(Value::Id(4));
+    let other = b.constant(Value::Id(5));
+    let pick = b
+        .node(Node::Select {
+            condition: per_sample,
+            a: id,
+            b: other,
+        })
+        .unwrap();
+    b.output("blend", PortType::Scalar, Scope::Sample, blend)
+        .unwrap();
+    b.output("pick", PortType::Id, Scope::Sample, pick).unwrap();
+    b.output("scaled", PortType::Scalar, Scope::Element, scaled)
+        .unwrap();
+    ProgramInstance::new(
+        InstanceId::named("test.mixed"),
+        Arc::new(b.finish()),
+        vec![
+            Binding::Attribute(String::from("tone")),
+            Binding::HalfSize,
+            Binding::LocalPosition,
+            Binding::Variant,
+            Binding::Constant(Value::Scalar(0.75)),
+        ],
+    )
+    .unwrap()
+}
+
+const MIXED_BACKGROUND: [Value; 3] = [Value::Scalar(0.2), Value::Id(9), Value::Scalar(0.0)];
+
+/// A deterministic stream of numbers in `[0, 1)`.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> f32 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        #[expect(clippy::cast_precision_loss, reason = "24 bits")]
+        let v = (self.0 >> 40) as f32;
+        v / 16_777_216.0
+    }
+}
+
+impl Lcg {
+    /// A number in `0..n`.
+    fn below(&mut self, n: u32) -> u32 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the product is below n"
+        )]
+        let v = (self.next() * f(n)) as u32;
+        v.min(n - 1)
+    }
+}
+
+/// Overlapping, wrapping, tiny, huge, rotated and elliptic elements.
+fn varied(seed: u64, count: u32) -> ElementSet {
+    let mut rng = Lcg(seed);
+    let layout = LayoutId::named("test.varied");
+    let elements = (0..count)
+        .map(|n| {
+            let (x, y) = (rng.next() * 1.6 - 0.3, rng.next() * 1.6 - 0.3);
+            let half = match n % 7 {
+                0 => Vec2::new(1.0e-30, 2.0e-30),
+                1 => Vec2::new(2.5, 3.0),
+                2 => Vec2::new(0.4, 0.05),
+                _ => Vec2::new(0.02 + 0.2 * rng.next(), 0.02 + 0.2 * rng.next()),
+            };
+            Element {
+                key: ElementKey::new(layout, Anchor([i32::try_from(n).unwrap(), 0]), 0),
+                placement: Placement {
+                    center: Vec2::new(x, y),
+                    rotation: rng.next() * 6.0,
+                },
+                half_size: half,
+                outline: if rng.next() < 0.4 {
+                    Outline::Ellipse
+                } else {
+                    Outline::Rectangle
+                },
+                variant: rng.below(3),
+                attributes: vec![Value::Scalar(rng.next()), Value::Scalar(rng.next() - 0.5)],
+            }
+        })
+        .collect();
+    ElementSet::new(schema(), elements).unwrap()
+}
+
+/// Every output's and owner's exact bits, texel by texel.
+fn bits(realized: &Realized, outputs: usize, size: [u32; 2]) -> Vec<u64> {
+    let mut words = Vec::new();
+    for y in 0..size[1] {
+        for x in 0..size[0] {
+            for o in 0..outputs {
+                set::value_words(realized.value(o, x, y), &mut words);
+            }
+            words.push(realized.owner(x, y).map_or(0, |k| k.word()));
+        }
+    }
+    words
+}
+
+struct Case<'a> {
+    instance: &'a ProgramInstance,
+    background: &'a [Value],
+    size: [u32; 2],
+    tile: u32,
+}
+
+impl<'a> Case<'a> {
+    fn composite<'b>(&'b self, set: &'b ElementSet) -> Composite<'b>
+    where
+        'a: 'b,
+    {
+        Composite {
+            set,
+            instance: self.instance,
+            background: self.background,
+            domain: domain(),
+            width: self.size[0],
+            height: self.size[1],
+            tile_size: self.tile,
+        }
+    }
+
+    /// The batched path, in bands of `band`, equals the per-sample one.
+    fn agree(&self, set: &ElementSet, band: usize) -> Realized {
+        let c = self.composite(set);
+        let reference = Realized::composite_reference(&c).unwrap();
+        let batched = Realized::composite_banded(&c, band).unwrap();
+        let outputs = self.background.len();
+        assert_eq!(
+            bits(&batched, outputs, self.size),
+            bits(&reference, outputs, self.size)
+        );
+        assert_eq!(batched.digest(), reference.digest());
+        assert_eq!(
+            Realized::composite(&c).unwrap().digest(),
+            reference.digest()
+        );
+        batched
+    }
+}
+
+/// Whether to run the large sweeps of the batched-compositing tests; set
+/// `DAPPLE_ELEMENTS_SWEEP` to any value when building the tests to do.
+/// The default is the smallest configuration found to catch every
+/// mutation tried (stale element hoists, lane order, band bookkeeping,
+/// footprints, summation order).
+fn sweep() -> bool {
+    option_env!("DAPPLE_ELEMENTS_SWEEP").is_some()
+}
+
+fn cases() -> (ProgramInstance, ProgramInstance) {
+    (instance(), mixed_instance())
+}
+
+#[test]
+fn batched_compositing_is_bit_identical_to_the_per_sample_path() {
+    let (glaze, mixed) = cases();
+    let setups = [
+        Case {
+            instance: &glaze,
+            background: &BACKGROUND,
+            size: if sweep() { [41, 29] } else { [21, 15] },
+            tile: 8,
+        },
+        Case {
+            instance: &mixed,
+            background: &MIXED_BACKGROUND,
+            size: if sweep() { [32, 32] } else { [16, 16] },
+            tile: 7,
+        },
+    ];
+    for case in &setups {
+        let (sets, bands): (&[(u64, u32)], &[usize]) = if sweep() {
+            (&[(1, 1), (2, 9), (3, 40), (4, 150)], &[1, 5, 64, 1 << 17])
+        } else {
+            (&[(2, 9), (3, 24)], &[1, 40, 1 << 17])
+        };
+        for &(seed, count) in sets {
+            let set = varied(seed, count);
+            // One band, many bands, and bands of a single contribution.
+            for &band in bands {
+                case.agree(&set, band);
+            }
+        }
+    }
+    // Whole running bonds, scatter layouts with variants, and no elements.
+    let bond = bricks(0.03);
+    for case in &setups {
+        case.agree(&bond, 100);
+        case.agree(&ElementSet::new(schema(), Vec::new()).unwrap(), 100);
+    }
+}
+
+#[test]
+fn batched_incremental_updates_equal_the_reference_after_edits() {
+    let (glaze, mixed) = cases();
+    for (instance, background) in [(&glaze, &BACKGROUND[..]), (&mixed, &MIXED_BACKGROUND[..])] {
+        let case = Case {
+            instance,
+            background,
+            size: if sweep() { [48, 40] } else { [24, 16] },
+            tile: 8,
+        };
+        let outputs = background.len();
+        let mut set = varied(11, 60);
+        let steps = if sweep() { 12 } else { 5 };
+        let mut batched = Realized::composite_banded(&case.composite(&set), 50).unwrap();
+        let mut reference = Realized::composite_reference(&case.composite(&set)).unwrap();
+        let keys: Vec<ElementKey> = set.keys().to_vec();
+        let mut rng = Lcg(77);
+        for step in 0..steps {
+            match step % 4 {
+                0 | 1 => {
+                    let key = keys[rng.below(59) as usize];
+                    let mut p = set.placement(set.index_of(key).unwrap());
+                    p.center += Vec2::new(rng.next() - 0.5, rng.next() - 0.5);
+                    p.rotation += rng.next();
+                    set.set_placement(key, p).unwrap();
+                }
+                2 => {
+                    let key = keys[rng.below(59) as usize];
+                    set.set_attribute(key, "tone", Value::Scalar(rng.next()))
+                        .unwrap();
+                }
+                _ => {
+                    let drop = keys[rng.below(59) as usize];
+                    set = set.filter(|e| e.key != drop);
+                }
+            }
+            let c = case.composite(&set);
+            let a = batched.update_banded(&c, 30).unwrap();
+            let b = reference.update_reference(&c).unwrap();
+            assert_eq!(a, b);
+            assert_eq!(
+                bits(&batched, outputs, case.size),
+                bits(&reference, outputs, case.size)
+            );
+            let clean = Realized::composite_reference(&c).unwrap();
+            assert_eq!(batched.digest(), clean.digest());
+        }
+        // Back to the full set, then a new program rebuilds whole.
+        let full = varied(11, 60);
+        let a = batched.update(&case.composite(&full)).unwrap();
+        let b = reference.update_reference(&case.composite(&full)).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(batched.digest(), reference.digest());
+    }
+}

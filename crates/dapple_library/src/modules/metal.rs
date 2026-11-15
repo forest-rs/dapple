@@ -21,6 +21,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use dapple_field::hash::{hash, unit_f32};
 use dapple_field::{CellOutput, Value};
 use dapple_material::module::{
     Args, Context, Interface, Module, ModuleError, ModuleId, Output, OutputDecl, OutputKind,
@@ -138,7 +139,11 @@ impl Metal {
 /// `relief` proud, and by cross laps `courses` apart where each sheet's
 /// folded lower edge laps over the sheet below, each sheet a little wavy
 /// between its seams (oil canning, `waviness`). `brushing` scores it along
-/// `x`, from a rolled mill finish (0) to a heavy brush (1).
+/// `x`, from a rolled mill finish (0) to a heavy brush (1). Its tone varies
+/// sheet to sheet, in broad mottling and in faint bands along the rolling
+/// direction, deeper and redder or paler with it (an exponent on F0, a
+/// little above 1 on the whole), so that `color` is its mean to within a
+/// few hundredths rather than its value everywhere.
 ///
 /// Copper tarnishes and weathers to verdigris: see [`super::Patina`].
 #[derive(Copy, Clone, Debug, Default)]
@@ -147,7 +152,7 @@ pub struct Copper;
 impl Module for Copper {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId::new("dapple_library.copper", 1),
+            id: ModuleId::new("dapple_library.copper", 2),
             doc: "copper cladding: standing seams and cross laps".into(),
             params: vec![
                 color(
@@ -202,7 +207,22 @@ impl Module for Copper {
         let brushing = args.scalar("brushing");
         let worked = Worked::of(grid, args)?;
         let wave = realize_scalar(grid, |b, d| fbm(b, d, [3.0, 2.0], args.seed("wave"), 3))?;
+        // Rolling leaves faint bands along x, a few centimeters across.
+        let rolled = realize_scalar(grid, |b, d| fbm(b, d, [2.0, 16.0], args.seed("rolled"), 3))?;
         let f0 = args.color("color");
+        // On a wrapping grid, the sheets across and up it: the sheet over
+        // the wrap is one sheet.
+        let wraps = grid.edge == dapple_field::Edge::Wrap;
+        let count = |extent: f32, spacing: f32| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "sheet counts are small whole numbers"
+            )]
+            let n = libm::roundf(extent / spacing) as i64;
+            (wraps && spacing > 0.0).then_some(n.max(1))
+        };
+        let (across, up) = (count(size.x, seams), count(size.y, courses));
+        let sheets = args.seed("sheets");
         let rough = args.scalar("roughness");
         let waviness = args.scalar("waviness");
         // Edges a texel wide, so steps are band-limited.
@@ -248,11 +268,31 @@ impl Module for Copper {
             let bow = waviness * canning(wave.values()[i]) * (1.0 - near_seam);
             let g = worked.grooves.values()[i];
             let m = worked.mottle.values()[i];
-            let tone = 1.0 + 0.035 * m + 0.05 * brushing * g;
-            metal.color.push((f0 * tone).min(Vec3::ONE));
-            metal
-                .roughness
-                .push((rough + 0.05 * m + 0.08 * brushing * g.abs()).clamp(0.02, 1.0));
+            // Each sheet is its own batch, a little deeper or paler than
+            // the next.
+            let sheet = [
+                sheet_index(p.x, grid.origin.x, seams, across),
+                sheet_index(p.y, grid.origin.y, courses, up),
+            ];
+            #[expect(clippy::cast_sign_loss, reason = "hashed as bits")]
+            let batch = unit_f32(hash(sheets, &sheet.map(|k| k as u64))) - 0.5;
+            // Copper's tone varies with its color: deeper is redder, as
+            // light that reflects twice is filtered twice, so a variation
+            // is an exponent on F0 rather than a scale. Deeper, slightly,
+            // on the whole: clean copper is rarely as pale as its table
+            // value in every place.
+            let deep =
+                0.03 + 0.35 * batch + 0.4 * m + 0.15 * rolled.values()[i] + 0.1 * brushing * g;
+            let tone = 1.0 + 0.04 * m + 0.03 * brushing * g;
+            let c = Vec3::new(
+                libm::powf(f0.x, 1.0 + deep),
+                libm::powf(f0.y, 1.0 + deep),
+                libm::powf(f0.z, 1.0 + deep),
+            );
+            metal.color.push((c * tone).min(Vec3::ONE));
+            metal.roughness.push(
+                (rough + 0.05 * m + 0.08 * batch + 0.08 * brushing * g.abs()).clamp(0.02, 1.0),
+            );
             metal.height.push(seam + lap + bow);
         }
         let m = metal.material(grid)?;
@@ -267,6 +307,22 @@ impl Module for Copper {
 /// `ease` either side of the line.
 fn lap_step(d: f32, spacing: f32, rise: f32, ease: f32) -> f32 {
     rise * (smoothstep(-ease, ease, d) - d / spacing)
+}
+
+/// The index of the sheet `v` lies on, between lines `spacing` apart at
+/// `(k + 0.5) · spacing` from `origin` (as [`nearest_line`] places them),
+/// modulo `count` sheets when there are that many to a wrapping period; 0
+/// when there are no lines.
+fn sheet_index(v: f32, origin: f32, spacing: f32, count: Option<i64>) -> i64 {
+    if spacing <= 0.0 {
+        return 0;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "sheet indices are small whole numbers"
+    )]
+    let k = libm::floorf((v - origin) / spacing - 0.5) as i64;
+    count.map_or(k, |n| k.rem_euclid(n))
 }
 
 /// Oil canning: the sheet bows a little one way or the other.

@@ -36,7 +36,9 @@
 //! through one [`InstanceCache`], so presets that share a step (a package's
 //! bare metal under every preset's weathering) build it once. Each is
 //! gated on `dapple_lab`'s material report: a failing swatch is still
-//! exported, marked in the index, and fails the run at the end. Each is
+//! exported and marked in the index, one that cannot be built (a module
+//! that breaks its tiling promise) is marked without an export, every
+//! swatch is checked, and the run fails at the end if any failed. Each is
 //! exported through `dapple_export` into `<output-dir>/<family>/<label>/`
 //! with its `report.json` and `diagnostics.txt`, and `wall.json` indexes
 //! them for the render script.
@@ -376,8 +378,24 @@ fn index_entry(swatch: &Swatch, built: &Built, exported: &Exported) -> Value {
         "tiling": { "x": tiling.x, "y": tiling.y },
         "seconds": built.seconds,
         "cache": { "hits": built.hits, "misses": built.misses },
+        "built": true,
         "passed": built.report.passed(),
         "failures": failures(&built.report),
+    })
+}
+
+/// The index entry of a swatch whose build failed, with no export.
+fn unbuilt_entry(swatch: &Swatch, why: &str) -> Value {
+    json!({
+        "label": swatch.label,
+        "family": swatch.family,
+        "preset": swatch.preset,
+        "module": swatch.module.interface().id.to_string(),
+        "doc": swatch.doc,
+        "directory": swatch.subject(),
+        "built": false,
+        "passed": false,
+        "failures": [why],
     })
 }
 
@@ -432,9 +450,25 @@ fn main() -> Result<()> {
         "{:<16} {:<20} {:>9} {:>8} {:>5} {:>6}  verdict",
         "family", "swatch", "size (m)", "build", "hits", "misses"
     )?;
-    let (mut total, mut failed) = (0.0, Vec::new());
+    let (mut total, mut failed): (f64, Vec<(String, Vec<String>)>) = (0.0, Vec::new());
     for swatch in &swatches {
-        let built = build(swatch, grid, cache.as_mut())?;
+        let built = match build(swatch, grid, cache.as_mut()) {
+            Ok(built) => built,
+            Err(e) => {
+                // A module that breaks its own promise, such as a seam,
+                // has no material to show; record it and go on.
+                let why = e.to_string();
+                println!("{}: FAILED to build", swatch.subject());
+                writeln!(
+                    table,
+                    "{:<16} {:<20} {:>9} {:>8} {:>5} {:>6}  BUILD FAILED",
+                    swatch.family, swatch.label, "-", "-", "-", "-"
+                )?;
+                failed.push((swatch.subject(), vec![why.clone()]));
+                entries.push(unbuilt_entry(swatch, &why));
+                continue;
+            }
+        };
         total += built.seconds;
         let exported = export(swatch, &built)?;
         let dir = o.out.join(swatch.subject());
@@ -463,10 +497,7 @@ fn main() -> Result<()> {
             if passed { "pass" } else { "FAIL" }
         )?;
         if !passed {
-            for f in failures(&built.report) {
-                eprintln!("FAILED {}: {f}", swatch.subject());
-            }
-            failed.push(swatch.subject());
+            failed.push((swatch.subject(), failures(&built.report)));
         }
         entries.push(index_entry(swatch, &built, &exported));
     }
@@ -510,7 +541,22 @@ fn main() -> Result<()> {
     }
     println!("{}", o.out.join("wall.json").display());
     if !failed.is_empty() {
-        return Err(format!("lab reports failed: {}", failed.join(", ")).into());
+        eprintln!("\n{} of {} swatches failed:", failed.len(), swatches.len());
+        for (subject, why) in &failed {
+            for f in why {
+                eprintln!("FAILED {subject}: {f}");
+            }
+        }
+        return Err(format!(
+            "{} swatches failed: {}",
+            failed.len(),
+            failed
+                .iter()
+                .map(|(s, _)| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .into());
     }
     Ok(())
 }
@@ -626,5 +672,17 @@ mod tests {
             hits += built.hits;
         }
         assert!(hits > 0, "presets reuse their shared steps");
+    }
+
+    /// A swatch that cannot be built is indexed as failed, with why and
+    /// without an export.
+    #[test]
+    fn an_unbuilt_swatch_is_indexed_as_failed() {
+        let (swatches, _) = swatches().expect("the library enumerates");
+        let entry = unbuilt_entry(&swatches[0], "a seam");
+        assert_eq!(entry["built"], false);
+        assert_eq!(entry["passed"], false);
+        assert_eq!(entry["failures"][0], "a seam");
+        assert_eq!(entry["directory"], swatches[0].subject(), "indexed");
     }
 }

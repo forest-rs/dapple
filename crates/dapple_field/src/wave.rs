@@ -142,6 +142,10 @@ impl WaveRamp {
     /// point sample; an infinite or NaN one gives the period's mean. The
     /// mean divides by the interval's width as rounded, so it is the mean
     /// over the interval the ends bound, however far from 0 the phase is.
+    ///
+    /// Inlined, so that a caller wanting the value alone does none of the
+    /// derivatives' arithmetic.
+    #[inline(always)]
     pub(crate) fn eval(&self, x: f32, shift: f32, width: f32) -> (f32, f32, f32) {
         let c = self.from[0] + shift;
         let span = self.to[1] - self.to[0];

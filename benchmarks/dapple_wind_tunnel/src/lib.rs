@@ -179,26 +179,23 @@ pub fn oak_wood_red() -> SolidProgram {
     red
 }
 
-/// The library's solid oak wood sliced as the wood module cuts its board: a
-/// plane [`BOARD_OFFSET`] from the pith, tangential to the rings, with the
-/// plane's x running up the trunk.
+/// The library's oak wood cut as the wood module cuts its board
+/// ([`oak::wood_face_color`]): a plane [`BOARD_OFFSET`] from the pith,
+/// tangential to the rings, with the plane's x running up the trunk.
 ///
 /// # Panics
 ///
-/// Never: the library builds the wood, and the slice is valid.
+/// Never: the library builds the wood on a valid plane.
 #[must_use]
 pub fn oak_board_color() -> ValueProgram {
     let mut b = ProgramBuilder::new();
-    let solid = oak::wood_color(&mut b).expect("the library's oak wood builds");
-    let board = b
-        .add(Op::Slice {
-            input: solid,
-            origin: [BOARD_OFFSET, 0.0, 0.0],
-            u: [0.0, 0.0, 1.0],
-            v: [0.0, 1.0, 0.0],
-            domain: Domain::Plane,
-        })
-        .expect("valid slice");
+    let board = oak::wood_face_color(
+        &mut b,
+        [BOARD_OFFSET, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0],
+    )
+    .expect("the library's oak wood builds");
     b.finish_value(board).expect("a planar output")
 }
 

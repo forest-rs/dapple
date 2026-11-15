@@ -6,7 +6,8 @@
 use dapple_field::program::{
     FieldProgram, NodeId, Op, ProgramBuilder, ProgramError, SolidProgram, ValueProgram,
 };
-use dapple_field::{Basis, CellOutput, Domain, Domain3, FractalParams};
+use dapple_field::{Affine3, Basis, CellOutput, Domain, Domain3, FractalParams, WaveShape};
+use glam::{Mat3, Vec3};
 
 use crate::ramp;
 
@@ -207,20 +208,97 @@ pub fn bark_color(domain: Domain, height: &FieldProgram) -> Result<ValueProgram,
 /// The trunk runs along the solid domain's z axis through the origin, in
 /// meters. Returns the color node, a [`dapple_field::PortType::Color`].
 ///
+/// Rings and rays repeat through [`Op::Wave`]s, so they are band-limited by
+/// the footprint: as they near and pass its size they spread and fade to
+/// their mean rather than alias. In the solid, a wave filters along the
+/// phase's three-dimensional gradient, so a face that cuts the rings at a
+/// grazing angle (a cathedral's crown) is filtered as if it crossed them;
+/// [`wood_face_color`] filters a sawn face by its own gradients instead.
+///
 /// # Errors
 ///
 /// Propagates [`ProgramError`]s from building the graph.
 pub fn wood_color(b: &mut ProgramBuilder) -> Result<NodeId, ProgramError> {
+    wood(b, Cut::Solid)
+}
+
+/// The wood on a sawn face: [`wood_color`] on the plane through `origin`
+/// spanned by `u` and `v`, the solid steps per unit of the face's x and y,
+/// as [`Op::Slice`] would cut it. Returns a planar color node over
+/// [`Domain::Plane`].
+///
+/// Each solid quantity (the ring radius, the angle around the trunk, the
+/// noises) is sliced onto the face before it is shaped, so the rings and
+/// rays are filtered by their gradients across the face itself: a
+/// cathedral's crown, where the face runs along the rings, keeps its broad
+/// bands at a footprint that blends the tight rings at its flanks. At a
+/// point footprint it is [`wood_color`] sliced, up to rounding.
+///
+/// # Errors
+///
+/// Propagates [`ProgramError`]s from building the graph, such as a
+/// non-finite plane.
+pub fn wood_face_color(
+    b: &mut ProgramBuilder,
+    origin: [f32; 3],
+    u: [f32; 3],
+    v: [f32; 3],
+) -> Result<NodeId, ProgramError> {
+    wood(b, Cut::Face { origin, u, v })
+}
+
+/// Where the wood is shaped: in the solid, or on a sawn face.
+#[derive(Copy, Clone, Debug)]
+enum Cut {
+    Solid,
+    Face {
+        origin: [f32; 3],
+        u: [f32; 3],
+        v: [f32; 3],
+    },
+}
+
+impl Cut {
+    /// Solid quantity `solid` where the wood is shaped.
+    fn lift(self, b: &mut ProgramBuilder, solid: NodeId) -> Result<NodeId, ProgramError> {
+        match self {
+            Self::Solid => Ok(solid),
+            Self::Face { origin, u, v } => b.add(Op::Slice {
+                input: solid,
+                origin,
+                u,
+                v,
+                domain: Domain::Plane,
+            }),
+        }
+    }
+
+    /// A constant where the wood is shaped.
+    fn constant(self, b: &mut ProgramBuilder, value: f32) -> Result<NodeId, ProgramError> {
+        match self {
+            Self::Solid => b.add(Op::Constant3 {
+                domain: Domain3::Space,
+                value,
+            }),
+            Self::Face { .. } => b.add(Op::Constant {
+                domain: Domain::Plane,
+                value,
+            }),
+        }
+    }
+}
+
+fn wood(b: &mut ProgramBuilder, cut: Cut) -> Result<NodeId, ProgramError> {
     let domain = Domain3::Space;
     let color = |b: &mut ProgramBuilder, rgb: [f32; 3]| {
-        let [r, g, bl] = rgb.map(|value| b.add(Op::Constant3 { domain, value }));
+        let [r, g, bl] = rgb.map(|value| cut.constant(b, value));
         b.add(Op::Color {
             r: r?,
             g: g?,
             b: bl?,
         })
     };
-    let noise = |b: &mut ProgramBuilder, basis, frequency, seed, octaves| {
+    let fractal = |b: &mut ProgramBuilder, basis, frequency, seed, octaves| {
         b.add(Op::Fractal3 {
             basis,
             domain,
@@ -232,6 +310,16 @@ pub fn wood_color(b: &mut ProgramBuilder) -> Result<NodeId, ProgramError> {
             },
         })
     };
+    // One octave of solid noise, where the wood is shaped.
+    let noise = |b: &mut ProgramBuilder, basis, frequency, seed| {
+        let n = b.add(Op::Noise3 {
+            basis,
+            domain,
+            frequency,
+            seed,
+        })?;
+        cut.lift(b, n)
+    };
     let position = b.add(Op::Position3)?;
     let x = b.add(Op::Component {
         input: position,
@@ -241,8 +329,17 @@ pub fn wood_color(b: &mut ProgramBuilder) -> Result<NodeId, ProgramError> {
         input: position,
         index: 1,
     })?;
-    let xy = b.add(Op::Vector2 { x, y })?;
-    let radius = b.add(Op::Length { input: xy })?;
+    // The distance from the trunk's axis: the position's length with its z
+    // flattened onto the cross-section, which keeps the gradient the rings'
+    // footprint needs in closed form.
+    let length = b.add(Op::Length { input: position })?;
+    let radius = b.add(Op::Transform3 {
+        input: length,
+        transform: Affine3 {
+            matrix: Mat3::from_diagonal(Vec3::new(1.0, 1.0, 0.0)),
+            translation: Vec3::ZERO,
+        },
+    })?;
     // The trunk tapers: each ring is a cone, 3 cm wider per meter lower.
     let z = b.add(Op::Component {
         input: position,
@@ -259,7 +356,7 @@ pub fn wood_color(b: &mut ProgramBuilder) -> Result<NodeId, ProgramError> {
     })?;
 
     // Rings 5.5 mm apart, their radii wandering by up to ±8 mm.
-    let wobble = noise(b, Basis::Gradient, [6.0, 6.0, 4.0], SEED + 10, 4)?;
+    let wobble = fractal(b, Basis::Gradient, [6.0, 6.0, 4.0], SEED + 10, 4)?;
     let wobble = b.add(Op::Remap {
         input: wobble,
         from: [-1.0, 1.0],
@@ -274,38 +371,46 @@ pub fn wood_color(b: &mut ProgramBuilder) -> Result<NodeId, ProgramError> {
         from: [0.0, 1.0],
         to: [0.0, 180.0],
     })?;
-    let phase = b.add(Op::Fract { input: rings })?;
+    let rings = cut.lift(b, rings)?;
+    let zero = cut.constant(b, 0.0)?;
     // Each year opens with a band of large pores and darkens toward its
     // latewood, which ends sharply at the next year's pores.
-    let late = ramp(b, phase, [0.4, 0.95], [0.0, 1.0])?;
-    let early = ramp(b, phase, [0.12, 0.3], [1.0, 0.0])?;
+    let late = b.add(Op::Wave {
+        input: rings,
+        shift: zero,
+        shape: WaveShape::Sawtooth,
+        from: [0.4, 0.95],
+        to: [0.0, 1.0],
+    })?;
+    let early = b.add(Op::Wave {
+        input: rings,
+        shift: zero,
+        shape: WaveShape::Sawtooth,
+        from: [0.12, 0.3],
+        to: [1.0, 0.0],
+    })?;
 
     // Large earlywood pores, drawn out along the grain.
-    let pores = b.add(Op::Noise3 {
-        basis: Basis::Value,
-        domain,
-        frequency: [700.0, 700.0, 60.0],
-        seed: SEED + 11,
-    })?;
+    let pores = noise(b, Basis::Value, [700.0, 700.0, 60.0], SEED + 11)?;
     let pores = ramp(b, pores, [0.1, 0.5], [0.3, 0.9])?;
     let pores = b.add(Op::Mul { a: pores, b: early })?;
 
-    // Rays: thin radial ribbons around the trunk. Each set is a sawtooth in
-    // the (swaying) angle with a ribbon at every tooth edge; a noise field
-    // along the ribbon varies its width, so rays pinch off into flecks of
-    // varying length and thickness, and a sparse extent field keeps only
-    // some of them. Broad rays are few and pale; fine rays are many and
-    // faint. Extent varies faster around the trunk than rays are spaced,
-    // so neighboring rays start and stop independently.
+    // Rays: thin radial ribbons around the trunk. Each set is a stripe
+    // around every whole sector of the (swaying) angle; a noise field along
+    // the ribbon varies its width, so rays pinch off into flecks of varying
+    // length and thickness, and a sparse extent field keeps only some of
+    // them. Broad rays are few and pale; fine rays are many and faint.
+    // Extent varies faster around the trunk than rays are spaced, so
+    // neighboring rays start and stop independently.
     let angle = b.add(Op::Atan2 { y, x })?;
-    let sway = noise(b, Basis::Gradient, [12.0, 12.0, 10.0], SEED + 12, 3)?;
+    let sway = fractal(b, Basis::Gradient, [12.0, 12.0, 10.0], SEED + 12, 3)?;
     let sway = b.add(Op::Remap {
         input: sway,
         from: [-1.0, 1.0],
         to: [-0.12, 0.12],
     })?;
     let angle = b.add(Op::Add { a: angle, b: sway })?;
-    let half = b.add(Op::Constant3 { domain, value: 0.5 })?;
+    let angle = cut.lift(b, angle)?;
     let rays = |b: &mut ProgramBuilder,
                 count: f32,
                 edge: f32,
@@ -315,46 +420,35 @@ pub fn wood_color(b: &mut ProgramBuilder) -> Result<NodeId, ProgramError> {
                 seed: u64|
      -> Result<NodeId, ProgramError> {
         // A phase keeps the sawn test planes, which pass through angle 0,
-        // off a ray edge.
+        // off a ray.
         let sectors = b.add(Op::Remap {
             input: angle,
             from: [0.0, core::f32::consts::TAU],
             to: [0.37, count + 0.37],
         })?;
-        let sector = b.add(Op::Fract { input: sectors })?;
-        let offset = b.add(Op::Sub { a: sector, b: half })?;
-        let offset = b.add(Op::Abs { input: offset })?;
-        // Width varies along each ribbon: the ribbon is `edge` wide at
-        // most, thinning to nothing where the noise is low.
-        let width = b.add(Op::Noise3 {
-            basis: Basis::Gradient,
-            domain,
-            frequency: width_frequency,
-            seed,
-        })?;
+        // Width varies along each ribbon: within `edge` of a whole sector
+        // at most, thinning to nothing where the noise is low.
+        let width = noise(b, Basis::Gradient, width_frequency, seed)?;
         let width = b.add(Op::Remap {
             input: width,
             from: [-1.0, 1.0],
             to: [-edge, edge],
         })?;
-        let offset = b.add(Op::Add {
-            a: offset,
-            b: width,
+        let ray = b.add(Op::Wave {
+            input: sectors,
+            shift: width,
+            shape: WaveShape::Triangle,
+            from: [edge, edge * 0.6],
+            to: [0.0, 1.0],
         })?;
-        let ray = ramp(b, offset, [0.5 - edge, 0.5 - edge * 0.6], [0.0, 1.0])?;
-        let extent = b.add(Op::Noise3 {
-            basis: Basis::Value,
-            domain,
-            frequency: extent_frequency,
-            seed: seed + 1,
-        })?;
+        let extent = noise(b, Basis::Value, extent_frequency, seed + 1)?;
         let extent = ramp(b, extent, extent_cut, [0.0, 1.0])?;
         b.add(Op::Mul { a: ray, b: extent })
     };
     // Broad rays run centimeters radially and along the trunk, so their
     // extent varies slowly (40 cells a meter): on end grain they read as
-    // radial streaks, not flecks. They stay wide enough (about a
-    // millimeter at a 15 cm radius) to survive 2 mm texels.
+    // radial streaks, not flecks. They are about a millimeter wide at a
+    // 15 cm radius.
     let broad = rays(
         b,
         131.0,
@@ -373,10 +467,7 @@ pub fn wood_color(b: &mut ProgramBuilder) -> Result<NodeId, ProgramError> {
         [0.0, 0.2],
         SEED + 18,
     )?;
-    let faint = b.add(Op::Constant3 {
-        domain,
-        value: 0.45,
-    })?;
+    let faint = cut.constant(b, 0.45)?;
     let fine = b.add(Op::Mul { a: fine, b: faint })?;
     let ray = b.add(Op::Max { a: broad, b: fine })?;
 
@@ -399,7 +490,8 @@ pub fn wood_color(b: &mut ProgramBuilder) -> Result<NodeId, ProgramError> {
         b: ray_color,
         t: ray,
     })?;
-    let mottle = noise(b, Basis::Gradient, [4.0, 4.0, 1.0], SEED + 14, 3)?;
+    let mottle = fractal(b, Basis::Gradient, [4.0, 4.0, 1.0], SEED + 14, 3)?;
+    let mottle = cut.lift(b, mottle)?;
     let mottle = b.add(Op::Remap {
         input: mottle,
         from: [-1.0, 1.0],

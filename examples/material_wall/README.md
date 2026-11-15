@@ -59,8 +59,11 @@ painted preset, is built once.
 
 Each swatch is gated on the lab's material report (ranges, invalid values,
 seams against the tiling promise, lowering losses, a whole-material
-transform). A failing swatch is still exported and marked in the index;
-the run fails at the end, once every swatch is baked.
+transform). A failing swatch is still exported and marked in the index
+(`failures` lists what failed); one that cannot be built at all, such as a
+module that breaks its tiling promise, is marked there with `"built":
+false` and no export. Every swatch is checked; the run prints each failure
+and exits non-zero at the end if any failed.
 
 Each swatch is written to `<output-dir>/<family>/<label>/`: the export
 (`material.gltf`, its textures, the raw profile's extra textures such as

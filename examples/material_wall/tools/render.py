@@ -336,20 +336,21 @@ meshes = {}
 def place(swatch, x, z0):
     """Hangs `swatch` centered on `x` with its foot at `z0`, labeled
     beneath."""
-    size = tuple(swatch["size"])
-    if size not in meshes:
-        meshes[size] = pillow(f"pillow {size}", size)
-    mesh = meshes[size].copy()
-    obj = bpy.data.objects.new(f"swatch {swatch['directory']}", mesh)
-    obj.location = (x, 0.0, z0 + SHOWN / 2.0)
-    scene.collection.objects.link(obj)
-    mat = dapple_export.material(
-        os.path.join(wall_dir, swatch["directory"]),
-        name=swatch["directory"],
-        displacement=True,
-        normal_maps=("geometry_coat_normal",),
-    )
-    mesh.materials.append(mat)
+    if swatch.get("built", True):
+        size = tuple(swatch["size"])
+        if size not in meshes:
+            meshes[size] = pillow(f"pillow {size}", size)
+        mesh = meshes[size].copy()
+        obj = bpy.data.objects.new(f"swatch {swatch['directory']}", mesh)
+        obj.location = (x, 0.0, z0 + SHOWN / 2.0)
+        scene.collection.objects.link(obj)
+        mat = dapple_export.material(
+            os.path.join(wall_dir, swatch["directory"]),
+            name=swatch["directory"],
+            displacement=True,
+            normal_maps=("geometry_coat_normal",),
+        )
+        mesh.materials.append(mat)
     passed = swatch["passed"]
     title = swatch["label"].replace("_", " ")
     if not passed:

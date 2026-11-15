@@ -24,9 +24,10 @@ The wall enumerates the library rather than keeping its own list:
   `stone_sill`, `threshold`), the masonry, the bark and the bodies
   (`ceramic_body`, `mortar`, `stone`, `wood`), and leaves out the building
   blocks that need an input material (`finish`, `grime`, `streaks`,
-  `efflorescence`, `edge_wear`, `moss`, `patina`, `rust`, `paint`) or a
-  host resource (`by_example`); they are on the wall inside the assets and
-  packages that use them. A module a package re-expresses
+  `efflorescence`, `edge_wear`, `moss`, `patina`, `rust`, `paint`), a
+  host resource (`by_example`), or that make a map rather than a material
+  (`patches`); they are on the wall inside the assets and packages that
+  use them. A module a package re-expresses
   (`dapple_library.X` beside `dapple_library.packages.X`) is shown as the
   package's presets instead.
 

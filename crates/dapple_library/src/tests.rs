@@ -375,7 +375,7 @@ mod wear {
     use dapple_field::hash::{hash, unit_f32};
     use dapple_field::program::Fingerprint;
     use dapple_field::{Domain, ImageLevel, PortType, Primaries, SampleImage, SamplePolicy, Value};
-    use dapple_material::module::{Bind, Context, Input};
+    use dapple_material::module::{Bind, Context, Input, Output};
     use dapple_material::resource::{
         NoResources, Resolved, ResourceError, ResourceHost, ResourceRef,
     };
@@ -383,7 +383,7 @@ mod wear {
     use dapple_raster::typed::ReductionPolicy;
     use glam::{Vec2, Vec3};
 
-    use crate::modules::{ByExample, EdgeWear, Moss};
+    use crate::modules::{ByExample, EdgeWear, Moss, Patches};
 
     /// A raised square on a flat ground, 64² over one meter.
     fn block() -> Material {
@@ -458,6 +458,48 @@ mod wear {
             cx.diagnostics().reports_at("moss").count() == 1,
             "the deposit is reported"
         );
+    }
+
+    /// Wear comes only where its `where` mask allows, and broad patches
+    /// cover about their share of the surface.
+    #[test]
+    fn edge_wear_comes_where_it_is_allowed() {
+        let grid = super::glazed::tile(64);
+        let mut cx = Context::new(grid, &NoResources);
+        // The block's left half may wear, its right half may not.
+        let left: Vec<Value> = (0..grid.len())
+            .map(|i| Value::Scalar(if i % 64 < 32 { 1.0 } else { 0.0 }))
+            .collect();
+        let mut out = cx
+            .instantiate(
+                &EdgeWear,
+                "wear",
+                Bind::new()
+                    .material("base", block())
+                    .input(
+                        "where",
+                        Input::Map(grid.typed(PortType::Mask, left).unwrap()),
+                    )
+                    .scalar("coverage", 0.05)
+                    .scalar("radius", 0.02),
+            )
+            .unwrap();
+        let worn = out.take_material("material").unwrap();
+        let coat = |x, y| value(&worn, Param::CoatWeight, x, y).scalar().unwrap();
+        assert!(coat(16, 32) < 0.5, "the left arris wore: {}", coat(16, 32));
+        assert!(coat(47, 32) > 0.99, "the right arris kept its coat");
+
+        let out = cx
+            .instantiate(&Patches, "patches", Bind::new().scalar("coverage", 0.3))
+            .unwrap();
+        let Some(Output::Map(mask)) = out.get("mask").cloned() else {
+            panic!("a mask");
+        };
+        let share = (0..grid.len())
+            .map(|i| mask.value(i).component(0).unwrap())
+            .sum::<f32>()
+            / grid.len() as f32;
+        assert!((share - 0.3).abs() < 0.05, "patches cover {share}");
     }
 
     struct Exemplar;
@@ -605,8 +647,12 @@ mod packages {
         let native_worn = realize(
             &VarnishedBoard,
             Bind::new()
-                .color("varnish", Vec3::new(0.55, 0.3, 0.12))
-                .scalar("dirt", 0.3),
+                .color("varnish", Vec3::new(0.3, 0.16, 0.04))
+                .scalar("tint", 0.85)
+                .scalar("roughness", 0.16)
+                .scalar("dullness", 0.12)
+                .scalar("wear", 0.05)
+                .scalar("dirt", 0.08),
         );
         assert_eq!(worn.digest(), native_worn.digest());
         assert_ne!(worn.digest(), packaged.digest());

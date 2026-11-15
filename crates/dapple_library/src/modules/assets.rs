@@ -20,9 +20,9 @@ use dapple_raster::{DistanceTransform, Raster, RasterOp};
 use glam::{Vec2, Vec3};
 
 use super::{
-    CeramicBody, Copper, EdgeWear, Efflorescence, Finish, Grime, Mortar, Moss, Paint, Patina, Rust,
-    Steel, Stone, Streaks, Wood, color, fail, flag, fraction, integer, mask_map, meters,
-    scalar_map, seed, smoothstep,
+    CeramicBody, Copper, EdgeWear, Efflorescence, Finish, Grime, Mortar, Moss, Paint, Patches,
+    Patina, Rust, Steel, Stone, Streaks, Wood, color, fail, flag, fraction, integer, mask_map,
+    meters, scalar_map, seed, smoothstep,
 };
 use crate::glazed_brick::{self, GLAZE, JOINT, Palette, Structure, glazes};
 
@@ -382,7 +382,11 @@ impl Module for StoneSill {
 }
 
 /// An oak board under an amber varnish, lightly dirtied: [`Wood`],
-/// [`Finish`] and [`Grime`].
+/// [`Finish`], [`EdgeWear`] in broad [`Patches`], and [`Grime`]. The
+/// varnish's `tint`, `roughness` and the broad patches of its roughness
+/// (`dullness`) are the finish's; `wear` wears it through to bare wood,
+/// edges first, where the board is walked most: in patches about 35 cm
+/// across over a third of it.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct VarnishedBoard;
 
@@ -393,6 +397,22 @@ impl Module for VarnishedBoard {
             doc: "varnished oak".into(),
             params: vec![
                 color("varnish", Vec3::new(0.78, 0.52, 0.25), "the varnish's tint"),
+                fraction(
+                    "tint",
+                    0.55,
+                    "how strongly the varnish tints the wood under it",
+                ),
+                fraction("roughness", 0.1, "the varnish's roughness"),
+                fraction(
+                    "dullness",
+                    0.04,
+                    "how much the varnish's roughness varies, in broad patches",
+                ),
+                fraction(
+                    "wear",
+                    0.0,
+                    "share of the surface worn through to bare wood: edges first, in broad patches",
+                ),
                 fraction("dirt", 0.08, "share of the surface dirtied"),
                 seed(),
             ],
@@ -410,11 +430,37 @@ impl Module for VarnishedBoard {
                 Bind::new()
                     .material("base", wood)
                     .color("color", args.color("varnish"))
-                    .scalar("tint", 0.55)
-                    .scalar("roughness", 0.1)
+                    .scalar("tint", args.scalar("tint"))
+                    .scalar("roughness", args.scalar("roughness"))
+                    .scalar("roughness_variation", args.scalar("dullness"))
                     .scalar("thickness", 0.00006)
                     .scalar("peel", 0.000004)
                     .scalar("peel_size", 0.006),
+            )?,
+        )?;
+        let traffic = cx
+            .instantiate(
+                &Patches,
+                "traffic",
+                Bind::new()
+                    .scalar("size", 0.35)
+                    .scalar("coverage", 0.4)
+                    .scalar("softness", 0.4),
+            )?
+            .map("mask")
+            .cloned()
+            .ok_or_else(|| fail("traffic"))?;
+        let worn = take(
+            cx.instantiate(
+                &EdgeWear,
+                "wear",
+                Bind::new()
+                    .material("base", varnished)
+                    .input("where", Input::Map(traffic))
+                    .scalar("coverage", args.scalar("wear"))
+                    .scalar("radius", 0.004)
+                    .scalar("roughening", 0.3)
+                    .scalar("lighten", 0.1),
             )?,
         )?;
         let m = take(
@@ -422,7 +468,7 @@ impl Module for VarnishedBoard {
                 &Grime,
                 "dirt",
                 Bind::new()
-                    .material("base", varnished)
+                    .material("base", worn)
                     .scalar("coverage", args.scalar("dirt"))
                     .scalar("strength", 0.5),
             )?,

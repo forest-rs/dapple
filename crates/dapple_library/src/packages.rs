@@ -18,7 +18,7 @@ use dapple_package::Registry;
 
 use crate::modules::{
     AshlarLimestone, Beech, Birch, ByExample, CeramicBody, Copper, EdgeWear, Efflorescence, Finish,
-    FlintWall, GlazedBrickWall, Grime, Marble, Mortar, Moss, Paint, PaintedSteel, Patina,
+    FlintWall, GlazedBrickWall, Grime, Marble, Mortar, Moss, Paint, PaintedSteel, Patches, Patina,
     RomanBrick, RubbleWall, Rust, RustedSteel, ScotsPine, Spruce, Steel, Stone, StoneSill, Streaks,
     TerracottaTile, Threshold, VarnishedBoard, WeatheredCopper, Wood,
 };
@@ -58,6 +58,7 @@ pub fn registry() -> Registry {
         .with(Arc::new(Streaks))
         .with(Arc::new(Efflorescence))
         .with(Arc::new(EdgeWear))
+        .with(Arc::new(Patches))
         .with(Arc::new(Moss))
         .with(Arc::new(ByExample))
         .with(Arc::new(GlazedBrickWall))

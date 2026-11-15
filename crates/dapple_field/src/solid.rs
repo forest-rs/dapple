@@ -449,72 +449,106 @@ fn eval_located3<const GRADIENT: bool>(
             (result, Vec3::new(dfx, dfy, dfz) * lattice.frequency)
         }
         Basis::Gradient => {
-            // Written out rather than `array::map`, which is not always inlined.
-            let columns = [column(-1), column(0), column(1), column(2)];
-            let rows = [row(-1), row(0), row(1), row(2)];
-            let layers = [layer(-1), layer(0), layer(1), layer(2)];
-            // The point's offset from the corners on each axis, and its square.
-            let offsets = |f: f32| [f - -1.0, f - 0.0, f - 1.0, f - 2.0];
-            let (ox, oy, oz) = (offsets(f.x), offsets(f.y), offsets(f.z));
-            let squares = |o: [f32; 4]| [o[0] * o[0], o[1] * o[1], o[2] * o[2], o[3] * o[3]];
-            let (sx, sy, sz) = (squares(ox), squares(oy), squares(oz));
-            // Corner `(i, j, k)` is bit `i + 4j + 16k`, so rising bits run
-            // along rows within layers, the order the sums take. About 14
-            // of the 64 corners fall inside the kernel, and which ones
-            // changes from point to point: a branch per corner mispredicts.
-            // The inside corners are marked without branching and visited
-            // by their bits, a loop whose only unpredictable branch is its
-            // end. A NaN distance is not outside, so its corner counts, as
-            // it did when this was a `continue`.
-            let mut inside = 0_u64;
-            for (k, z2) in sz.into_iter().enumerate() {
-                for (j, y2) in sy.into_iter().enumerate() {
-                    for (i, x2) in sx.into_iter().enumerate() {
-                        let outside = x2 + y2 + z2 >= KERNEL_RADIUS_SQ;
-                        inside |= u64::from(!outside) << (i + 4 * j + 16 * k);
-                    }
-                }
-            }
-            // The `x, y` prefix of the 16 lines of corners along `z`.
-            let mut lines = [0_u64; 16];
-            for (j, row) in rows.into_iter().enumerate() {
-                for (i, column) in columns.into_iter().enumerate() {
-                    lines[i + 4 * j] = mix(column, row);
-                }
-            }
-            let mut sum = 0.0;
-            let mut gradient = Vec3::ZERO;
-            while inside != 0 {
-                let index = inside.trailing_zeros() as usize;
-                inside &= inside - 1;
-                let (i, j, k) = (index & 3, (index >> 2) & 3, index >> 4);
-                let d = Vec3::new(ox[i], oy[j], oz[k]);
-                let r2 = sx[i] + sy[j] + sz[k];
-                let h = mix(lines[index & 15], layers[k]);
-                // The top byte picks the gradient; the next 24 bits give the
-                // corner's value.
-                let [gx, gy, gz] = GRADIENTS[(h >> 56) as usize];
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "a 24-bit integer is exact in f32"
-                )]
-                let value = ((h >> 32) & 0xFF_FFFF) as f32 * (1.0 / 16_777_216.0) * 2.0 - 1.0;
-                let t = 1.0 - r2 / KERNEL_RADIUS_SQ;
-                let t2 = t * t;
-                let term = gx * d.x + gy * d.y + gz * d.z + VALUE_WEIGHT * value;
-                sum += t2 * t2 * term;
-                if GRADIENT {
-                    // d/dd of t⁴·term: 4t³·(−2d/R²)·term + t⁴·g.
-                    let dk = -8.0 * t2 * t / KERNEL_RADIUS_SQ;
-                    gradient += d * (dk * term) + Vec3::new(gx, gy, gz) * (t2 * t2);
-                }
-            }
-            (
-                sum * GRADIENT_SCALE,
-                gradient * GRADIENT_SCALE * lattice.frequency,
-            )
+            // The layers first: wrapped after the lines, they cost 3% on a
+            // periodic lattice.
+            let layers = gradient_layers3(lattice, cell[2]);
+            let lines = gradient_lines3(lattice, prefix, [cell[0], cell[1]]);
+            gradient_sum3::<GRADIENT>(lattice, &lines, &layers, f)
         }
     }
+}
+
+/// The `x, y` hash prefixes of the 16 lines of corners along `z` that
+/// [`Basis::Gradient`] sums around a cell in column `x, y`, from `prefix`,
+/// the seed and tag mixed: line `(i, j)`, `i - 1` and `j - 1` cells from
+/// the column, is `lines[i + 4j]`.
+///
+/// A function of the column alone, so points in the same column share it.
+#[inline(always)]
+fn gradient_lines3(lattice: Lattice3, prefix: u64, [x, y]: [i64; 2]) -> [u64; 16] {
+    let column = |dx: i64| mix(prefix, key(lattice.wrap_axis(0, x + dx)));
+    let row = |dy: i64| key(lattice.wrap_axis(1, y + dy));
+    // Written out rather than `array::map`, which is not always inlined.
+    let columns = [column(-1), column(0), column(1), column(2)];
+    let rows = [row(-1), row(0), row(1), row(2)];
+    let mut lines = [0_u64; 16];
+    for (j, row) in rows.into_iter().enumerate() {
+        for (i, column) in columns.into_iter().enumerate() {
+            lines[i + 4 * j] = mix(column, row);
+        }
+    }
+    lines
+}
+
+/// The keys of the four layers of corners [`Basis::Gradient`] sums around
+/// a cell in layer `z`, `k - 1` cells from it at `k`.
+#[inline(always)]
+fn gradient_layers3(lattice: Lattice3, z: i64) -> [u64; 4] {
+    let layer = |dz: i64| key(lattice.wrap_axis(2, z + dz));
+    [layer(-1), layer(0), layer(1), layer(2)]
+}
+
+/// [`Basis::Gradient`] noise, with its gradient when `GRADIENT`, at `f` in
+/// a cell whose corners' hash prefixes are `lines` and `layers`.
+#[inline(always)]
+fn gradient_sum3<const GRADIENT: bool>(
+    lattice: Lattice3,
+    lines: &[u64; 16],
+    layers: &[u64; 4],
+    f: Vec3,
+) -> (f32, Vec3) {
+    // The point's offset from the corners on each axis, and its square.
+    let offsets = |f: f32| [f - -1.0, f - 0.0, f - 1.0, f - 2.0];
+    let (ox, oy, oz) = (offsets(f.x), offsets(f.y), offsets(f.z));
+    let squares = |o: [f32; 4]| [o[0] * o[0], o[1] * o[1], o[2] * o[2], o[3] * o[3]];
+    let (sx, sy, sz) = (squares(ox), squares(oy), squares(oz));
+    // Corner `(i, j, k)` is bit `i + 4j + 16k`, so rising bits run along
+    // rows within layers, the order the sums take. About 14 of the 64
+    // corners fall inside the kernel, and which ones changes from point to
+    // point: a branch per corner mispredicts. The inside corners are
+    // marked without branching and visited by their bits, a loop whose
+    // only unpredictable branch is its end. A NaN distance is not outside,
+    // so its corner counts, as it did when this was a `continue`.
+    let mut inside = 0_u64;
+    for (k, z2) in sz.into_iter().enumerate() {
+        for (j, y2) in sy.into_iter().enumerate() {
+            for (i, x2) in sx.into_iter().enumerate() {
+                let outside = x2 + y2 + z2 >= KERNEL_RADIUS_SQ;
+                inside |= u64::from(!outside) << (i + 4 * j + 16 * k);
+            }
+        }
+    }
+    let mut sum = 0.0;
+    let mut gradient = Vec3::ZERO;
+    while inside != 0 {
+        let index = inside.trailing_zeros() as usize;
+        inside &= inside - 1;
+        let (i, j, k) = (index & 3, (index >> 2) & 3, index >> 4);
+        let d = Vec3::new(ox[i], oy[j], oz[k]);
+        let r2 = sx[i] + sy[j] + sz[k];
+        let h = mix(lines[index & 15], layers[k]);
+        // The top byte picks the gradient; the next 24 bits give the
+        // corner's value.
+        let [gx, gy, gz] = GRADIENTS[(h >> 56) as usize];
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a 24-bit integer is exact in f32"
+        )]
+        let value = ((h >> 32) & 0xFF_FFFF) as f32 * (1.0 / 16_777_216.0) * 2.0 - 1.0;
+        let t = 1.0 - r2 / KERNEL_RADIUS_SQ;
+        let t2 = t * t;
+        let term = gx * d.x + gy * d.y + gz * d.z + VALUE_WEIGHT * value;
+        sum += t2 * t2 * term;
+        if GRADIENT {
+            // d/dd of t⁴·term: 4t³·(−2d/R²)·term + t⁴·g.
+            let dk = -8.0 * t2 * t / KERNEL_RADIUS_SQ;
+            gradient += d * (dk * term) + Vec3::new(gx, gy, gz) * (t2 * t2);
+        }
+    }
+    (
+        sum * GRADIENT_SCALE,
+        gradient * GRADIENT_SCALE * lattice.frequency,
+    )
 }
 
 /// One octave of 3D lattice noise at the points `(x[i], y[i], z[i])`, into
@@ -526,7 +560,9 @@ fn eval_located3<const GRADIENT: bool>(
 /// in a loop of its own, scalar since the hash's 64-bit multiplies have no
 /// vector form, and blends them over the chunk, vectorized again.
 /// [`Basis::Gradient`], whose corners inside the kernel vary from point to
-/// point, sums each point's corners as [`lattice_eval3`] does.
+/// point, sums each point's corners as [`lattice_eval3`] does, hashing the
+/// prefixes of its 16 lines of corners only when a lane's column of cells
+/// differs from the lane before's.
 pub(crate) fn lattice_lanes3(
     basis: Basis,
     lattice: Lattice3,
@@ -551,11 +587,27 @@ pub(crate) fn lattice_lanes3(
         match basis {
             Basis::Value => value_lanes3(lattice, seed, &cells, &fracs, &mut out[..n]),
             Basis::Gradient => {
-                let [fx, fy, fz] = &fracs;
+                // A cell's corners' hash prefixes are a function of the
+                // cell alone, and neighboring points often share a cell (at
+                // low frequencies, a run of them): a lane in the same
+                // column as the lane before keeps its lines, and in the
+                // same layer its layers. The first lane computes both.
+                let prefix = mix(seed, LATTICE_TAG);
+                let ([cx, cy, cz], [fx, fy, fz]) = (&cells, &fracs);
+                let (mut column, mut layer) = ([cx[0], cy[0]], cz[0]);
+                let mut lines = gradient_lines3(lattice, prefix, column);
+                let mut layers = gradient_layers3(lattice, layer);
                 for (i, out) in out[..n].iter_mut().enumerate() {
-                    let cell = [cells[0][i], cells[1][i], cells[2][i]];
+                    if [cx[i], cy[i]] != column {
+                        column = [cx[i], cy[i]];
+                        lines = gradient_lines3(lattice, prefix, column);
+                    }
+                    if cz[i] != layer {
+                        layer = cz[i];
+                        layers = gradient_layers3(lattice, layer);
+                    }
                     let f = Vec3::new(fx[i], fy[i], fz[i]);
-                    *out = eval_located3::<false>(basis, lattice, seed, cell, f).0;
+                    *out = gradient_sum3::<false>(lattice, &lines, &layers, f).0;
                 }
             }
         }
@@ -1222,7 +1274,7 @@ mod tests {
     use super::*;
     use crate::CellOutput;
     use crate::hash::hash;
-    use crate::lanes::tests::{RUNS, same_bits};
+    use crate::lanes::tests::{RUNS, coherent_cells, same_bits};
 
     /// [`lattice_eval3`] as first written, hashing every corner in full and
     /// skipping the corners outside the kernel by a branch: the reference
@@ -1555,7 +1607,13 @@ mod tests {
         ];
         for (domain, frequency) in test_lattices() {
             let lattice = Lattice3::new(domain, frequency).unwrap();
-            let points = lane_points(frequency);
+            // First the patterns of cells the kernel reuses a lane's cell
+            // across, so that runs begin where they do.
+            let mut points: Vec<Vec3> = coherent_cells(lattice.wrap)
+                .into_iter()
+                .map(|cells| Vec3::from_array(cells) / frequency)
+                .collect();
+            points.extend(lane_points(frequency));
             let [x, y, z] = columns(&points);
             for basis in [Basis::Value, Basis::Gradient] {
                 for (seed, offset) in [0, 7, u64::MAX].into_iter().zip(offsets) {

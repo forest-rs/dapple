@@ -87,6 +87,8 @@ pub(crate) fn locate(p: &[f32], frequency: f32, offset: f32, cell: &mut [i64], f
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use alloc::vec::Vec;
+
     use super::*;
 
     /// Whether `a` and `b` are the same bits, NaN for NaN whatever its
@@ -107,6 +109,97 @@ pub(crate) mod tests {
         2 * WIDTH,
         2 * WIDTH + 3,
     ];
+
+    /// Points, in cells of a lattice of `wrap` cells per period (if
+    /// periodic), in the patterns a kernel that reuses a lane's cell for the
+    /// next lane must get right, from the first lane on, so that the runs a
+    /// test cuts them into begin at chunk boundaries:
+    ///
+    /// - two chunks in one cell, then a chunk in another, so the cell
+    ///   changes exactly from lane 63 to lane 64 when a run starts at the
+    ///   first point, and stays the same across it before;
+    /// - a cell for every lane, alternating between two cells, the second
+    ///   differing on one axis only;
+    /// - walks along each axis, a cell every 5 lanes, crossing cell borders
+    ///   in the middle of chunks;
+    /// - a cell left and revisited;
+    /// - NaN, signed zeros, 10¹⁵, tiny negatives (whose cell is -1 but whose
+    ///   position rounds to its far border) among lanes in one cell, the
+    ///   cell 0 that NaN and zero locate in and another;
+    /// - on a periodic lattice, cells a period apart (one cell, wrapped)
+    ///   side by side, and the cells either side of each wrap.
+    pub(crate) fn coherent_cells<const N: usize>(wrap: Option<[i64; N]>) -> Vec<[f32; N]> {
+        let mut out = Vec::new();
+        // Positions in a cell, different from lane to lane and axis to axis.
+        let at = |cell: [i64; N], lane: usize| {
+            let mut p = [0.0; N];
+            for (axis, p) in p.iter_mut().enumerate() {
+                let step = (lane * 37 + axis * 11) % 64;
+                *p = cell[axis] as f32 + (step as f32 + 0.5) / 64.0;
+            }
+            p
+        };
+        let shift = |cell: [i64; N], axis: usize, by: i64| {
+            let mut cell = cell;
+            cell[axis] += by;
+            cell
+        };
+        let home = [2; N];
+        for i in 0..3 * WIDTH {
+            let cell = if i < 2 * WIDTH {
+                home
+            } else {
+                shift(home, 0, 1)
+            };
+            out.push(at(cell, i));
+        }
+        for axis in 0..N {
+            for i in 0..70 {
+                let cell = if i % 2 == 0 {
+                    home
+                } else {
+                    shift(home, axis, 1)
+                };
+                out.push(at(cell, i));
+            }
+            let walk = (-3_i64..).flat_map(|cell| [cell; 5]);
+            for (i, by) in (0..70).zip(walk) {
+                out.push(at(shift(home, axis, by), i));
+            }
+        }
+        for (i, by) in [0, 0, 0, 1, 1, 0, 0, -1, 0, 0].into_iter().enumerate() {
+            out.push(at(shift(home, N - 1, by), i));
+        }
+        for cell in [home, [0; N], [-1; N]] {
+            let edges = [f32::NAN, 0.0, -0.0, 1e15, -1e-30, -0.0, f32::NAN];
+            for (i, edge) in edges.into_iter().enumerate() {
+                for axis in 0..N {
+                    out.push(at(cell, 2 * i));
+                    let mut p = at(cell, 2 * i + 1);
+                    p[axis] = edge;
+                    out.push(p);
+                    out.push(at(cell, 2 * i + 2));
+                }
+            }
+        }
+        if let Some(period) = wrap {
+            // One cell, unwrapped a period or two apart.
+            for i in 0..40 {
+                let laps = if i % 2 == 0 { 0 } else { [1, 2, 3][i % 3] };
+                let cell = core::array::from_fn(|axis| home[axis] + period[axis] * laps);
+                out.push(at(cell, i));
+            }
+            // Runs of four lanes over the last two cells of a period and
+            // the first two of the next, then the same a period lower.
+            let steps = [-2_i64, -1, 0, 1].into_iter().flat_map(|step| [step; 4]);
+            for (i, step) in (0..32).zip(steps.cycle()) {
+                let laps = if i < 16 { 1 } else { 0 };
+                let cell = core::array::from_fn(|axis| period[axis] * laps + step);
+                out.push(at(cell, i));
+            }
+        }
+        out
+    }
 
     /// The full proof walks all 2³² patterns (a scratch harness, about two
     /// seconds); this keeps the edges and a strided sweep in the suite.

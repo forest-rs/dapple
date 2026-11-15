@@ -660,6 +660,7 @@ starts.
 | `dapple_graph` | Material graph value, typed ports, validation, compilation onto `execution_graph`, tile invalidation, tile budgets, tile reports | yes |
 | `dapple_material` | Material values (OpenPBR bindings, auxiliary channels), the four material operations and their reports, programs over materials, modules, resources | yes |
 | `dapple_package` | Portable material packages: the versioned JSON source of module interfaces, graph bodies and presets, compiled against an engine's modules and capabilities | yes |
+| `dapple_logic` | Typed scalar, integer and flag expressions over named inputs, compiled to one verified `execution_tape` program and evaluated bit for bit as Rust's `f32` arithmetic and `libm` | yes |
 | `dapple_encode` | Per-type mip builders, specular AA, packing profiles; PNG/EXR/KTX2 writing and the `ctt` compressor behind `std` | core yes |
 | `dapple_imaging` | Imaging scenes → coverage fields | yes |
 | `dapple_exedra` | `Chart` domain: rasterized chart layouts, seam gutters | yes |
@@ -680,6 +681,8 @@ leaf-only `dapple` facade crate.
 - `hashbrown`;
 - `libm`, for deterministic transcendentals;
 - `execution_graph` and `invalidation` (forest-rs);
+- `execution_tape` (forest-rs), in `dapple_logic` only, pinned to a git
+  revision until a release carries its `f32` math intrinsics;
 - `imaging` and `kurbo`, in `dapple_imaging` only;
 - `ctt`, `png` and similar, only in `dapple_encode`'s std features;
 - `serde` and `serde_json` (alloc only), in `dapple_package` for the package format

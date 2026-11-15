@@ -1071,6 +1071,8 @@ fn charts_evaluate_each_sample_as_alone() {
         .collect();
     // Raster rows across a board's face, the trunk along `z`.
     points.extend(raster_rows().iter().map(|p| Vec3::new(0.14, p.y, p.x)));
+    // The origin, and the axis through it, where a length has no direction.
+    points.extend([Vec3::ZERO, Vec3::splat(-0.0), Vec3::new(0.0, 0.0, 0.7)]);
     let widths = footprints();
     for program in solids() {
         let mut alone = program.program().evaluator();

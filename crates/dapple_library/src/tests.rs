@@ -502,6 +502,26 @@ mod wear {
         assert!((share - 0.3).abs() < 0.05, "patches cover {share}");
     }
 
+    /// Wearing nothing gives the base as it is.
+    #[test]
+    fn edge_wear_of_nothing_is_the_base() {
+        let mut cx = Context::new(super::glazed::tile(64), &NoResources);
+        for (coverage, strength) in [(0.0, 1.0), (0.05, 0.0)] {
+            let mut out = cx
+                .instantiate(
+                    &EdgeWear,
+                    "wear",
+                    Bind::new()
+                        .material("base", block())
+                        .scalar("coverage", coverage)
+                        .scalar("strength", strength),
+                )
+                .unwrap();
+            let worn = out.take_material("material").unwrap();
+            assert_eq!(worn, block(), "coverage {coverage}, strength {strength}");
+        }
+    }
+
     struct Exemplar;
 
     impl ResourceHost for Exemplar {

@@ -39,9 +39,9 @@ use dapple_raster::{Raster, TexelRect};
 use glam::Vec2;
 
 use crate::identity::ElementKey;
-use crate::program::{Prepared, ProgramInstance, SampleContext, weighted, zero_like};
+use crate::program::{Prepared, ProgramInstance, weighted, zero_like};
 use crate::set::{Bounds, Correspondence, ElementSet, correspondence, value_fits, value_words};
-use dapple_field::scoped::{ContractError, Shape};
+use dapple_field::scoped::{ContractError, ScopedEvaluator, Shape};
 
 /// What to composite, and at which resolution.
 #[derive(Clone, Copy, Debug)]
@@ -150,12 +150,56 @@ pub struct Realized {
     owners: Vec<u32>,
 }
 
-/// Per-composite working state: the prepared instance, hoisted element
-/// values and a spatial index.
+/// Contributions evaluated together: a run of texels is gathered until it
+/// holds this many, then each element's samples in it are evaluated as one
+/// batch.
+const BAND_HITS: usize = 1 << 17;
+
+/// Fills a rectangle of texels: [`Context::fill`], or in tests the
+/// per-sample reference.
+trait Fill: Fn(&Context<'_>, TexelRect, u32, &mut [Vec<Value>], &mut [u32]) {}
+
+impl<F: Fn(&Context<'_>, TexelRect, u32, &mut [Vec<Value>], &mut [u32])> Fill for F {}
+
+/// One element's contribution to one texel, before its program ran.
+#[derive(Copy, Clone)]
+struct Hit {
+    element: u32,
+    coverage: f32,
+    local: Vec2,
+    edge: f32,
+}
+
+/// Buffers kept across the bands of one fill.
+#[derive(Default)]
+struct Scratch {
+    /// The contributors of the texel being gathered.
+    texel: Vec<(usize, f32, Vec2, f32)>,
+    /// The band's contributions, texel after texel, in key order within
+    /// each texel.
+    hits: Vec<Hit>,
+    /// Where each texel's contributions end in `hits`.
+    ends: Vec<usize>,
+    /// Program outputs per hit, `outputs` values each.
+    values: Vec<Value>,
+    /// Hits per element, zero outside a band.
+    count: Vec<u32>,
+    /// Where the next hit of each element goes in `order`.
+    cursor: Vec<u32>,
+    /// The elements with hits in the band.
+    touched: Vec<usize>,
+    /// Hit indices grouped by element, in hit order within each.
+    order: Vec<u32>,
+    locals: Vec<Vec2>,
+    edges: Vec<f32>,
+}
+
+/// Per-composite working state: the prepared instance, the program's
+/// material-scope values and a spatial index.
 struct Context<'a> {
     prepared: Prepared<'a>,
+    base: ScopedEvaluator<'a>,
     set: &'a ElementSet,
-    elements: Vec<Vec<Option<Value>>>,
     buckets: Vec<Vec<(u32, Vec2)>>,
     counts: [u32; 2],
     bucket: Vec2,
@@ -185,7 +229,7 @@ impl<'a> Context<'a> {
             return Err(CompositeError::Background);
         }
         let prepared = c.instance.prepare(c.set)?;
-        let elements = (0..c.set.len()).map(|i| prepared.element(i)).collect();
+        let base = prepared.evaluator();
         #[expect(
             clippy::cast_precision_loss,
             reason = "periods and grid sizes are far below f32's exact integer range"
@@ -235,8 +279,8 @@ impl<'a> Context<'a> {
         }
         Ok(Self {
             prepared,
+            base,
             set: c.set,
-            elements,
             buckets,
             counts,
             bucket,
@@ -287,23 +331,17 @@ impl<'a> Context<'a> {
         }
     }
 
-    /// Composites texel `(x, y)`: every output value, then the owner label.
-    fn texel(
-        &self,
-        x: u32,
-        y: u32,
-        scratch: &mut Vec<(usize, f32, Vec2, f32)>,
-        values: &mut Vec<Value>,
-        out: &mut [Value],
-    ) -> u32 {
-        self.contributors(x, y, scratch);
-        let total: f32 = scratch.iter().map(|c| c.1).sum();
+    /// Combines one texel's contributions, `hits` with their program
+    /// outputs `values` (`out.len()` per hit), into every output value and
+    /// the owner label.
+    fn combine(&self, hits: &[Hit], values: &[Value], out: &mut [Value]) -> u32 {
+        let total: f32 = hits.iter().map(|h| h.coverage).sum();
         let scale = if total > 1.0 { 1.0 / total } else { 1.0 };
         let share = 1.0 - (total * scale);
         let mut owner: Option<(usize, f32)> = None;
-        for &(i, c, _, _) in scratch.iter() {
-            if owner.is_none_or(|(_, best)| c > best) {
-                owner = Some((i, c));
+        for h in hits {
+            if owner.is_none_or(|(_, best)| h.coverage > best) {
+                owner = Some((h.element as usize, h.coverage));
             }
         }
         let owner = owner.filter(|&(_, c)| c * scale >= share);
@@ -316,20 +354,14 @@ impl<'a> Context<'a> {
                 acc
             };
         }
-        for &(i, c, local, edge) in scratch.iter() {
-            let context = SampleContext {
-                local,
-                edge,
-                footprint: self.footprint,
-            };
-            self.prepared.sample(i, &self.elements[i], context, values);
+        for (h, values) in hits.iter().zip(values.chunks_exact(out.len())) {
             for (o, slot) in out.iter_mut().enumerate() {
                 if Shape::of(self.ports[o]) == Shape::Id {
-                    if owner.is_some_and(|(w, _)| w == i) {
+                    if owner.is_some_and(|(w, _)| w == h.element as usize) {
                         *slot = values[o];
                     }
                 } else {
-                    weighted(slot, values[o], c * scale);
+                    weighted(slot, values[o], h.coverage * scale);
                 }
             }
         }
@@ -338,17 +370,124 @@ impl<'a> Context<'a> {
         })
     }
 
+    /// Runs the program for every hit of the band, each element's hits as
+    /// one batch, into `s.values`.
+    fn evaluate(&self, outputs: usize, s: &mut Scratch) {
+        let Scratch {
+            hits,
+            values,
+            count,
+            cursor,
+            touched,
+            order,
+            locals,
+            edges,
+            ..
+        } = s;
+        values.clear();
+        values.resize(hits.len() * outputs, Value::Scalar(0.0));
+        count.resize(self.set.len(), 0);
+        cursor.resize(self.set.len(), 0);
+        touched.clear();
+        for h in hits.iter() {
+            let e = h.element as usize;
+            if count[e] == 0 {
+                touched.push(e);
+            }
+            count[e] += 1;
+        }
+        let mut next = 0;
+        for &e in touched.iter() {
+            cursor[e] = next;
+            next += count[e];
+        }
+        order.clear();
+        order.resize(hits.len(), 0);
+        for (k, h) in hits.iter().enumerate() {
+            let e = h.element as usize;
+            order[cursor[e] as usize] = u32::try_from(k).expect("a band fits u32");
+            cursor[e] += 1;
+        }
+        for &e in touched.iter() {
+            let len = count[e] as usize;
+            count[e] = 0;
+            let run = &order[cursor[e] as usize - len..cursor[e] as usize];
+            locals.clear();
+            edges.clear();
+            for &k in run {
+                locals.push(hits[k as usize].local);
+                edges.push(hits[k as usize].edge);
+            }
+            let mut ran = self.base.clone();
+            self.prepared
+                .element_run(&mut ran, e, locals, edges, self.footprint);
+            for o in 0..outputs {
+                for (&k, &value) in run.iter().zip(ran.output(o)) {
+                    values[k as usize * outputs + o] = value;
+                }
+            }
+        }
+    }
+
     fn fill(&self, rect: TexelRect, width: u32, outputs: &mut [Vec<Value>], owners: &mut [u32]) {
-        let (mut scratch, mut values) = (Vec::new(), Vec::new());
+        self.fill_banded(BAND_HITS, rect, width, outputs, owners);
+    }
+
+    /// [`Self::fill`] with bands of about `band` contributions.
+    fn fill_banded(
+        &self,
+        band: usize,
+        rect: TexelRect,
+        width: u32,
+        outputs: &mut [Vec<Value>],
+        owners: &mut [u32],
+    ) {
+        let mut s = Scratch::default();
         let mut out = vec![Value::Scalar(0.0); outputs.len()];
-        for y in rect.y0..rect.y1 {
-            for x in rect.x0..rect.x1 {
+        let span = (rect.x1 - rect.x0) as usize;
+        let area = span * (rect.y1 - rect.y0) as usize;
+        let at = |k: usize| {
+            let (x, y) = (k % span, k / span);
+            (
+                rect.x0 + u32::try_from(x).expect("inside the rect"),
+                rect.y0 + u32::try_from(y).expect("inside the rect"),
+            )
+        };
+        let mut first = 0;
+        while first < area {
+            // Gather texels until the band is full.
+            s.hits.clear();
+            s.ends.clear();
+            let mut end = first;
+            while end < area && s.hits.len() < band {
+                let (x, y) = at(end);
+                self.contributors(x, y, &mut s.texel);
+                s.hits
+                    .extend(s.texel.iter().map(|&(i, coverage, local, edge)| Hit {
+                        element: u32::try_from(i).expect("fewer than 2^32 elements"),
+                        coverage,
+                        local,
+                        edge,
+                    }));
+                s.ends.push(s.hits.len());
+                end += 1;
+            }
+            self.evaluate(outputs.len(), &mut s);
+            let mut start = 0;
+            for (k, &stop) in (first..end).zip(&s.ends) {
+                let (x, y) = at(k);
                 let t = (y * width + x) as usize;
-                owners[t] = self.texel(x, y, &mut scratch, &mut values, &mut out);
+                owners[t] = self.combine(
+                    &s.hits[start..stop],
+                    &s.values[start * out.len()..stop * out.len()],
+                    &mut out,
+                );
                 for (o, v) in out.iter().enumerate() {
                     outputs[o][t] = *v;
                 }
+                start = stop;
             }
+            first = end;
         }
     }
 }
@@ -366,6 +505,12 @@ impl Realized {
     /// [`CompositeError::Contract`] when the instance binds attributes the
     /// set does not have.
     pub fn composite(c: &Composite<'_>) -> Result<Self, CompositeError> {
+        Self::composite_with(c, |cx, rect, width, outputs, owners| {
+            cx.fill(rect, width, outputs, owners);
+        })
+    }
+
+    fn composite_with(c: &Composite<'_>, fill: impl Fill) -> Result<Self, CompositeError> {
         let context = Context::new(c)?;
         let count = (c.width * c.height) as usize;
         let program = c.instance.program();
@@ -389,7 +534,13 @@ impl Realized {
             x1: c.width,
             y1: c.height,
         };
-        context.fill(rect, c.width, &mut realized.outputs, &mut realized.owners);
+        fill(
+            &context,
+            rect,
+            c.width,
+            &mut realized.outputs,
+            &mut realized.owners,
+        );
         Ok(realized)
     }
 
@@ -401,6 +552,16 @@ impl Realized {
     ///
     /// As [`Realized::composite`].
     pub fn update(&mut self, c: &Composite<'_>) -> Result<UpdateReport, CompositeError> {
+        self.update_with(c, |cx, rect, width, outputs, owners| {
+            cx.fill(rect, width, outputs, owners);
+        })
+    }
+
+    fn update_with(
+        &mut self,
+        c: &Composite<'_>,
+        fill: impl Fill,
+    ) -> Result<UpdateReport, CompositeError> {
         let report = correspondence(&self.set, c.set);
         let same_setup = self.instance == c.instance.fingerprint()
             && self.background == c.background
@@ -408,7 +569,7 @@ impl Realized {
             && self.set.schema() == c.set.schema()
             && self.domain == c.domain;
         if !same_setup {
-            *self = Self::composite(c)?;
+            *self = Self::composite_with(c, fill)?;
             let (tx, ty) = self.tile_counts();
             return Ok(UpdateReport {
                 whole: true,
@@ -463,7 +624,13 @@ impl Realized {
                 let t = u32::try_from(t).expect("tile counts fit u32");
                 let rect = self.tile_rect(t % tx, t / tx);
                 texels += rect.area();
-                context.fill(rect, self.width, &mut self.outputs, &mut self.owners);
+                fill(
+                    &context,
+                    rect,
+                    self.width,
+                    &mut self.outputs,
+                    &mut self.owners,
+                );
                 tiles.push(t);
             }
         }
@@ -702,5 +869,110 @@ impl Realized {
         }
         words.extend(self.owners.iter().map(|&l| u64::from(l)));
         hash(0x636f_6d70_6f73_6974, &words) // the first eight bytes of "composite"
+    }
+}
+
+#[cfg(test)]
+impl Context<'_> {
+    /// The per-sample reference for [`Context::fill`]: every contribution
+    /// evaluated alone from a slot copy of its element's hoisted values, with
+    /// the texel combination as it was before batching.
+    fn fill_reference(
+        &self,
+        rect: TexelRect,
+        width: u32,
+        outputs: &mut [Vec<Value>],
+        owners: &mut [u32],
+    ) {
+        use crate::program::SampleContext;
+        let elements: Vec<Vec<Option<Value>>> = (0..self.set.len())
+            .map(|i| self.prepared.element(i))
+            .collect();
+        let (mut scratch, mut values) = (Vec::new(), Vec::new());
+        let mut out = vec![Value::Scalar(0.0); outputs.len()];
+        for y in rect.y0..rect.y1 {
+            for x in rect.x0..rect.x1 {
+                let t = (y * width + x) as usize;
+                self.contributors(x, y, &mut scratch);
+                let total: f32 = scratch.iter().map(|c| c.1).sum();
+                let scale = if total > 1.0 { 1.0 / total } else { 1.0 };
+                let share = 1.0 - (total * scale);
+                let mut owner: Option<(usize, f32)> = None;
+                for &(i, c, _, _) in &scratch {
+                    if owner.is_none_or(|(_, best)| c > best) {
+                        owner = Some((i, c));
+                    }
+                }
+                let owner = owner.filter(|&(_, c)| c * scale >= share);
+                for (o, slot) in out.iter_mut().enumerate() {
+                    *slot = if Shape::of(self.ports[o]) == Shape::Id {
+                        self.background[o]
+                    } else {
+                        let mut acc = zero_like(self.background[o]);
+                        weighted(&mut acc, self.background[o], share);
+                        acc
+                    };
+                }
+                for &(i, c, local, edge) in &scratch {
+                    let context = SampleContext {
+                        local,
+                        edge,
+                        footprint: self.footprint,
+                    };
+                    self.prepared.sample(i, &elements[i], context, &mut values);
+                    for (o, slot) in out.iter_mut().enumerate() {
+                        if Shape::of(self.ports[o]) == Shape::Id {
+                            if owner.is_some_and(|(w, _)| w == i) {
+                                *slot = values[o];
+                            }
+                        } else {
+                            weighted(slot, values[o], c * scale);
+                        }
+                    }
+                }
+                owners[t] = owner.map_or(0, |(i, _)| u32::try_from(i + 1).unwrap());
+                for (o, v) in out.iter().enumerate() {
+                    outputs[o][t] = *v;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl Realized {
+    /// [`Realized::composite`] with the per-sample reference evaluation.
+    pub(crate) fn composite_reference(c: &Composite<'_>) -> Result<Self, CompositeError> {
+        Self::composite_with(c, |cx, rect, width, outputs, owners| {
+            cx.fill_reference(rect, width, outputs, owners);
+        })
+    }
+
+    /// [`Realized::update`] with the per-sample reference evaluation.
+    pub(crate) fn update_reference(
+        &mut self,
+        c: &Composite<'_>,
+    ) -> Result<UpdateReport, CompositeError> {
+        self.update_with(c, |cx, rect, width, outputs, owners| {
+            cx.fill_reference(rect, width, outputs, owners);
+        })
+    }
+
+    /// [`Realized::composite`] with bands of about `band` contributions.
+    pub(crate) fn composite_banded(c: &Composite<'_>, band: usize) -> Result<Self, CompositeError> {
+        Self::composite_with(c, |cx, rect, width, outputs, owners| {
+            cx.fill_banded(band, rect, width, outputs, owners);
+        })
+    }
+
+    /// [`Realized::update`] with bands of about `band` contributions.
+    pub(crate) fn update_banded(
+        &mut self,
+        c: &Composite<'_>,
+        band: usize,
+    ) -> Result<UpdateReport, CompositeError> {
+        self.update_with(c, |cx, rect, width, outputs, owners| {
+            cx.fill_banded(band, rect, width, outputs, owners);
+        })
     }
 }

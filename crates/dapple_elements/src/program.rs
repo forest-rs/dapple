@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 
 use dapple_field::hash::hash;
 use dapple_field::scoped::{
-    ContractError, Scope, ScopedProgram, Shape, name_word, value_fits, value_words,
+    ContractError, Scope, ScopedEvaluator, ScopedProgram, Shape, name_word, value_fits, value_words,
 };
 use dapple_field::{Footprint, Value};
 use glam::{Vec2, Vec3};
@@ -291,6 +291,7 @@ pub(crate) struct Prepared<'a> {
 }
 
 /// What the compositor knows about one sample of one element.
+#[cfg(test)]
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct SampleContext {
     pub(crate) local: Vec2,
@@ -298,23 +299,75 @@ pub(crate) struct SampleContext {
     pub(crate) footprint: Footprint,
 }
 
-impl Prepared<'_> {
+impl<'a> Prepared<'a> {
+    /// An evaluator of the program with the material-scope nodes hoisted:
+    /// the start of every element's evaluator, cloned per element.
+    pub(crate) fn evaluator(&self) -> ScopedEvaluator<'a> {
+        let mut evaluator = self.instance.program.evaluator();
+        evaluator.hoist(
+            |s| s == Scope::Material,
+            &mut |input| self.input(input, 0),
+            Footprint::POINT,
+        );
+        evaluator
+    }
+
+    /// Evaluates the program at the samples of element `i`, one per entry
+    /// of `locals` and `edges`, in `evaluator`, a fresh clone of
+    /// [`Self::evaluator`]: the element-scope nodes once for the element,
+    /// the rest over the whole run. The evaluator's outputs then hold the
+    /// run's values.
+    pub(crate) fn element_run(
+        &self,
+        evaluator: &mut ScopedEvaluator<'a>,
+        i: usize,
+        locals: &[Vec2],
+        edges: &[f32],
+        footprint: Footprint,
+    ) {
+        evaluator.hoist(
+            |s| s.within(Scope::Element),
+            &mut |input| self.input(input, i),
+            Footprint::POINT,
+        );
+        evaluator.eval_batch(
+            locals.len(),
+            &mut |input, values| match &self.instance.bindings[input as usize] {
+                Binding::LocalPosition => {
+                    for (value, &local) in values.iter_mut().zip(locals) {
+                        *value = Value::Vector2(local);
+                    }
+                }
+                Binding::EdgeDistance => {
+                    for (value, &edge) in values.iter_mut().zip(edges) {
+                        *value = Value::Scalar(edge);
+                    }
+                }
+                _ => values.fill(self.input(input, i)),
+            },
+            footprint,
+        );
+    }
+
     /// Evaluates every node of material or element scope for element `i`;
-    /// sample-scope nodes are left empty.
+    /// sample-scope nodes are left empty. The per-sample reference the
+    /// batched path is tested against.
+    #[cfg(test)]
     pub(crate) fn element(&self, i: usize) -> Vec<Option<Value>> {
         let p = &self.instance.program;
         let mut values = alloc::vec![None; p.nodes().len()];
         p.evaluate(
             &mut values,
             |s| s.within(Scope::Element),
-            &mut |input| self.input(input, i, None),
+            &mut |input| self.input(input, i),
             Footprint::POINT,
         );
         values
     }
 
     /// Evaluates the outputs at one sample of element `i`, reusing
-    /// `element`'s hoisted values.
+    /// `element`'s hoisted values. The per-sample reference.
+    #[cfg(test)]
     pub(crate) fn sample(
         &self,
         i: usize,
@@ -327,7 +380,11 @@ impl Prepared<'_> {
         p.evaluate(
             &mut values,
             |_| true,
-            &mut |input| self.input(input, i, Some(context)),
+            &mut |input| match &self.instance.bindings[input as usize] {
+                Binding::LocalPosition => Value::Vector2(context.local),
+                Binding::EdgeDistance => Value::Scalar(context.edge),
+                _ => self.input(input, i),
+            },
             context.footprint,
         );
         out.clear();
@@ -338,7 +395,7 @@ impl Prepared<'_> {
         );
     }
 
-    fn input(&self, i: u32, element: usize, context: Option<SampleContext>) -> Value {
+    fn input(&self, i: u32, element: usize) -> Value {
         let i = i as usize;
         match &self.instance.bindings[i] {
             Binding::Constant(value) => *value,
@@ -349,8 +406,9 @@ impl Prepared<'_> {
             Binding::HalfSize => Value::Vector2(self.set.half_size(element)),
             #[expect(clippy::cast_precision_loss, reason = "variant indices are small")]
             Binding::Variant => Value::Scalar(self.set.variant(element) as f32),
-            Binding::LocalPosition => Value::Vector2(context.expect("sample scope").local),
-            Binding::EdgeDistance => Value::Scalar(context.expect("sample scope").edge),
+            Binding::LocalPosition | Binding::EdgeDistance => {
+                unreachable!("per-sample inputs are given by the caller")
+            }
             Binding::RegionRandom(_)
             | Binding::RegionArea
             | Binding::RegionCentroid

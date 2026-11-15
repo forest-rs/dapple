@@ -389,7 +389,7 @@ pub struct VarnishedBoard;
 impl Module for VarnishedBoard {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId::new("dapple_library.varnished_board", 3),
+            id: ModuleId::new("dapple_library.varnished_board", 4),
             doc: "varnished oak".into(),
             params: vec![
                 color("varnish", Vec3::new(0.78, 0.52, 0.25), "the varnish's tint"),
@@ -440,7 +440,7 @@ pub struct Threshold;
 impl Module for Threshold {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId::new("dapple_library.threshold", 3),
+            id: ModuleId::new("dapple_library.threshold", 4),
             doc: "a limestone step and an oiled oak tread".into(),
             params: vec![seed()],
             inputs: vec![],

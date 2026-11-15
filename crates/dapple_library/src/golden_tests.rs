@@ -61,7 +61,7 @@ const GOLDEN: &[(&str, u32, &str, u64)] = &[
     ),
     ("dapple_library.mortar", 1, "defaults", 0x7d7af7ff89a382bd),
     ("dapple_library.stone", 1, "defaults", 0x2891423ad38f175c),
-    ("dapple_library.wood", 3, "defaults", 0x45db44112ae94428),
+    ("dapple_library.wood", 4, "defaults", 0x8a1960cc82ffcc72),
     ("dapple_library.finish", 1, "defaults", 0x199c80122b1b655e),
     ("dapple_library.grime", 1, "defaults", 0x8a022ded6de17e71),
     ("dapple_library.streaks", 1, "defaults", 0x94b52e36dd387279),
@@ -98,15 +98,15 @@ const GOLDEN: &[(&str, u32, &str, u64)] = &[
     ),
     (
         "dapple_library.varnished_board",
-        3,
+        4,
         "defaults",
-        0xd22193f8254b0990,
+        0xdae887a77bd0ceee,
     ),
     (
         "dapple_library.threshold",
-        3,
+        4,
         "defaults",
-        0x0df410ff779f9223,
+        0x71f6768665c7dc9a,
     ),
     (
         "dapple_library.beech_bark",
@@ -188,15 +188,15 @@ const GOLDEN: &[(&str, u32, &str, u64)] = &[
     ),
     (
         "dapple_library.packages.varnished_board",
-        3,
+        4,
         "defaults",
-        0xd22193f8254b0990,
+        0xdae887a77bd0ceee,
     ),
     (
         "dapple_library.packages.varnished_board",
-        3,
+        4,
         "preset:dark_and_worn",
-        0x7da58ba76a9928c8,
+        0xa9eb34243749d8bc,
     ),
     (
         "dapple_library.packages.weathered_copper",

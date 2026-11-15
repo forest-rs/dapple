@@ -951,9 +951,11 @@ mod wood {
             squared += d.length_squared() / 3.0;
         }
         let rms = libm::sqrtf(squared / coarse.len() as f32);
-        // About 0.012; point-sampled rings and rays (a `fract` of the
-        // radius and angle) gave 0.026.
-        assert!(rms < 0.016, "rms {rms} against the downsampled bake");
+        // About 0.019, nearly all of it the earlywood pores, which fade to
+        // their ramp's floor rather than its mean (0.004 without them);
+        // point-sampled rings and rays (a `fract` of the radius and angle)
+        // gave 0.026.
+        assert!(rms < 0.021, "rms {rms} against the downsampled bake");
     }
 }
 

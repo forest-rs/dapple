@@ -55,8 +55,8 @@ all of its cost is per-call setup, which isolates what a per-call evaluator
 costs; `small` is a fractal with an abs and a remap; `small_color` mixes two
 colors by a fractal; `bark_height` and `bark_color` are the library's oak
 bark, cellular plates under warps, a realistically deep program;
-`oak_board` is the library's solid oak wood sliced as the wood module cuts
-its board, the solid path of `material/instantiate/varnished_board`.
+`oak_board` is the library's oak wood cut on a board's face as the wood
+module cuts it, the field path of `material/instantiate/varnished_board`.
 
 ## `build`
 

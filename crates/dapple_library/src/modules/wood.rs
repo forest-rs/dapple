@@ -7,7 +7,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use dapple_field::Value;
-use dapple_field::program::Op;
 use dapple_material::module::{
     Args, Context, Interface, Module, ModuleError, ModuleId, Output, OutputDecl, OutputKind,
     Outputs,
@@ -19,10 +18,12 @@ use super::{fraction, integer, meters, realize, scalar_channel, seed};
 use crate::glazed_brick::WOOD;
 use crate::oak;
 
-/// Oak, flat-sawn from a solid log ([`oak::wood_color`]): the board's face
-/// is a plane `offset` from the pith, running along the trunk, so its
+/// Oak, flat-sawn from a solid log ([`oak::wood_face_color`]): the board's
+/// face is a plane `offset` from the pith, running along the trunk, so its
 /// figure is real growth rings cut tangentially (cathedrals), not a
 /// painted pattern. The seed moves the cut along the trunk and around it.
+/// Rings and rays are band-limited by the grid's texels as they cross the
+/// face, so a coarse grid shows them faded toward their mean, not aliased.
 ///
 /// Latewood reads darker and, weathered, stands a little proud
 /// (`relief`); roughness follows the rings.
@@ -32,7 +33,7 @@ pub struct Wood;
 impl Module for Wood {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId::new("dapple_library.wood", 1),
+            id: ModuleId::new("dapple_library.wood", 2),
             doc: "flat-sawn oak".into(),
             params: vec![
                 meters(
@@ -64,16 +65,15 @@ impl Module for Wood {
         let offset = args.scalar("offset");
         let (s, c) = (libm::sinf(turn), libm::cosf(turn));
         let color = realize(grid, |b, _| {
-            let solid = oak::wood_color(b)?;
-            b.add(Op::Slice {
-                input: solid,
-                // Across the board is tangential to the rings at `offset`
-                // from the pith; along it runs up the trunk.
-                origin: [offset * c, offset * s, along],
-                u: [0.0, 0.0, 1.0],
-                v: [-s, c, 0.0],
-                domain: dapple_field::Domain::Plane,
-            })
+            // Across the board is tangential to the rings at `offset` from
+            // the pith; along it runs up the trunk. Cut on the face, the
+            // rings and rays are band-limited by how fast they cross it.
+            oak::wood_face_color(
+                b,
+                [offset * c, offset * s, along],
+                [0.0, 0.0, 1.0],
+                [-s, c, 0.0],
+            )
         })?;
         let n = grid.len();
         let (mut heights, mut roughs, mut colors) = (

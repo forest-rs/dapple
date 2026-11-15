@@ -816,6 +816,80 @@ mod breadth {
     }
 }
 
+mod wood {
+    use alloc::vec::Vec;
+
+    use dapple_field::{Edge, Value};
+    use dapple_material::module::{Bind, Context};
+    use dapple_material::resource::NoResources;
+    use dapple_material::{Channel, Grid, Param};
+    use glam::{Vec2, Vec3};
+
+    use crate::modules::Wood;
+
+    /// The board's linear base color over 10 × 4 cm at `texel` meters.
+    fn board(texel: f32) -> (u32, Vec<Vec3>) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "small whole texel counts"
+        )]
+        let (w, h) = (
+            libm::roundf(0.1 / texel) as u32,
+            libm::roundf(0.04 / texel) as u32,
+        );
+        let grid = Grid {
+            width: w,
+            height: h,
+            origin: Vec2::new(0.3, -0.02),
+            texel: Vec2::splat(texel),
+            edge: Edge::Clamp,
+        };
+        let mut cx = Context::new(grid, &NoResources);
+        let m = cx
+            .instantiate(&Wood, "board", Bind::new())
+            .unwrap()
+            .take_material("material")
+            .unwrap();
+        let Some(Channel::Map(colors)) = m.param(Param::BaseColor) else {
+            panic!("a base color map");
+        };
+        let colors = (0..colors.len())
+            .map(|i| match colors.value(i) {
+                Value::Vector3(c) => c,
+                other => panic!("a color, not {other:?}"),
+            })
+            .collect();
+        (w, colors)
+    }
+
+    /// Baked at 4 mm, the board is close to its 0.5 mm bake averaged over
+    /// each 4 mm texel: rings (5.5 mm apart) and rays (about a millimeter
+    /// wide) fade to their mean rather than alias.
+    #[test]
+    fn a_coarse_board_is_a_downsample_of_a_fine_one() {
+        let (fine_width, fine) = board(0.0005);
+        let (width, coarse) = board(0.004);
+        let k = 8;
+        let mut squared = 0.0;
+        for (i, &c) in coarse.iter().enumerate() {
+            let (x, y) = (i % width as usize, i / width as usize);
+            let mut sum = Vec3::ZERO;
+            for j in 0..k {
+                for l in 0..k {
+                    sum += fine[(y * k + j) * fine_width as usize + x * k + l];
+                }
+            }
+            let d = c - sum / (k * k) as f32;
+            squared += d.length_squared() / 3.0;
+        }
+        let rms = libm::sqrtf(squared / coarse.len() as f32);
+        // About 0.012; point-sampled rings and rays (a `fract` of the
+        // radius and angle) gave 0.026.
+        assert!(rms < 0.016, "rms {rms} against the downsampled bake");
+    }
+}
+
 mod coverage {
     use alloc::vec::Vec;
 
@@ -1262,6 +1336,40 @@ mod rows {
             })
             .unwrap();
         assert_rows("oak board", &b.finish_value(board).unwrap());
+        // And cut on the face, as the wood module cuts it.
+        let mut b = ProgramBuilder::new();
+        let face = oak::wood_face_color(&mut b, [0.14, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0])
+            .unwrap();
+        assert_rows("oak face", &b.finish_value(face).unwrap());
+    }
+
+    /// At a point footprint, the face cut is the solid sliced, bit for bit:
+    /// slicing commutes with everything after it.
+    #[test]
+    fn the_oak_face_is_the_sliced_solid_at_a_point() {
+        let (origin, u, v) = ([0.11, 0.07, 0.3], [0.0, 0.0, 1.0], [-0.54, 0.84, 0.0]);
+        let mut b = ProgramBuilder::new();
+        let solid = oak::wood_color(&mut b).unwrap();
+        let sliced = b
+            .add(Op::Slice {
+                input: solid,
+                origin,
+                u,
+                v,
+                domain: Domain::Plane,
+            })
+            .unwrap();
+        let sliced = b.finish_value(sliced).unwrap();
+        let mut b = ProgramBuilder::new();
+        let face = oak::wood_face_color(&mut b, origin, u, v).unwrap();
+        let face = b.finish_value(face).unwrap();
+        for p in points() {
+            assert_eq!(
+                bits(face.eval(p, Footprint::POINT)),
+                bits(sliced.eval(p, Footprint::POINT)),
+                "at {p}"
+            );
+        }
     }
 
     #[test]

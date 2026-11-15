@@ -638,6 +638,12 @@ impl Module for RustedSteel {
 /// glossy as `gloss`, chipped over `chipping` of the surface, then
 /// [`Rust`] by `age` where the chips bare the metal, creeping under the
 /// paint and bleeding down over it as far as `wetness` says.
+///
+/// `weather` ages it all with one knob: the paint is chipped over at least
+/// `0.5 * weather * weather` of the surface and chalked at least
+/// `0.9 * weather`, the steel rusted at least `weather`, and the topcoat no
+/// glossier than `1 - 0.85 * weather`. At 0 (the default) every other
+/// parameter is as set.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct PaintedSteel;
 
@@ -661,6 +667,13 @@ impl Module for PaintedSteel {
                 fraction("fade", 0.3, "how far the topcoat has chalked"),
                 fraction("age", 0.4, "how far the bared steel has rusted"),
                 fraction("wetness", 0.6, "how much water's paths decide where"),
+                fraction(
+                    "weather",
+                    0.0,
+                    "years outdoors in one knob: the paint at least this chipped and chalked, \
+                     the steel at least this rusted, the topcoat no glossier than this allows; \
+                     0 leaves the other parameters as set",
+                ),
                 seed(),
             ],
             inputs: vec![],
@@ -669,6 +682,9 @@ impl Module for PaintedSteel {
     }
 
     fn build(&self, cx: &mut Context<'_>, args: &Args) -> Result<Outputs, ModuleError> {
+        // The package derives the same values with expressions; these are
+        // the same operations in the same order, so the same bits.
+        let weather = args.scalar("weather");
         let steel = take(cx.instantiate(&Steel, "steel", Bind::new())?)?;
         let painted = take(
             cx.instantiate(
@@ -677,9 +693,12 @@ impl Module for PaintedSteel {
                 Bind::new()
                     .material("base", steel)
                     .color("color", args.color("paint"))
-                    .scalar("gloss", args.scalar("gloss"))
-                    .scalar("chipping", args.scalar("chipping"))
-                    .scalar("fade", args.scalar("fade")),
+                    .scalar("gloss", args.scalar("gloss").min(1.0 - 0.85 * weather))
+                    .scalar(
+                        "chipping",
+                        args.scalar("chipping").max(0.5 * weather * weather),
+                    )
+                    .scalar("fade", args.scalar("fade").max(0.9 * weather)),
             )?,
         )?;
         let m = take(
@@ -688,7 +707,7 @@ impl Module for PaintedSteel {
                 "rust",
                 Bind::new()
                     .material("base", painted)
-                    .scalar("age", args.scalar("age"))
+                    .scalar("age", args.scalar("age").max(weather))
                     .scalar("wetness", args.scalar("wetness")),
             )?,
         )?;

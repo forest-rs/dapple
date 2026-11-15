@@ -8,7 +8,7 @@ through `dapple_export`, and renders the presets in Blender.
 |---|---|---|
 | `copper` | `weathered_copper.json`: `copper` → `patina` | `bright`, `tarnished`, `streaked`, `verdigris` |
 | `steel` | `rusted_steel.json`: `steel` → `rust` | `fresh`, `flash_rusted`, `rusting`, `pitted` |
-| `painted` | `painted_steel.json`: `steel` → `paint` → `rust` | `new`, `chipped`, `weeping`, `derelict` |
+| `painted` | `painted_steel.json`: `steel` → `paint` → `rust` | `new`, `chipped`, `weeping`, `weathered`, `derelict` |
 
 ## Bake
 

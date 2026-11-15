@@ -32,7 +32,9 @@ pub const WEATHERED_COPPER: &str = include_str!("../packages/weathered_copper.js
 /// `rusting` and `pitted`.
 pub const RUSTED_STEEL: &str = include_str!("../packages/rusted_steel.json");
 /// [`PaintedSteel`]'s package source, with presets `new`, `chipped`,
-/// `weeping` and `derelict`.
+/// `weeping`, `weathered` and `derelict`. Its `weather` knob derives the
+/// paint's gloss, chipping and fade and the rust's age through expression
+/// bindings; `weathered` sets nothing else.
 pub const PAINTED_STEEL: &str = include_str!("../packages/painted_steel.json");
 
 /// Every package this crate ships, as source. A package added to the

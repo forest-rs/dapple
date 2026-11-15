@@ -135,6 +135,18 @@ costs with no backend installed (against a build before it, for
 `graph/clean_run`, whose few nanoseconds make it the only case where that is
 visible), and the `_captured` cases what capturing adds.
 
+## `package`
+
+Packages, from the library's shipped sources.
+
+- `package/compile/<package>`: `Registry::compile` of each package
+  (`varnished_board`, `weathered_copper`, `rusted_steel`, `painted_steel`)
+  from its parsed source. `painted_steel` binds four step parameters to
+  expressions, so its time includes checking them and compiling and
+  verifying their `execution_tape` program; the others have none.
+- `package/logic/painted_steel`: one run of that program at the package's
+  defaults: what every instance of the package does before its steps.
+
 ## `material`
 
 The material layer on two real library modules: `varnished_board` (oak, a

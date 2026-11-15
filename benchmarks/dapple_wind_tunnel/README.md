@@ -146,6 +146,11 @@ Packages, from the library's shipped sources.
   verifying their `execution_tape` program; the others have none.
 - `package/logic/painted_steel`: one run of that program at the package's
   defaults: what every instance of the package does before its steps.
+- `package/instantiate/varnished_board/<case>` (`defaults`,
+  `dark_and_worn`): `Context::instantiate` of the compiled varnished-board
+  package on a wrapping 256 by 256 grid, as `material/instantiate`. At its
+  defaults (`wear` 0) its guarded traffic patches and edge wear are
+  skipped; the worn preset makes them.
 
 ## `material`
 

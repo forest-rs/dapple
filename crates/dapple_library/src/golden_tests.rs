@@ -189,13 +189,13 @@ const GOLDEN: &[(&str, u32, &str, u64)] = &[
     ),
     (
         "dapple_library.packages.varnished_board",
-        6,
+        7,
         "defaults",
         0xede4df63ca79eed1,
     ),
     (
         "dapple_library.packages.varnished_board",
-        6,
+        7,
         "preset:dark_and_worn",
         0x2f4ba93cea0bfabd,
     ),

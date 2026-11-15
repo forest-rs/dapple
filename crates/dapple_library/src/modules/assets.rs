@@ -386,7 +386,8 @@ impl Module for StoneSill {
 /// varnish's `tint`, `roughness` and the broad patches of its roughness
 /// (`dullness`) are the finish's; `wear` wears it through to bare wood,
 /// edges first, where the board is walked most: in patches about 35 cm
-/// across over a third of it.
+/// across over a third of it. At `wear` 0 neither the patches nor the wear
+/// is made; the diagnostics list them as skipped.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct VarnishedBoard;
 
@@ -438,16 +439,13 @@ impl Module for VarnishedBoard {
                     .scalar("peel_size", 0.006),
             )?,
         )?;
-        let wear = Bind::new()
-            .material("base", varnished)
-            .scalar("coverage", args.scalar("wear"))
-            .scalar("radius", 0.004)
-            .scalar("roughening", 0.3)
-            .scalar("lighten", 0.1);
-        // Where nothing wears, edge wear gives the varnish as it is, the
-        // patches it would wear in unread: they are not made.
-        let wear = if args.scalar("wear") == 0.0 {
-            wear
+        // Where nothing wears, edge wear would give the varnish as it is,
+        // and the patches it would wear in would go unread: neither is
+        // made.
+        let worn = if args.scalar("wear") == 0.0 {
+            cx.skip("traffic", Patches.interface().id);
+            cx.skip("wear", EdgeWear.interface().id);
+            varnished
         } else {
             let traffic = cx
                 .instantiate(
@@ -461,9 +459,20 @@ impl Module for VarnishedBoard {
                 .map("mask")
                 .cloned()
                 .ok_or_else(|| fail("traffic"))?;
-            wear.input("where", Input::Map(traffic))
+            take(
+                cx.instantiate(
+                    &EdgeWear,
+                    "wear",
+                    Bind::new()
+                        .material("base", varnished)
+                        .input("where", Input::Map(traffic))
+                        .scalar("coverage", args.scalar("wear"))
+                        .scalar("radius", 0.004)
+                        .scalar("roughening", 0.3)
+                        .scalar("lighten", 0.1),
+                )?,
+            )?
         };
-        let worn = take(cx.instantiate(&EdgeWear, "wear", wear)?)?;
         let m = take(
             cx.instantiate(
                 &Grime,

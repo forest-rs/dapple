@@ -368,5 +368,5 @@ fn grids_one_field_apart_keep_apart() {
         }
     }
     let s = cache.stats();
-    assert_eq!((s.misses, s.hits), (20, 4), "{s}");
+    assert_eq!((s.misses, s.hits), (16, 4), "{s}");
 }

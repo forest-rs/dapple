@@ -4,6 +4,8 @@
 //! The execution artifact: a package checked against an engine and
 //! resolved into a [`Module`].
 
+use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -11,6 +13,7 @@ use core::fmt;
 
 use dapple_field::hash::hash;
 use dapple_field::scoped::name_word;
+use dapple_logic::{Builder as LogicBuilder, Program, Type, Value};
 use dapple_material::module::{
     Args, Bind, Context, Input, InputKind, Interface, Module, ModuleError, ModuleErrorKind, Output,
     OutputKind, Outputs, ParamKind, ParamValue,
@@ -26,12 +29,16 @@ pub const GRAPH: &str = "dapple.graph";
 pub const RESOURCES: &str = "dapple.resources";
 /// Output semantics checked on every instance.
 pub const SEMANTICS: &str = "dapple.semantics";
+/// Expression bindings ([`ParamBinding::Expr`]), in the language of
+/// [`dapple_logic`] at its first version.
+pub const LOGIC: &str = "dapple.logic";
 
 /// What an engine offers packages: modules by identity, and capabilities
 /// by name and version.
 ///
 /// [`Registry::new`] offers this crate's own capabilities ([`GRAPH`],
-/// [`RESOURCES`] and [`SEMANTICS`], each at version 1) and no modules; a
+/// [`RESOURCES`], [`SEMANTICS`] and [`LOGIC`], each at version 1) and no
+/// modules; a
 /// host registers the modules it links, and may withdraw capabilities it
 /// cannot serve (an engine without an image host has no resources).
 #[derive(Clone)]
@@ -68,7 +75,7 @@ impl Registry {
     pub fn new() -> Self {
         Self {
             modules: Vec::new(),
-            capabilities: [GRAPH, RESOURCES, SEMANTICS]
+            capabilities: [GRAPH, RESOURCES, SEMANTICS, LOGIC]
                 .map(|n| Capability::new(n, 1))
                 .into(),
         }
@@ -142,6 +149,89 @@ impl Registry {
 enum Arg {
     Value(ParamValue),
     Param(String),
+    /// The package's expression of this index.
+    Derived(usize),
+}
+
+/// The type an expression has where it binds or reads a parameter of
+/// `kind`, if expressions handle that kind.
+const fn logic_type(kind: ParamKind) -> Option<Type> {
+    match kind {
+        ParamKind::Scalar { .. } => Some(Type::Scalar),
+        ParamKind::Integer { .. } => Some(Type::Integer),
+        ParamKind::Flag => Some(Type::Flag),
+        ParamKind::Color | ParamKind::Seed => None,
+    }
+}
+
+/// One expression binding: where it binds, and what.
+#[derive(Clone, Debug)]
+struct Binding {
+    step: String,
+    name: String,
+    source: String,
+    kind: ParamKind,
+}
+
+/// A package's expressions, compiled into one program.
+#[derive(Clone, Debug)]
+struct Logic {
+    program: Program,
+    /// The package parameters the program reads, in argument order.
+    inputs: Vec<String>,
+    /// Each expression's binding, in the program's result order.
+    bindings: Vec<Binding>,
+}
+
+impl Logic {
+    /// Every expression's value under `args`, each checked against the
+    /// parameter it binds.
+    fn derive(&self, cx: &Context<'_>, args: &Args) -> Result<Vec<ParamValue>, ModuleError> {
+        let fail = |i: usize, reason: &'static str| {
+            let b = &self.bindings[i];
+            ModuleError {
+                path: if cx.path().is_empty() {
+                    b.step.clone()
+                } else {
+                    format!("{}/{}", cx.path(), b.step)
+                },
+                kind: Box::new(ModuleErrorKind::InvalidParam {
+                    name: format!("{} = {}", b.name, b.source),
+                    reason,
+                }),
+            }
+        };
+        // The inputs are the interface's scalars, integers and flags, and
+        // the context has checked `args` against the interface.
+        let inputs: Vec<Value> = self
+            .inputs
+            .iter()
+            .filter_map(|n| match args.param(n) {
+                ParamValue::Scalar(v) => Some(Value::Scalar(v)),
+                ParamValue::Integer(v) => Some(Value::Integer(v)),
+                ParamValue::Flag(v) => Some(Value::Flag(v)),
+                ParamValue::Color(_) | ParamValue::Seed(_) => None,
+            })
+            .collect();
+        let values = self.program.run(&inputs).map_err(|e| match e.expression {
+            Some(i) => fail(i, e.kind.reason()),
+            None => ModuleError::body(ModuleErrorKind::Body(e.kind.reason())),
+        })?;
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let v = match v {
+                    Value::Scalar(x) => ParamValue::Scalar(x),
+                    Value::Integer(x) => ParamValue::Integer(x),
+                    Value::Flag(x) => ParamValue::Flag(x),
+                };
+                v.fits(self.bindings[i].kind)
+                    .map_err(|reason| fail(i, reason))?;
+                Ok(v)
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -182,6 +272,7 @@ pub struct CompiledPackage {
     steps: Vec<CompiledStep>,
     outputs: Vec<CompiledOutput>,
     presets: Vec<Preset>,
+    logic: Option<Logic>,
     fingerprint: u64,
 }
 
@@ -198,6 +289,10 @@ impl fmt::Debug for CompiledPackage {
                     .collect::<Vec<_>>(),
             )
             .field("outputs", &self.outputs)
+            .field(
+                "expressions",
+                &self.logic.as_ref().map_or(0, |l| l.bindings.len()),
+            )
             .field("fingerprint", &self.fingerprint)
             .finish_non_exhaustive()
     }
@@ -219,6 +314,14 @@ impl CompiledPackage {
             .iter()
             .find(|p| p.name == name)
             .map(Preset::bind)
+    }
+
+    /// The package's expression bindings compiled into one program, if it
+    /// has any: run once per instance, before the steps. For inspection:
+    /// its size, its bytes, its cost.
+    #[must_use]
+    pub fn logic(&self) -> Option<&Program> {
+        self.logic.as_ref().map(|l| &l.program)
     }
 }
 
@@ -300,6 +403,9 @@ fn compile(registry: &Registry, package: &Package) -> Result<CompiledPackage, Pa
 
     let mut steps: Vec<CompiledStep> = Vec::with_capacity(package.body.steps.len());
     let mut step_interfaces: Vec<Interface> = Vec::new();
+    // A package's expressions compile together into one program, begun at
+    // the first: a package without them does no work for them.
+    let mut logic: Option<(LogicBuilder, Vec<String>, Vec<Binding>)> = None;
     for step in &package.body.steps {
         if step.name.is_empty() || step.name.contains('/') {
             return Err(binding_error(
@@ -345,6 +451,51 @@ fn compile(registry: &Registry, package: &Package) -> Result<CompiledPackage, Pa
                         ));
                     }
                     Arg::Param(p.clone())
+                }
+                ParamBinding::Expr(source) => {
+                    if !declares(LOGIC) {
+                        return Err(PackageError::UndeclaredCapability(Capability::new(
+                            LOGIC, 1,
+                        )));
+                    }
+                    let ty = logic_type(decl.kind).ok_or_else(|| {
+                        binding_error(
+                            &step.name,
+                            name,
+                            "an expression makes only scalars, integers and flags",
+                        )
+                    })?;
+                    let (builder, _, bindings) = match &mut logic {
+                        Some(l) => l,
+                        None => {
+                            // Expressions read the package's scalars,
+                            // integers and flags, in the interface's order.
+                            let mut b = LogicBuilder::new();
+                            let mut inputs = Vec::new();
+                            for p in &interface.params {
+                                if let Some(t) = logic_type(p.kind) {
+                                    b.input(&p.name, t).map_err(PackageError::Logic)?;
+                                    inputs.push(p.name.to_string());
+                                }
+                            }
+                            logic.insert((b, inputs, Vec::new()))
+                        }
+                    };
+                    let index = builder.expression(source, ty).map_err(|error| {
+                        PackageError::Expression {
+                            step: step.name.clone(),
+                            name: name.clone(),
+                            source: source.clone(),
+                            error: Box::new(error),
+                        }
+                    })?;
+                    bindings.push(Binding {
+                        step: step.name.clone(),
+                        name: name.clone(),
+                        source: source.clone(),
+                        kind: decl.kind,
+                    });
+                    Arg::Derived(index)
                 }
             };
             params.push((name.clone(), arg));
@@ -478,6 +629,15 @@ fn compile(registry: &Registry, package: &Package) -> Result<CompiledPackage, Pa
         });
     }
 
+    let logic = match logic {
+        Some((builder, inputs, bindings)) => Some(Logic {
+            program: builder.build().map_err(PackageError::Logic)?,
+            inputs,
+            bindings,
+        }),
+        None => None,
+    };
+
     let mut words = alloc::vec![package.fingerprint()];
     for m in &requires.modules {
         words.extend([name_word(1, &m.name), u64::from(m.version)]);
@@ -485,11 +645,19 @@ fn compile(registry: &Registry, package: &Package) -> Result<CompiledPackage, Pa
     // What the steps' identities do not name: a step that is itself a
     // compiled package can be redefined under its name and version.
     words.extend(steps.iter().map(|s| s.module.definition_fingerprint()));
+    // What the expressions' text does not pin down: the program they
+    // compiled to and the contract it runs under (tape format, `libm`).
+    // Only a package with expressions adds these words, so every other
+    // package keeps its fingerprint.
+    if let Some(l) = &logic {
+        words.extend(l.program.content_words());
+    }
     Ok(CompiledPackage {
         interface,
         steps,
         outputs,
         presets: package.presets.clone(),
+        logic,
         fingerprint: hash(0x636f_6d70, &words), // "comp"
     })
 }
@@ -510,6 +678,12 @@ impl Module for CompiledPackage {
     }
 
     fn build(&self, cx: &mut Context<'_>, args: &Args) -> Result<Outputs, ModuleError> {
+        // Every expression, once, before any step: a value that does not
+        // fit fails the instance before anything is built.
+        let derived = match &self.logic {
+            Some(l) => l.derive(cx, args)?,
+            None => Vec::new(),
+        };
         let mut produced: Vec<Outputs> = Vec::with_capacity(self.steps.len());
         for step in &self.steps {
             let mut bind = Bind::new();
@@ -517,6 +691,9 @@ impl Module for CompiledPackage {
                 let value = match arg {
                     Arg::Value(v) => *v,
                     Arg::Param(p) => args.param(p),
+                    // Bound like a literal: the step's instance key holds
+                    // the value's bits, not the expression.
+                    Arg::Derived(i) => derived[*i],
                 };
                 bind = bind.param(name, value);
             }

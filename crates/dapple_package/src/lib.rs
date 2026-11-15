@@ -15,8 +15,10 @@
 //!   (capabilities at a least version, and the modules it uses at exact
 //!   versions), **presets** (named parameter sets, such as a fit's result),
 //!   and its **body**: a graph of module instances, each binding its
-//!   parameters to literals or to the package's own parameters, and its
-//!   inputs to the package's inputs or to earlier steps' outputs.
+//!   parameters to literals, to the package's own parameters or to
+//!   expressions over them (`{"expr": "max(chipping, 0.5 * weather *
+//!   weather)"}`, in [`dapple_logic`]'s language), and its inputs to the
+//!   package's inputs or to earlier steps' outputs.
 //! - **The execution artifact** ([`CompiledPackage`], from
 //!   [`Registry::compile`]): the source checked against one engine's
 //!   modules and capabilities, every name resolved and every binding's
@@ -35,14 +37,32 @@
 //! Presets can also stand alone ([`PresetSet`]) for modules compiled into
 //! the program.
 //!
-//! Bodies compose modules; they do not yet carry field programs, which
-//! stay inside native modules. A package reaches everything a registered
-//! module exposes and nothing more.
+//! **Expressions** derive step parameters from the package's own: one knob
+//! can drive several steps. Compiling checks every expression's names and
+//! types and compiles all of a package's expressions into one verified
+//! `execution_tape` program ([`CompiledPackage::logic`]); each instance
+//! runs it once, before its steps, and binds the values like literals, so
+//! a step's instance key holds the derived value's bits and two package
+//! arguments that derive the same value share the step's cached instance.
+//! The values are exactly what the same expressions written in Rust over
+//! `libm` compute. A value that does not fit its step parameter (out of
+//! range, or not finite) fails the instance with
+//! [`ModuleErrorKind::InvalidParam`](dapple_material::module::ModuleErrorKind::InvalidParam)
+//! at the step's path, naming the parameter and the expression. A package
+//! that uses expressions requires [`compile::LOGIC`], and its fingerprint
+//! covers the compiled program; a package without them pays nothing and
+//! keeps the fingerprint it had before expressions existed.
+//!
+//! Bodies compose modules; they do not carry field programs, which stay
+//! inside native modules, and their step graph is fixed: an expression
+//! sets a step's parameters, not whether the step runs. A package reaches
+//! everything a registered module exposes and nothing more.
 
 #![no_std]
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use core::fmt;
 
@@ -123,6 +143,23 @@ pub enum PackageError {
         /// What is wrong.
         reason: &'static str,
     },
+    /// A step's expression binding does not check: it does not parse,
+    /// names something that is no scalar, integer or flag parameter of the
+    /// package, or does not make the step parameter's kind.
+    Expression {
+        /// The step.
+        step: String,
+        /// The parameter it binds.
+        name: String,
+        /// The expression.
+        source: String,
+        /// What is wrong, and where in `source` (boxed: it is the largest
+        /// error a package has).
+        error: Box<dapple_logic::Error>,
+    },
+    /// The package's expressions, each of which checks, do not compile
+    /// into one program: a bug in `dapple_logic`.
+    Logic(dapple_logic::Error),
 }
 
 impl fmt::Display for PackageError {
@@ -160,6 +197,13 @@ impl fmt::Display for PackageError {
             Self::UnknownChannel(n) => write!(f, "no channel {n:?}"),
             Self::Binding { step, name, reason } => write!(f, "step {step:?}, {name:?}: {reason}"),
             Self::Output { name, reason } => write!(f, "output {name:?}: {reason}"),
+            Self::Expression {
+                step,
+                name,
+                source,
+                error,
+            } => write!(f, "step {step:?}, {name:?}: in {source:?}, {error}"),
+            Self::Logic(e) => write!(f, "the package's expressions do not compile: {e}"),
         }
     }
 }

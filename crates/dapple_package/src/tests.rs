@@ -9,8 +9,9 @@ use alloc::vec::Vec;
 
 use dapple_field::{Edge, Value};
 use dapple_material::module::{
-    Args, Bind, Context, InputDecl, InputKind, Interface, Module, ModuleError, ModuleErrorKind,
-    ModuleId, Output, OutputDecl, OutputKind, Outputs, ParamDecl, ParamKind, ParamValue, Unit,
+    Args, Bind, Context, InputDecl, InputKind, InstanceCache, Interface, Module, ModuleError,
+    ModuleErrorKind, ModuleId, Output, OutputDecl, OutputKind, Outputs, ParamDecl, ParamKind,
+    ParamValue, Unit,
 };
 use dapple_material::resource::NoResources;
 use dapple_material::{Channel, Grid, Material, Param};
@@ -209,6 +210,10 @@ const DIRTY_PAINT: &str = r#"{
     "outputs": { "material": { "step": "dirt", "output": "material" } }
   }
 }"#;
+
+/// The compiled fingerprint of [`DIRTY_PAINT`], recorded before
+/// expression bindings existed.
+const DIRTY_PAINT_FINGERPRINT: u64 = 0xccd3_8bc3_c441_4fb5;
 
 fn source() -> String {
     DIRTY_PAINT.into()
@@ -543,4 +548,247 @@ fn fingerprints_cover_a_package_definition_not_only_its_name() {
     let ((ma, fa), (mb, fb)) = (fingerprint(&oa), fingerprint(&ob));
     assert_ne!(ma, mb);
     assert_ne!(fa, fb, "an outer package covers its steps' definitions");
+}
+
+/// The dirty paint package with its dirt step's amount derived:
+/// `expression` in place of `{ "param": "dirt" }`.
+fn derived(expression: &str) -> Package {
+    let text = source()
+        .replace(
+            r#""amount": { "param": "dirt" }"#,
+            &format!(r#""amount": {{ "expr": {expression:?} }}"#),
+        )
+        .replace(
+            r#"{ "name": "dapple.semantics", "version": 1 }"#,
+            r#"{ "name": "dapple.semantics", "version": 1 },
+      { "name": "dapple.logic", "version": 1 }"#,
+        );
+    Package::from_json(&text).expect("reads")
+}
+
+/// The dirty paint package with its dirt step's amount a literal.
+fn literal(amount: f32) -> Package {
+    let mut p = Package::from_json(&source()).expect("reads");
+    p.body.steps[1].params.insert(
+        "amount".into(),
+        crate::source::ParamBinding::Value(ValueSource::Scalar(amount)),
+    );
+    p
+}
+
+#[test]
+fn an_expression_derives_a_step_parameter() {
+    let package = derived("min(dirt, 0.5)");
+    // The written form: the third binding, beside literals and parameters.
+    let text = package.to_json();
+    assert!(
+        text.contains(
+            r#""amount": {
+            "expr": "min(dirt, 0.5)"
+          }"#
+        ),
+        "{text}"
+    );
+    assert_eq!(Package::from_json(&text).unwrap(), package);
+    let compiled = registry().compile(&package).expect("compiles");
+    let program = compiled.logic().expect("one program");
+    assert_eq!(program.outputs(), [dapple_logic::Type::Scalar]);
+    for dirt in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+        let bind = Bind::new().scalar("dirt", dirt);
+        let m = realize(&compiled, bind);
+        let expected = realize(
+            &registry().compile(&literal(dirt.min(0.5))).unwrap(),
+            Bind::new(),
+        );
+        assert_eq!(m, expected, "dirt {dirt}");
+    }
+    // A package without expressions has no program.
+    let plain = registry()
+        .compile(&Package::from_json(&source()).unwrap())
+        .unwrap();
+    assert!(plain.logic().is_none());
+}
+
+#[test]
+fn expressions_are_checked_when_compiled() {
+    let compile = |p: &Package| registry().compile(p).map(|_| ());
+    // A name that is no parameter, with where it is.
+    match compile(&derived("min(dirty, 0.5)")) {
+        Err(PackageError::Expression {
+            step,
+            name,
+            source,
+            error,
+        }) => {
+            assert_eq!((step.as_str(), name.as_str()), ("dirt", "amount"));
+            assert_eq!(source, "min(dirty, 0.5)");
+            assert_eq!(
+                error.kind,
+                dapple_logic::ErrorKind::UnknownName("dirty".into())
+            );
+            assert_eq!(error.span, dapple_logic::Span::new(4, 9));
+        }
+        other => panic!("{other:?}"),
+    }
+    let e = compile(&derived("min(dirty, 0.5)")).unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        r#"step "dirt", "amount": in "min(dirty, 0.5)", at 4..9: no input named "dirty""#
+    );
+    // Syntax, and a value of the wrong kind for the step parameter.
+    assert!(matches!(
+        compile(&derived("dirt *")),
+        Err(PackageError::Expression { .. })
+    ));
+    assert!(matches!(
+        compile(&derived("dirt > 0.5")),
+        Err(PackageError::Expression { error, .. })
+            if matches!(error.kind, dapple_logic::ErrorKind::Mismatch { .. })
+    ));
+    // A color parameter cannot be derived.
+    let mut p = derived("min(dirt, 0.5)");
+    p.body.steps[0].params.insert(
+        "color".into(),
+        crate::source::ParamBinding::Expr("dirt".into()),
+    );
+    assert!(matches!(
+        compile(&p),
+        Err(PackageError::Binding {
+            reason: "an expression makes only scalars, integers and flags",
+            ..
+        })
+    ));
+    // Expressions need the capability, declared and offered.
+    let mut p = derived("min(dirt, 0.5)");
+    p.requires.capabilities.retain(|c| c.name != "dapple.logic");
+    assert_eq!(
+        compile(&p),
+        Err(PackageError::UndeclaredCapability(Capability::new(
+            "dapple.logic",
+            1
+        )))
+    );
+    assert!(matches!(
+        registry()
+            .withdraw("dapple.logic")
+            .compile(&derived("min(dirt, 0.5)")),
+        Err(PackageError::UnknownCapability(_))
+    ));
+}
+
+/// A derived value that does not fit fails the instance at the step,
+/// naming the parameter and the expression.
+#[test]
+fn a_derived_value_that_does_not_fit_names_its_step_and_expression() {
+    let instantiate = |source: &str, dirt: f32| {
+        let compiled = registry().compile(&derived(source)).expect("compiles");
+        let mut cx = Context::new(grid(), &NoResources);
+        cx.instantiate(&compiled, "wall", Bind::new().scalar("dirt", dirt))
+            .map(|_| ())
+    };
+    assert!(instantiate("dirt * 2.0", 0.5).is_ok());
+    for (source, dirt) in [
+        ("dirt * 2.0", 0.75), // out of range
+        ("dirt / 0.0", 0.5),  // infinite
+        ("dirt / 0.0", 0.0),  // NaN
+        ("dirt - 1.0", 0.5),  // below the range
+    ] {
+        let e = instantiate(source, dirt).unwrap_err();
+        assert_eq!(e.path, "wall/dirt", "{source} at {dirt}");
+        assert_eq!(
+            *e.kind,
+            ModuleErrorKind::InvalidParam {
+                name: format!("amount = {source}"),
+                reason: "out of range",
+            },
+            "{source} at {dirt}"
+        );
+    }
+    assert_eq!(
+        instantiate("dirt * 2.0", 0.75).unwrap_err().to_string(),
+        r#"wall/dirt: "amount = dirt * 2.0": out of range"#
+    );
+    // A run that stops (here: `clamp` with its bounds out of order) fails
+    // the same way, saying why.
+    let e = instantiate("clamp(dirt, 0.5, dirt)", 0.25).unwrap_err();
+    assert_eq!(e.path, "wall/dirt");
+    assert_eq!(
+        *e.kind,
+        ModuleErrorKind::InvalidParam {
+            name: "amount = clamp(dirt, 0.5, dirt)".into(),
+            reason: "the expression clamps with bounds out of order",
+        }
+    );
+}
+
+/// A derived value enters the step's instance key by its bits, exactly as
+/// a literal does: two package arguments that derive the same value share
+/// the step's cached instance, and its fingerprint is a literal's.
+#[test]
+fn derived_values_key_step_instances_by_their_bits() {
+    let compiled = registry()
+        .compile(&derived("min(dirt, 0.5)"))
+        .expect("compiles");
+    let mut cache = InstanceCache::new(1 << 24);
+    let build = |dirt: f32, cache: &mut InstanceCache| {
+        let mut cx = Context::new(grid(), &NoResources).with_cache(cache);
+        let m = cx
+            .instantiate(&compiled, "wall", Bind::new().scalar("dirt", dirt))
+            .expect("instantiates")
+            .take_material("material")
+            .expect("a material");
+        (m, cx.into_diagnostics())
+    };
+    let dirt_stats = |cache: &InstanceCache| {
+        let s = cache.stats();
+        let m = s
+            .modules
+            .iter()
+            .find(|m| m.module.name == "test.dirt")
+            .cloned()
+            .expect("the dirt step ran");
+        (m.hits, m.misses)
+    };
+    let (a, da) = build(0.7, &mut cache);
+    assert_eq!(dirt_stats(&cache), (0, 1));
+    // Another package argument, the same derived amount: the package's
+    // own instance misses, its dirt step hits.
+    let (b, db) = build(0.9, &mut cache);
+    assert_eq!(dirt_stats(&cache), (1, 1));
+    assert_eq!(a, b);
+    assert_ne!(da.fingerprint_at("wall"), db.fingerprint_at("wall"));
+    assert_eq!(
+        da.fingerprint_at("wall/dirt"),
+        db.fingerprint_at("wall/dirt")
+    );
+    // Another derived amount misses.
+    build(0.3, &mut cache);
+    assert_eq!(dirt_stats(&cache), (1, 2));
+    // The step's fingerprint is the one a literal of the same bits gives.
+    let mut cx = Context::new(grid(), &NoResources);
+    cx.instantiate(
+        &registry().compile(&literal(0.5)).unwrap(),
+        "wall",
+        Bind::new().scalar("dirt", 0.7),
+    )
+    .expect("instantiates");
+    assert_eq!(
+        cx.diagnostics().fingerprint_at("wall/dirt"),
+        da.fingerprint_at("wall/dirt")
+    );
+}
+
+/// A package's fingerprint covers its expressions' program; a package
+/// without expressions keeps the fingerprint it had before they existed.
+#[test]
+fn fingerprints_cover_expressions_and_only_where_there_are_some() {
+    let compile = |p: &Package| registry().compile(p).expect("compiles").fingerprint();
+    let (a, b) = (derived("min(dirt, 0.5)"), derived("min(dirt, 0.4)"));
+    assert_ne!(compile(&a), compile(&b));
+    assert_eq!(compile(&a), compile(&derived("min(dirt, 0.5)")), "stable");
+    assert_eq!(
+        compile(&Package::from_json(&source()).unwrap()),
+        DIRTY_PAINT_FINGERPRINT,
+        "recorded before expressions existed"
+    );
 }

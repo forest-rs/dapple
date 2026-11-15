@@ -1247,6 +1247,15 @@ meaning.
   interface names are now `Cow<'static, str>`, borrowed for native modules
   and owned for loaded ones. Bodies compose modules; field programs stay
   inside native modules for now.
+- **Package logic** (`dapple_logic`): a step parameter can be an
+  expression over the package's scalar, integer and flag parameters
+  (`{"expr": "max(chipping, 0.5 * weather * weather)"}`), so one knob
+  drives several steps. A package's expressions compile into one verified
+  `execution_tape` program when the package compiles (names and types
+  checked then) and run once per instance before its steps; the values
+  bind like literals, so instance keys hold their bits. They equal the
+  same expressions written in Rust over `libm`, bit for bit. The step
+  graph stays fixed data: expressions set parameters, not which steps run.
 - **Chart evaluation honors the sampling guarantee**: a solid program whose
   guarantee is point-only (a `fract` of a varying input, like oak's rays
   around the pith) cannot be filtered by a footprint, so

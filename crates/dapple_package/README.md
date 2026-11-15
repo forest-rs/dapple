@@ -6,7 +6,9 @@ Portable material packages for [dapple](../../README.md).
   its interface (typed parameters, inputs including resource requirements,
   outputs with semantic declarations), required engine capabilities and
   module dependencies, presets, and a body that composes registered
-  modules. Versioned, strict about unknown fields and versions, and
+  modules, binding their parameters to literals, to the package's own
+  parameters, or to expressions over them (`{"expr": "min(gloss, 1.0 -
+  0.85 * weather)"}`, compiled through `dapple_logic`). Versioned, strict about unknown fields and versions, and
   canonical, so fingerprints are stable.
 - **Execution artifact** (`CompiledPackage`): the source compiled against a
   `Registry` of modules and capabilities; a `dapple_material` module that

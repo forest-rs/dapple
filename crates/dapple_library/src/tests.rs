@@ -997,11 +997,22 @@ mod wood {
             squared += d.length_squared() / 3.0;
         }
         let rms = libm::sqrtf(squared / coarse.len() as f32);
-        // About 0.019, nearly all of it the earlywood pores, which fade to
-        // their ramp's floor rather than its mean (0.004 without them);
-        // point-sampled rings and rays (a `fract` of the radius and angle)
-        // gave 0.026.
-        assert!(rms < 0.021, "rms {rms} against the downsampled bake");
+        // About 0.016, most of it the earlywood pores (0.004 without
+        // them): a 4 mm texel's average of them still varies, where the
+        // coarse bake has faded them to their mean. Pores that faded to
+        // their ramp's floor gave 0.019; point-sampled rings and rays (a
+        // `fract` of the radius and angle) gave 0.026.
+        assert!(rms < 0.019, "rms {rms} against the downsampled bake");
+        // Sub-texel pores fade to their mean, so the coarse bake is as
+        // light as the fine one (within 0.4%); fading to the floor made it
+        // 4.1% lighter.
+        let mean = |c: &[Vec3]| c.iter().copied().sum::<Vec3>() / c.len() as f32;
+        let (a, b) = (mean(&coarse), mean(&fine));
+        let lighter = (a.x + a.y + a.z) / (b.x + b.y + b.z) - 1.0;
+        assert!(
+            lighter.abs() < 0.006,
+            "the coarse bake is {lighter} lighter"
+        );
     }
 }
 

@@ -174,7 +174,7 @@ fn joint(y: f32, height: f32, width: f32) -> (f32, f32) {
 impl Module for Wood {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId::new("dapple_library.wood", 4),
+            id: ModuleId::new("dapple_library.wood", 5),
             doc: "oak boards, flat-, rift- and quarter-sawn".into(),
             params: vec![
                 meters(

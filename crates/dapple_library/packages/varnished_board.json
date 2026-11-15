@@ -2,13 +2,33 @@
   "format": "dapple.package",
   "version": 1,
   "interface": {
-    "module": { "name": "dapple_library.packages.varnished_board", "version": 4 },
-    "doc": "varnished oak, as a package: wood, an amber varnish and a little dirt",
+    "module": { "name": "dapple_library.packages.varnished_board", "version": 5 },
+    "doc": "varnished oak, as a package: wood, an amber varnish, a little dirt and wear",
     "params": [
       {
         "name": "varnish",
         "doc": "the varnish's tint",
         "type": { "color": { "default": [0.78, 0.52, 0.25] } }
+      },
+      {
+        "name": "tint",
+        "doc": "how strongly the varnish tints the wood under it",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.55 } }
+      },
+      {
+        "name": "roughness",
+        "doc": "the varnish's roughness",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.1 } }
+      },
+      {
+        "name": "dullness",
+        "doc": "how much the varnish's roughness varies, in broad patches",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.04 } }
+      },
+      {
+        "name": "wear",
+        "doc": "share of the surface worn through to bare wood: edges first, in broad patches",
+        "type": { "scalar": { "unit": "fraction", "range": [0.0, 1.0], "default": 0.0 } }
       },
       {
         "name": "dirt",
@@ -33,6 +53,8 @@
     "modules": [
       { "name": "dapple_library.wood", "version": 4 },
       { "name": "dapple_library.finish", "version": 1 },
+      { "name": "dapple_library.patches", "version": 1 },
+      { "name": "dapple_library.edge_wear", "version": 1 },
       { "name": "dapple_library.grime", "version": 1 }
     ]
   },
@@ -40,7 +62,14 @@
     {
       "name": "dark_and_worn",
       "doc": "an old board under a darkened varnish",
-      "values": { "varnish": { "color": [0.55, 0.3, 0.12] }, "dirt": { "scalar": 0.3 } }
+      "values": {
+        "varnish": { "color": [0.3, 0.16, 0.04] },
+        "tint": { "scalar": 0.85 },
+        "roughness": { "scalar": 0.16 },
+        "dullness": { "scalar": 0.12 },
+        "wear": { "scalar": 0.05 },
+        "dirt": { "scalar": 0.08 }
+      }
     }
   ],
   "body": {
@@ -54,13 +83,37 @@
         "module": { "name": "dapple_library.finish", "version": 1 },
         "params": {
           "color": { "param": "varnish" },
-          "tint": { "value": { "scalar": 0.55 } },
-          "roughness": { "value": { "scalar": 0.1 } },
+          "tint": { "param": "tint" },
+          "roughness": { "param": "roughness" },
+          "roughness_variation": { "param": "dullness" },
           "thickness": { "value": { "scalar": 0.00006 } },
           "peel": { "value": { "scalar": 0.000004 } },
           "peel_size": { "value": { "scalar": 0.006 } }
         },
         "inputs": { "base": { "output": { "step": "oak", "output": "material" } } }
+      },
+      {
+        "name": "traffic",
+        "module": { "name": "dapple_library.patches", "version": 1 },
+        "params": {
+          "size": { "value": { "scalar": 0.35 } },
+          "coverage": { "value": { "scalar": 0.4 } },
+          "softness": { "value": { "scalar": 0.4 } }
+        }
+      },
+      {
+        "name": "wear",
+        "module": { "name": "dapple_library.edge_wear", "version": 1 },
+        "params": {
+          "coverage": { "param": "wear" },
+          "radius": { "value": { "scalar": 0.004 } },
+          "roughening": { "value": { "scalar": 0.3 } },
+          "lighten": { "value": { "scalar": 0.1 } }
+        },
+        "inputs": {
+          "base": { "output": { "step": "varnish", "output": "material" } },
+          "where": { "output": { "step": "traffic", "output": "mask" } }
+        }
       },
       {
         "name": "dirt",
@@ -69,7 +122,7 @@
           "coverage": { "param": "dirt" },
           "strength": { "value": { "scalar": 0.5 } }
         },
-        "inputs": { "base": { "output": { "step": "varnish", "output": "material" } } }
+        "inputs": { "base": { "output": { "step": "wear", "output": "material" } } }
       }
     ],
     "outputs": { "material": { "step": "dirt", "output": "material" } }

@@ -77,6 +77,7 @@ const GOLDEN: &[(&str, u32, &str, u64)] = &[
         "defaults",
         0xf7709cabebfff21a,
     ),
+    ("dapple_library.patches", 1, "defaults", 0xe06b4bdf00208174),
     ("dapple_library.moss", 1, "defaults", 0xd970f3d6124df69c),
     (
         "dapple_library.by_example",
@@ -188,15 +189,15 @@ const GOLDEN: &[(&str, u32, &str, u64)] = &[
     ),
     (
         "dapple_library.packages.varnished_board",
-        4,
+        5,
         "defaults",
         0xdae887a77bd0ceee,
     ),
     (
         "dapple_library.packages.varnished_board",
-        4,
+        5,
         "preset:dark_and_worn",
-        0xa9eb34243749d8bc,
+        0xd3a8dfb5d9fdae57,
     ),
     (
         "dapple_library.packages.weathered_copper",

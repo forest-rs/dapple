@@ -18,6 +18,7 @@
 //! | [`Streaks`] | Grime washed down from upward-facing ledges. |
 //! | [`Efflorescence`] | Salts blooming on one surface (mortar), rising from the foot. |
 //! | [`EdgeWear`] | Wear through to the material beneath on convex edges, from curvature. |
+//! | [`Patches`] | A mask of broad, soft patches, for where wear and weathering come. |
 //! | [`Moss`] | Moss where the surface faces up, is hollow or damp, with a fuzz sheen. |
 //! | [`ByExample`] | A material tiled from a host-supplied exemplar by histogram-preserving blending. |
 //! | [`Beech`], [`Birch`], [`ScotsPine`], [`Spruce`] | Bark that follows the stem's girth and height on the trunk. |
@@ -84,7 +85,7 @@ pub use metal::{Copper, Steel};
 pub use mortar::Mortar;
 pub use paint::Paint;
 pub use stone::Stone;
-pub use wear::{ByExample, EdgeWear, Moss};
+pub use wear::{ByExample, EdgeWear, Moss, Patches};
 pub use weathering::{Efflorescence, Grime, Streaks};
 pub use wood::Wood;
 

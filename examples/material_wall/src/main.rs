@@ -23,8 +23,8 @@
 //!   inputs are all optional and which returns a `material`: a surface
 //!   that needs nothing from its host. Modules that need an input material
 //!   (finishes, weathering, corrosion, paint) or a host resource (by
-//!   example) are building blocks, seen on the wall inside the assets and
-//!   packages that use them; a module that a package re-expresses
+//!   example), or that make a map (patches), are building blocks, seen on
+//!   the wall inside the assets and packages that use them; a module that a package re-expresses
 //!   (`dapple_library.X` beside `dapple_library.packages.X`) is shown as
 //!   the package's presets instead.
 //!
@@ -213,9 +213,17 @@ fn swatches() -> Result<(Vec<Swatch>, Vec<LeftOut>)> {
             continue;
         }
         if !showable(&interface) {
+            let makes_material = interface
+                .outputs
+                .iter()
+                .any(|o| o.kind == OutputKind::Material);
             left_out.push(LeftOut {
                 module: interface.id.to_string(),
-                reason: "a building block: needs an input material or resource",
+                reason: if makes_material {
+                    "a building block: needs an input material or resource"
+                } else {
+                    "a building block: makes a map, not a material"
+                },
             });
             continue;
         }

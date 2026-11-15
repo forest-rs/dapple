@@ -21,7 +21,8 @@ use dapple_raster::{GaussianBlur, HeightToNormal, Raster, RasterOp};
 use glam::{Vec2, Vec3};
 
 use super::{
-    color, coverage, fail, fbm, fraction, integer, meters, realize_scalar, scalar, scalar_map, seed,
+    color, coverage, fail, fbm, fraction, integer, mask_map, meters, realize_scalar, scalar,
+    scalar_map, seed,
 };
 use crate::glazed_brick::{MOSS, STONE};
 
@@ -61,9 +62,11 @@ pub(super) fn convexity(base: &Material, radius: f32) -> Result<Raster, ModuleEr
 /// standing proud) at the scale of `radius`, broken up by noise, `coverage`
 /// of the surface wears through to `worn`, the material beneath, selected
 /// over the base with one decision for every channel, on the surface
-/// identity `surface` alone when it is not 0. Without `worn`, the
-/// base itself wears: its coat goes, it roughens by `roughening` and
-/// lightens by `lighten`.
+/// identity `surface` alone when it is not 0, and, given `where`, as much
+/// as that mask allows: an edge outside it does not wear, so wear can come
+/// in patches ([`Patches`]) rather than evenly along every edge. Without
+/// `worn`, the base itself wears: its coat goes, it roughens by
+/// `roughening` and lightens by `lighten`.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct EdgeWear;
 
@@ -102,6 +105,12 @@ impl Module for EdgeWear {
                     kind: InputKind::Material,
                     required: false,
                     doc: "what wear exposes".into(),
+                },
+                InputDecl {
+                    name: "where".into(),
+                    kind: InputKind::Map(PortType::Mask),
+                    required: false,
+                    doc: "where wear may come, weighting the edges".into(),
                 },
             ],
             outputs: material_output(),
@@ -152,6 +161,17 @@ impl Module for EdgeWear {
                     .collect(),
             )?
         };
+        let score = match args.map("where") {
+            None => score,
+            Some(allowed) => grid.raster(
+                score
+                    .values()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &s)| s * allowed.value(i).component(0).unwrap_or(0.0))
+                    .collect(),
+            )?,
+        };
         let worn_mask = coverage(&score, args.scalar("coverage"), 0.01)?;
         let strength = args.scalar("strength");
         let worn_mask = grid.raster(worn_mask.values().iter().map(|v| v * strength).collect())?;
@@ -186,6 +206,42 @@ impl Module for EdgeWear {
         let mut m = cx.record(ops::select(base, &worn, &worn_mask, Transition::Mask)?);
         m.set_tiling(m.tiling().and(score_tiling));
         Ok(Outputs::new().with("material", Output::Material(m)))
+    }
+}
+
+/// Broad patches: a mask covering `coverage` of the surface in soft-edged
+/// patches about `size` across (fBm ranked by percentile, `softness` the
+/// width of their edge in percentile), such as where a floor is walked
+/// most, to say where [`EdgeWear`] and other weathering may come.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct Patches;
+
+impl Module for Patches {
+    fn interface(&self) -> Interface {
+        Interface {
+            id: ModuleId::new("dapple_library.patches", 1),
+            doc: "a mask of broad, soft patches".into(),
+            params: vec![
+                meters("size", [0.01, 10.0], 0.3, "the patches' size"),
+                fraction("coverage", 0.4, "share of the surface in patches"),
+                fraction("softness", 0.15, "how soft their edges are"),
+                seed(),
+            ],
+            inputs: vec![],
+            outputs: vec![OutputDecl {
+                name: "mask".into(),
+                kind: OutputKind::Map(PortType::Mask),
+                doc: "the patches".into(),
+            }],
+        }
+    }
+
+    fn build(&self, cx: &mut Context<'_>, args: &Args) -> Result<Outputs, ModuleError> {
+        let grid = cx.grid();
+        let f = 1.0 / args.scalar("size");
+        let score = realize_scalar(grid, |b, d| fbm(b, d, [f, f], args.seed("patches"), 3))?;
+        let mask = coverage(&score, args.scalar("coverage"), args.scalar("softness"))?;
+        Ok(Outputs::new().with("mask", Output::Map(mask_map(grid, &mask)?)))
     }
 }
 

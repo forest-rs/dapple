@@ -248,7 +248,7 @@ impl Module for Patina {
             seed(),
         ]);
         Interface {
-            id: ModuleId::new("dapple_library.patina", 2),
+            id: ModuleId::new("dapple_library.patina", 3),
             doc: "copper's tarnish, then verdigris where water stays and runs".into(),
             params,
             inputs: vec![base_input()],
@@ -274,36 +274,38 @@ impl Module for Patina {
             fbm(b, d, [28.0, 28.0], args.seed("patches"), 4)
         })?;
         let sheen = realize_scalar(grid, |b, d| fbm(b, d, [7.0, 5.0], args.seed("sheen"), 4))?;
-        // Water spots: where drops dried, a dark ring round a darker disc,
-        // in a few cells of a 3 cm lattice.
-        let spot_cells = |output| {
+        // Tarnish clouds: blotches of every size, broad and soft in some
+        // places, smaller and tighter in others, their edges pulled out of
+        // round by a warp.
+        let warped = |frequency: f32, [purpose, along_x, along_y]: [&str; 3], amount: f32| {
             realize_scalar(grid, |b, d| {
-                b.add(Op::Cellular {
-                    domain: d,
-                    frequency: fit(d, [32.0, 32.0]),
-                    jitter: 0.9,
-                    seed: args.seed("spots"),
-                    output,
+                let clouds = fbm(b, d, [frequency, frequency], args.seed(purpose), 5)?;
+                let w = 0.5 * frequency;
+                let dx = fbm(b, d, [w, w], args.seed(along_x), 3)?;
+                let dy = fbm(b, d, [w, w], args.seed(along_y), 3)?;
+                b.add(Op::Warp {
+                    input: clouds,
+                    dx,
+                    dy,
+                    amount,
                 })
             })
         };
-        let (spot_value, spot_distance) = (
-            spot_cells(CellOutput::CellValue)?,
-            spot_cells(CellOutput::F1)?,
-        );
+        let broad = warped(3.0, ["clouds", "clouds_x", "clouds_y"], 0.12)?;
+        let tight = warped(13.0, ["blotches", "blotches_x", "blotches_y"], 0.03)?;
+        let scales = realize_scalar(grid, |b, d| fbm(b, d, [2.0, 2.0], args.seed("scales"), 3))?;
         let (tarnish, dark) = (args.color("tarnish"), args.color("dark"));
         let n = grid.len();
 
         // Tarnish: the metal's own F0 darkened by the film, as a ratio to
         // fresh copper's, so the brushing and mottle under it still show;
-        // soonest and darkest where water runs and stays, in its runs and
-        // where drops dried. A young film is rose to purplish brown in
-        // patches, where its thickness tints it, before it browns over.
+        // soonest and darkest where water runs and stays and in its runs,
+        // and unevenly, in clouds. A young film is rose to purplish brown
+        // in patches, where its thickness tints it, before it browns over.
         let fresh = super::calibration::COPPER_F0;
         let (to_brown, to_rose, to_dark) = (tarnish / fresh, TARNISH_ROSE_F0 / fresh, dark / fresh);
         let early = smoothstep(0.0, 0.35, age);
         let late = smoothstep(0.2, 0.85, age);
-        let spotting = early * (1.0 - late);
         let mut m = base.clone();
         let mut colors = Vec::with_capacity(n);
         let mut rough = Vec::with_capacity(n);
@@ -312,14 +314,11 @@ impl Module for Patina {
             let s = stain.values()[i];
             let k = wet.metal.values()[i];
             let run = wet.trails.values()[i] * smoothstep(-0.3, 0.5, wet.runs.values()[i]);
-            let spot = if spot_value.values()[i] < 0.06 {
-                let d = spot_distance.values()[i];
-                let ring = smoothstep(0.17, 0.23, d) * smoothstep(0.31, 0.25, d);
-                (0.35 * ring + 0.15 * smoothstep(0.26, 0.18, d)) * spotting
-            } else {
-                0.0
-            };
-            let brown = (early * (0.8 + 0.5 * q + 0.6 * s + 0.4 * run) + spot).clamp(0.0, 1.0);
+            let tightness = smoothstep(-0.3, 0.3, scales.values()[i]);
+            let cloud = broad.values()[i] + (tight.values()[i] - broad.values()[i]) * tightness;
+            let cloud = smoothstep(-0.25, 0.3, cloud + 0.25 * s);
+            let brown =
+                (early * (0.45 + 0.5 * q + 0.25 * s + 0.4 * run + 0.6 * cloud)).clamp(0.0, 1.0);
             let black = (late * (0.8 + 0.4 * q + 0.5 * s + 0.4 * run)).clamp(0.0, 1.0);
             let rose = smoothstep(-0.1, 0.5, sheen.values()[i]) * (1.0 - late);
             let film = Vec3::ONE

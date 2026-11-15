@@ -2,7 +2,7 @@
   "format": "dapple.package",
   "version": 1,
   "interface": {
-    "module": { "name": "dapple_library.packages.painted_steel", "version": 1 },
+    "module": { "name": "dapple_library.packages.painted_steel", "version": 2 },
     "doc": "painted riveted steel, as a package: steel under primer and topcoat, chipped, rusting where the chips bare the metal",
     "params": [
       {
@@ -54,7 +54,7 @@
       { "name": "dapple.semantics", "version": 1 }
     ],
     "modules": [
-      { "name": "dapple_library.steel", "version": 1 },
+      { "name": "dapple_library.steel", "version": 2 },
       { "name": "dapple_library.paint", "version": 1 },
       { "name": "dapple_library.rust", "version": 1 }
     ]
@@ -102,7 +102,7 @@
     "steps": [
       {
         "name": "steel",
-        "module": { "name": "dapple_library.steel", "version": 1 }
+        "module": { "name": "dapple_library.steel", "version": 2 }
       },
       {
         "name": "paint",

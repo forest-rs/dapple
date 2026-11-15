@@ -280,7 +280,10 @@ fn canning(w: f32) -> f32 {
 /// `rivet_pitch` apart along every lap; 0 for a plain plate. The steel's
 /// F0 is iron's ([`IRON_F0`]); `brushing` grinds it along `x`, and
 /// `mill_scale` leaves that share of it under the hot-rolled oxide
-/// (magnetite, F0 [`MILL_SCALE_F0`]), flaking at its edges.
+/// (magnetite, F0 [`MILL_SCALE_F0`]): a thin skin, softly mottled and
+/// bluer where it is thicker (an authored tint about magnetite's neutral
+/// F0), that has spalled off in broad patches whose edges are those of
+/// whole flakes a few centimeters across.
 ///
 /// Steel rusts: see [`super::Rust`]; and takes paint: [`super::Paint`].
 #[derive(Copy, Clone, Debug, Default)]
@@ -289,7 +292,7 @@ pub struct Steel;
 impl Module for Steel {
     fn interface(&self) -> Interface {
         Interface {
-            id: ModuleId::new("dapple_library.steel", 1),
+            id: ModuleId::new("dapple_library.steel", 2),
             doc: "riveted mild-steel plate".into(),
             params: vec![
                 color(
@@ -341,27 +344,47 @@ impl Module for Steel {
         let rough = args.scalar("roughness");
         let f0 = args.color("color");
 
-        // Mill scale: broad blotches, broken up at every scale down to the
-        // flakes it sheds, so its edges are ragged and feathered.
+        // Mill scale: a thin skin, lost in broad patches whose edges are
+        // the edges of whole flakes, centimeters across and irregular,
+        // where it has spalled off.
         let scale_score = realize_scalar(grid, |b, d| {
-            let blotch = fbm(b, d, [9.0, 9.0], args.seed("scale"), 7)?;
-            let flake = b.add(dapple_field::program::Op::Cellular {
+            let blotch = fbm(b, d, [4.0, 4.0], args.seed("scale"), 5)?;
+            let cells = b.add(dapple_field::program::Op::Cellular {
                 domain: d,
-                frequency: fit(d, [110.0, 110.0]),
+                frequency: fit(d, [30.0, 30.0]),
                 jitter: 0.9,
                 seed: args.seed("flakes"),
                 output: CellOutput::CellValue,
             })?;
+            let dx = fbm(b, d, [24.0, 24.0], args.seed("flakes_x"), 3)?;
+            let dy = fbm(b, d, [24.0, 24.0], args.seed("flakes_y"), 3)?;
+            let flake = b.add(dapple_field::program::Op::Warp {
+                input: cells,
+                dx,
+                dy,
+                amount: 0.016,
+            })?;
             let flake = b.add(dapple_field::program::Op::Remap {
                 input: flake,
                 from: [0.0, 1.0],
-                to: [-0.14, 0.14],
+                to: [-0.13, 0.13],
             })?;
-            b.add(dapple_field::program::Op::Add {
-                a: blotch,
-                b: flake,
-            })
+            let ragged = fbm(b, d, [70.0, 70.0], args.seed("ragged"), 3)?;
+            let ragged = b.add(dapple_field::program::Op::Remap {
+                input: ragged,
+                from: [-1.0, 1.0],
+                to: [-0.08, 0.08],
+            })?;
+            let edge = b.add(dapple_field::program::Op::Add {
+                a: flake,
+                b: ragged,
+            })?;
+            b.add(dapple_field::program::Op::Add { a: blotch, b: edge })
         })?;
+        // Within the skin, soft mottling: thicker and bluer in places,
+        // thinner and greyer in others.
+        let cloud = realize_scalar(grid, |b, d| fbm(b, d, [6.0, 6.0], args.seed("cloud"), 5))?;
+        let tint = realize_scalar(grid, |b, d| fbm(b, d, [2.5, 2.5], args.seed("tint"), 3))?;
         let scale = coverage(&scale_score, args.scalar("mill_scale"), 0.03)?;
 
         let n = grid.len();
@@ -414,10 +437,13 @@ impl Module for Steel {
             let s = scale.values()[i];
             let tone = 1.0 + 0.04 * m + 0.06 * brushing * g;
             let bare = (f0 * tone).min(Vec3::ONE);
-            let oxide = MILL_SCALE_F0 * (1.0 + 0.12 * m);
+            let c = cloud.values()[i];
+            let blue = smoothstep(-0.4, 0.4, tint.values()[i] + 0.5 * c);
+            let hue = Vec3::new(1.0, 0.99, 0.97).lerp(Vec3::new(0.86, 0.95, 1.14), blue);
+            let oxide = MILL_SCALE_F0 * hue * (1.0 + 0.2 * c + 0.05 * m);
             metal.color.push(bare.lerp(oxide, s));
             let r = (rough + 0.06 * m + 0.1 * brushing * g.abs()).clamp(0.02, 1.0);
-            metal.roughness.push(r + (0.45 - r) * s);
+            metal.roughness.push(r + (0.45 + 0.08 * c - r) * s);
             // Mill scale is some 50 µm thick.
             metal.height.push(h + 0.00005 * s);
         }

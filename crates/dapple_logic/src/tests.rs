@@ -402,3 +402,85 @@ fn a_program_without_expressions_or_inputs_runs() {
     let p = Builder::new().build().unwrap();
     assert_eq!(p.run(&[]).unwrap(), Vec::<Value>::new());
 }
+
+#[test]
+fn a_conditioned_expression_runs_only_where_its_condition_holds() {
+    let mut b = builder();
+    let wet = b.expression("weather && age > 0.0", Type::Flag).unwrap();
+    let when_wet = b
+        .expression_when("clamp(age, gloss, 1.0)", Type::Scalar, wet, true)
+        .unwrap();
+    let when_dry = b
+        .expression_when("count * 1000000", Type::Integer, wet, false)
+        .unwrap();
+    // A condition can itself be conditioned.
+    let deeper = b
+        .expression_when("count > 2", Type::Flag, wet, true)
+        .unwrap();
+    let deepest = b
+        .expression_when("10 / count", Type::Integer, deeper, true)
+        .unwrap();
+    assert_eq!((when_wet, when_dry, deeper, deepest), (1, 2, 3, 4));
+    let p = b.build().unwrap();
+    // Wet: the first runs, the second does not, though it would overflow.
+    assert_eq!(
+        p.run(&inputs(0.5, 0.25, 5000, true)).unwrap(),
+        vec![
+            Value::Flag(true),
+            Value::Scalar(0.5),
+            Value::Integer(0),
+            Value::Flag(true),
+            Value::Integer(0),
+        ]
+    );
+    // Dry: the first does not run, though its bounds are out of order, and
+    // gives its type's zero; nor does what is conditioned on a result that
+    // did not run (`deeper` is `false`, its placeholder).
+    assert_eq!(
+        p.run(&inputs(0.5, 2.0, 0, false)).unwrap(),
+        vec![
+            Value::Flag(false),
+            Value::Scalar(0.0),
+            Value::Integer(0),
+            Value::Flag(false),
+            Value::Integer(0),
+        ]
+    );
+    // Where an expression runs, what stops it names it.
+    let e = p.run(&inputs(0.5, 2.0, 3, true)).unwrap_err();
+    assert_eq!((e.expression, e.kind), (Some(1), RunErrorKind::ClampBounds));
+    let e = p.run(&inputs(0.5, 0.0, 5000, false)).unwrap_err();
+    assert_eq!((e.expression, e.kind), (Some(2), RunErrorKind::Overflow));
+    // Straight-line or not, no run needs more than the default fuel.
+    assert_eq!(p.fuel(), p.instructions());
+
+    // A condition is an earlier flag expression.
+    let mut b = builder();
+    let age = b.expression("age", Type::Scalar).unwrap();
+    for condition in [age, 1] {
+        let e = b
+            .expression_when("gloss", Type::Scalar, condition, true)
+            .unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Condition(condition));
+        assert_eq!(e.span, Span::default());
+    }
+    assert_eq!(
+        ErrorKind::Condition(1).to_string(),
+        "result 1 is no earlier flag expression"
+    );
+
+    // The condition, and which way it must go, are in the bytes.
+    let build = |holds: bool| {
+        let mut b = builder();
+        let c = b.expression("weather", Type::Flag).unwrap();
+        b.expression_when("age", Type::Scalar, c, holds).unwrap();
+        b.build().unwrap()
+    };
+    let mut plain = builder();
+    plain.expression("weather", Type::Flag).unwrap();
+    plain.expression("age", Type::Scalar).unwrap();
+    let plain = plain.build().unwrap();
+    assert_eq!(build(true).bytes(), build(true).bytes());
+    assert_ne!(build(true).bytes(), build(false).bytes());
+    assert_ne!(build(true).bytes(), plain.bytes());
+}

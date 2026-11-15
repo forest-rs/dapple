@@ -23,7 +23,7 @@ use crate::{
     ValueSource,
 };
 
-fn grid() -> Grid {
+pub(crate) fn grid() -> Grid {
     Grid {
         width: 8,
         height: 8,
@@ -42,7 +42,7 @@ fn material_out() -> Vec<OutputDecl> {
 }
 
 /// Paint whose roughness depends on its instance seed.
-struct Paint;
+pub(crate) struct Paint;
 
 impl Module for Paint {
     fn interface(&self) -> Interface {
@@ -85,7 +85,7 @@ impl Module for Paint {
 }
 
 /// Darkens a material.
-struct Dirt;
+pub(crate) struct Dirt;
 
 impl Module for Dirt {
     fn interface(&self) -> Interface {

@@ -1254,8 +1254,19 @@ meaning.
   `execution_tape` program when the package compiles (names and types
   checked then) and run once per instance before its steps; the values
   bind like literals, so instance keys hold their bits. They equal the
-  same expressions written in Rust over `libm`, bit for bit. The step
-  graph stays fixed data: expressions set parameters, not which steps run.
+  same expressions written in Rust over `libm`, bit for bit.
+- **Guarded steps** (`dapple_package`, `dapple.logic` version 2): a step
+  can say "only do me when": `"when": "moss > 0.0"`, or `"unless"`. The
+  recipe is still a fixed list of steps; some are conditional. A step
+  whose guard does not hold is not instantiated, costs nothing and leaves
+  no cache entry; diagnostics list it as skipped (`Event::Skipped`).
+  Compiling proves nothing reads a step where it might not have run, by
+  comparing condition texts: a step under the same guard may read it, a
+  select (`{"select": {"when", "then", "else"}}`) reads each branch under
+  its side of its condition, and a step's `otherwise` (`{"material":
+  "base"}`) passes its own input through where it does not run, which
+  makes it an optional layer anyone can read. A guarded step's parameter
+  expressions run only where it runs.
 - **Chart evaluation honors the sampling guarantee**: a solid program whose
   guarantee is point-only (a `fract` of a varying input, like oak's rays
   around the pith) cannot be filtered by a footprint, so

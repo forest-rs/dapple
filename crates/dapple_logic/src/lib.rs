@@ -11,6 +11,13 @@
 //! no host calls, and verifies it. The resulting [`Program`] runs that
 //! function on a parked VM under a fuel budget and returns the values.
 //!
+//! An expression can also be added on a condition
+//! ([`Builder::expression_when`]): an earlier flag result, and the value it
+//! must have for the expression to run. Where the condition does not hold,
+//! none of the expression runs, so nothing in it can stop the run, and its
+//! result is a placeholder zero. A package uses this for the parameters of
+//! a step that runs only when a flag holds.
+//!
 //! ```
 //! use dapple_logic::{Builder, Type, Value};
 //!

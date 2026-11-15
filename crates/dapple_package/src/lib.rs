@@ -18,7 +18,8 @@
 //!   parameters to literals, to the package's own parameters or to
 //!   expressions over them (`{"expr": "max(chipping, 0.5 * weather *
 //!   weather)"}`, in [`dapple_logic`]'s language), and its inputs to the
-//!   package's inputs or to earlier steps' outputs.
+//!   package's inputs or to earlier steps' outputs. A step can be
+//!   **guarded** (`"when": "moss > 0.0"`): it runs only where that holds.
 //! - **The execution artifact** ([`CompiledPackage`], from
 //!   [`Registry::compile`]): the source checked against one engine's
 //!   modules and capabilities, every name resolved and every binding's
@@ -53,10 +54,33 @@
 //! covers the compiled program; a package without them pays nothing and
 //! keeps the fingerprint it had before expressions existed.
 //!
+//! **Guards** make some steps conditional: a step with `"when": "<flag
+//! expression>"` runs only where that holds, one with `"unless"` only where
+//! it does not. A step that does not run is not instantiated, costs nothing
+//! and leaves no cache entry; the instance's diagnostics list it as
+//! skipped. The recipe is still a fixed list of steps: some are
+//! conditional. Compiling proves that nothing reads a step's output where
+//! the step might not have run ([`compile`] states the rule): a reader
+//! under the same guard can; a select (`{"select": {"when": ..., "then":
+//! ..., "else": ...}}`) reads each branch under its side of its condition;
+//! and a step's `otherwise` (`{"material": "base"}`) passes its own input
+//! through where it does not run, which makes it an optional layer anyone
+//! can read. A package that uses guards or selects requires
+//! [`compile::LOGIC`] at version [`compile::LOGIC_GUARDS`].
+//!
+//! ```json
+//! { "name": "moss",
+//!   "module": { "name": "dapple_library.moss", "version": 1 },
+//!   "when": "moss > 0.0",
+//!   "params": { "coverage": { "param": "moss" } },
+//!   "inputs": { "base": { "output": { "step": "salts", "output": "material" } } },
+//!   "otherwise": { "material": "base" } }
+//! ```
+//!
 //! Bodies compose modules; they do not carry field programs, which stay
-//! inside native modules, and their step graph is fixed: an expression
-//! sets a step's parameters, not whether the step runs. A package reaches
-//! everything a registered module exposes and nothing more.
+//! inside native modules, and they are not programs: no step runs twice,
+//! and no step is made by an expression. A package reaches everything a
+//! registered module exposes and nothing more.
 
 #![no_std]
 
@@ -143,13 +167,16 @@ pub enum PackageError {
         /// What is wrong.
         reason: &'static str,
     },
-    /// A step's expression binding does not check: it does not parse,
-    /// names something that is no scalar, integer or flag parameter of the
-    /// package, or does not make the step parameter's kind.
+    /// An expression does not check: it does not parse, names something
+    /// that is no scalar, integer or flag parameter of the package, or does
+    /// not make what its place needs (the step parameter's kind, or a flag
+    /// for a guard or a select).
     Expression {
-        /// The step.
+        /// The step; empty for a select of a package output.
         step: String,
-        /// The parameter it binds.
+        /// Where in the step: the parameter it binds, `when` or `unless`
+        /// for a guard, or the input whose select it is; for a package
+        /// output's select, the output.
         name: String,
         /// The expression.
         source: String,
@@ -160,6 +187,23 @@ pub enum PackageError {
     /// The package's expressions, each of which checks, do not compile
     /// into one program: a bug in `dapple_logic`.
     Logic(dapple_logic::Error),
+    /// A binding reads the output of a guarded step where that step might
+    /// not have run: not under its guard, and not an output its `otherwise`
+    /// gives. See [`compile`] for the rule.
+    MaybeSkipped {
+        /// The step that reads; empty for a package output.
+        step: String,
+        /// Its input (or `otherwise` output) that reads, or the package
+        /// output.
+        name: String,
+        /// The guarded step it reads.
+        reads: String,
+        /// That step's condition.
+        condition: String,
+        /// Whether that step runs where the condition holds (`when`) or
+        /// where it does not (`unless`).
+        holds: bool,
+    },
 }
 
 impl fmt::Display for PackageError {
@@ -202,13 +246,41 @@ impl fmt::Display for PackageError {
                 name,
                 source,
                 error,
+            } if step.is_empty() => write!(f, "output {name:?}: in {source:?}, {error}"),
+            Self::Expression {
+                step,
+                name,
+                source,
+                error,
             } => write!(f, "step {step:?}, {name:?}: in {source:?}, {error}"),
             Self::Logic(e) => write!(f, "the package's expressions do not compile: {e}"),
+            Self::MaybeSkipped {
+                step,
+                name,
+                reads,
+                condition,
+                holds,
+            } => {
+                if step.is_empty() {
+                    write!(f, "output {name:?}")?;
+                } else {
+                    write!(f, "step {step:?}, {name:?}")?;
+                }
+                write!(
+                    f,
+                    ": reads step {reads:?}, which runs only {} {condition:?}; read it under the same \
+                     condition (from a step with the same guard, or through a select on it), or \
+                     give {reads:?} an `otherwise`",
+                    if *holds { "when" } else { "unless" }
+                )
+            }
         }
     }
 }
 
 impl core::error::Error for PackageError {}
 
+#[cfg(test)]
+mod guard_tests;
 #[cfg(test)]
 mod tests;

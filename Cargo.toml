@@ -112,7 +112,7 @@ execution_graph = { default-features = false, version = "0.1.0" }
 # for bit with `libm`, O(1) host import dispatch and `math::LIBM_VERSION`); no
 # crates.io release contains them yet. It pins `libm` to exactly the release
 # `LIBM_VERSION` names, which holds this workspace's `libm` there too.
-execution_tape = { default-features = false, git = "https://github.com/forest-rs/execution", rev = "972a47aeb5104de1e0f432163b0c1804c8d43a58" }
+execution_tape = { default-features = false, git = "https://github.com/forest-rs/execution", rev = "4144fa23bad46845615d408242fd60cd61da4a40" }
 # Pinned to one forest-rs/exedra main commit (after the merge of #98, with the
 # keyed hash contract, tangents, attribute streams and layer propagation);
 # no crates.io release contains them yet. Keep every exedra crate on the same

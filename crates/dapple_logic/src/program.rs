@@ -15,7 +15,7 @@ use execution_tape::program::{VERSION_MAJOR, VERSION_MINOR};
 use execution_tape::trace::TraceMask;
 use execution_tape::value::{FuncId, FuncRef, UnitId, Value as TapeValue};
 use execution_tape::verifier::VerifiedProgram;
-use execution_tape::vm::{ExecutionContext, Limits, Trap, Vm};
+use execution_tape::vm::{Limits, Trap, Vm};
 
 use crate::check::{Scope, Typed};
 use crate::emit::{TRAP_CLAMP, TRAP_OVERFLOW, emit, expression_of};
@@ -192,7 +192,6 @@ impl Host for NoHost {
 struct Parked {
     vm: Vm<NoHost>,
     unit: UnitId,
-    scratch: ExecutionContext,
     args: Vec<TapeValue>,
     results: Vec<TapeValue>,
 }
@@ -320,7 +319,6 @@ impl Program {
         Ok(Parked {
             vm,
             unit,
-            scratch: ExecutionContext::new(),
             args: Vec::with_capacity(self.inputs.len()),
             results: Vec::with_capacity(self.outputs.len()),
         })
@@ -366,7 +364,6 @@ impl Program {
         let Parked {
             vm,
             unit,
-            scratch,
             args,
             results,
         } = parked;
@@ -377,8 +374,7 @@ impl Program {
             Value::Flag(b) => TapeValue::Bool(b),
         }));
         results.clear();
-        let ran = vm.run_with_ctx(
-            scratch,
+        let ran = vm.run_into(
             FuncRef::new(*unit, FuncId(0)),
             args,
             results,

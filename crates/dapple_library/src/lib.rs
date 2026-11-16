@@ -47,6 +47,8 @@ pub mod packages;
 pub mod parquet;
 
 #[cfg(test)]
+mod glazed_wall_tests;
+#[cfg(test)]
 mod golden_tests;
 #[cfg(test)]
 mod memo_tests;

@@ -12,7 +12,8 @@
 //! when `wear > 0.0` (guarded steps; the wear's `otherwise` passes the
 //! varnish through). So are the metals: [`WEATHERED_COPPER`],
 //! [`RUSTED_STEEL`] and [`PAINTED_STEEL`], each with presets from fresh to
-//! heavily weathered.
+//! heavily weathered. [`GLAZED_BRICK_WALL`] assembles brick maps and
+//! material operations before its guarded weathering layers.
 
 use alloc::sync::Arc;
 
@@ -41,6 +42,12 @@ pub const RUSTED_STEEL: &str = include_str!("../packages/rusted_steel.json");
 /// bindings; `weathered` sets nothing else.
 pub const PAINTED_STEEL: &str = include_str!("../packages/painted_steel.json");
 
+/// [`GlazedBrickWall`]'s package source, with presets `clean`, `weathered`
+/// and `mossy`. Dirt, streaks and salts run only when `weathered`; moss
+/// runs only when `weathered && moss > 0.0`. Each skipped layer passes its
+/// base through with `otherwise`.
+pub const GLAZED_BRICK_WALL: &str = include_str!("../packages/glazed_brick_wall.json");
+
 /// Every package this crate ships, as source. A package added to the
 /// crate belongs here, so its golden digests are checked.
 pub const PACKAGES: &[&str] = &[
@@ -48,6 +55,7 @@ pub const PACKAGES: &[&str] = &[
     WEATHERED_COPPER,
     RUSTED_STEEL,
     PAINTED_STEEL,
+    GLAZED_BRICK_WALL,
 ];
 
 /// An engine offering this crate's modules and `dapple_package`'s own

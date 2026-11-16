@@ -19,3 +19,10 @@ graph is inspectable, fingerprinted and evaluable like any other.
   F0, with a copper patina (tarnish and verdigris), rust, and chipping
   paint; packaged as weathered copper, rusted steel and painted steel,
   each with presets from fresh to heavily weathered.
+- `packages`: the varnished board, the metals and the glazed brick wall as
+  declarative module steps. The wall exposes the native asset's parameters
+  and ships `clean`, `weathered` and `mossy` presets. `GlazedBricks` supplies
+  its geometry and glaze maps on a 1 m wrapping grid; height detail, mask
+  selection and region assignment assemble them before the finish and
+  guarded weathering layers. Existing native child paths and output bits
+  are preserved.

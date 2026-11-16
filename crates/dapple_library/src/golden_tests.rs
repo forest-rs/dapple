@@ -54,6 +54,30 @@ use crate::packages::{PACKAGES, registry};
 /// version bump adds new entries; the old version's entries go with it.
 const GOLDEN: &[(&str, u32, &str, u64)] = &[
     (
+        "dapple_library.packages.glazed_brick_wall",
+        1,
+        "defaults",
+        0xa4db69f4cfb93dfa,
+    ),
+    (
+        "dapple_library.packages.glazed_brick_wall",
+        1,
+        "preset:clean",
+        0x825f27e035cd377b,
+    ),
+    (
+        "dapple_library.packages.glazed_brick_wall",
+        1,
+        "preset:weathered",
+        0x4edb563f7b21ffcc,
+    ),
+    (
+        "dapple_library.packages.glazed_brick_wall",
+        1,
+        "preset:mossy",
+        0xbf48cf00f58b987f,
+    ),
+    (
         "dapple_library.glazed_bricks",
         1,
         "defaults",

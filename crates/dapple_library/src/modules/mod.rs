@@ -9,6 +9,8 @@
 //!
 //! | Module | Makes |
 //! |---|---|
+//! | [`GlazedBricks`] | Brick cover, height, owners, joint distance and glaze maps. |
+//! | [`HeightDetail`], [`SelectByMask`], [`SetRegion`] | Material operations for composing map-driven assets. |
 //! | [`CeramicBody`] | Fired-clay body: grain, iron speckle, mottling. |
 //! | [`Mortar`] | Sanded lime mortar, tooled into its joints when given their distance map. |
 //! | [`Stone`] | Bedded sandstone or limestone with drag-tooled faces. |

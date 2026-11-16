@@ -16,18 +16,20 @@ The wall enumerates the library rather than keeping its own list:
   the package's order (fresh to weathered). The defaults are left out only
   when a preset sets nothing but defaults, so it shows them already. A
   package's family is its name: `varnished_board`, `weathered_copper`,
-  `rusted_steel`, `painted_steel`.
+  `rusted_steel`, `painted_steel`, `glazed_brick_wall` (defaults, `clean`,
+  `weathered`, `mossy`).
 - **Modules**: every module `dapple_library::packages::registry()`
   registers that is a complete surface by itself, at its defaults. The
   rule: **every input optional, and a `material` output.** That keeps the
-  bare metals (`copper`, `steel`), the assets (`glazed_brick_wall`,
-  `stone_sill`, `threshold`), the masonry, the bark and the bodies
-  (`ceramic_body`, `mortar`, `stone`, `wood`), and leaves out the building
+  bare metals (`copper`, `steel`), the assets (`stone_sill`, `threshold`),
+  the masonry, the bark and the bodies (`ceramic_body`, `mortar`, `stone`,
+  `wood`), and leaves out the building
   blocks that need an input material (`finish`, `grime`, `streaks`,
-  `efflorescence`, `edge_wear`, `moss`, `patina`, `rust`, `paint`), a
+  `efflorescence`, `edge_wear`, `moss`, `patina`, `rust`, `paint`,
+  `height_detail`, `select_by_mask`, `set_region`), a
   host resource (`by_example`), or that make a map rather than a material
-  (`patches`); they are on the wall inside the assets and packages that
-  use them. A module a package re-expresses
+  (`patches`, `glazed_bricks`); they are on the wall inside the assets and
+  packages that use them. A module a package re-expresses
   (`dapple_library.X` beside `dapple_library.packages.X`) is shown as the
   package's presets instead.
 

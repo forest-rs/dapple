@@ -1,0 +1,242 @@
+{
+  "format": "dapple.package",
+  "version": 1,
+  "interface": {
+    "module": {"name": "dapple_library.packages.glazed_brick_wall", "version": 1},
+    "doc": "Victorian glazed brickwork on a 1 m wrapping tile, assembled as package steps",
+    "params": [
+      {
+        "name": "field",
+        "doc": "the field's glaze, above the band",
+        "type": {"color": {"default": [0.74, 0.64, 0.44]}}
+      },
+      {"name": "band", "doc": "the band's glaze", "type": {"color": {"default": [0.04, 0.078, 0.042]}}},
+      {
+        "name": "dado",
+        "doc": "the dado's glaze, at the foot",
+        "type": {"color": {"default": [0.072, 0.033, 0.014]}}
+      },
+      {
+        "name": "dado_courses",
+        "doc": "courses of dado",
+        "type": {"integer": {"range": [0, 14], "default": 4}}
+      },
+      {
+        "name": "band_courses",
+        "doc": "courses of band",
+        "type": {"integer": {"range": [0, 14], "default": 1}}
+      },
+      {
+        "name": "variation",
+        "doc": "brick-to-brick glaze variation",
+        "type": {"scalar": {"unit": "fraction", "range": [0.0, 1.0], "default": 0.5}}
+      },
+      {
+        "name": "battered",
+        "doc": "how chipped the bricks are",
+        "type": {"scalar": {"unit": "fraction", "range": [0.0, 1.0], "default": 0.4}}
+      },
+      {
+        "name": "glaze_roughness",
+        "doc": "the glaze coat's roughness",
+        "type": {"scalar": {"unit": "fraction", "range": [0.0, 1.0], "default": 0.035}}
+      },
+      {
+        "name": "weathered",
+        "doc": "whether to add dirt, streaks and salts",
+        "type": {"flag": {"default": true}}
+      },
+      {
+        "name": "dirt",
+        "doc": "share of the surface covered by dirt",
+        "type": {"scalar": {"unit": "fraction", "range": [0.0, 1.0], "default": 0.35}}
+      },
+      {
+        "name": "streaks",
+        "doc": "share of the surface covered by streaks",
+        "type": {"scalar": {"unit": "fraction", "range": [0.0, 1.0], "default": 0.06}}
+      },
+      {
+        "name": "salts",
+        "doc": "share of the surface covered by salts",
+        "type": {"scalar": {"unit": "fraction", "range": [0.0, 1.0], "default": 0.05}}
+      },
+      {
+        "name": "moss",
+        "doc": "share of the surface covered by moss",
+        "type": {"scalar": {"unit": "fraction", "range": [0.0, 1.0], "default": 0.03}}
+      },
+      {"name": "seed", "doc": "varies the instance; mixed with its path", "type": {"seed": {"default": 0}}}
+    ],
+    "outputs": [
+      {
+        "name": "material",
+        "doc": "the glazed brick wall",
+        "type": "material",
+        "semantics": {"channels": ["base_color", "specular_roughness", "height", "region", "surface"]}
+      }
+    ]
+  },
+  "requires": {
+    "capabilities": [
+      {"name": "dapple.graph", "version": 1},
+      {"name": "dapple.semantics", "version": 1},
+      {"name": "dapple.logic", "version": 2}
+    ],
+    "modules": [
+      {"name": "dapple_library.glazed_bricks", "version": 1},
+      {"name": "dapple_library.ceramic_body", "version": 1},
+      {"name": "dapple_library.mortar", "version": 1},
+      {"name": "dapple_library.height_detail", "version": 1},
+      {"name": "dapple_library.select_by_mask", "version": 1},
+      {"name": "dapple_library.set_region", "version": 1},
+      {"name": "dapple_library.finish", "version": 1},
+      {"name": "dapple_library.edge_wear", "version": 1},
+      {"name": "dapple_library.grime", "version": 1},
+      {"name": "dapple_library.streaks", "version": 1},
+      {"name": "dapple_library.efflorescence", "version": 1},
+      {"name": "dapple_library.moss", "version": 1}
+    ]
+  },
+  "presets": [
+    {
+      "name": "clean",
+      "doc": "fresh glazed brickwork before dirt, streaks, salts or moss",
+      "values": {"weathered": {"flag": false}}
+    },
+    {"name": "weathered", "doc": "dirt, streaks and salts without moss", "values": {"moss": {"scalar": 0.0}}},
+    {
+      "name": "mossy",
+      "doc": "damp brickwork with more dirt, salts, runoff and moss",
+      "values": {
+        "moss": {"scalar": 0.15},
+        "dirt": {"scalar": 0.5},
+        "streaks": {"scalar": 0.12},
+        "salts": {"scalar": 0.08}
+      }
+    }
+  ],
+  "body": {
+    "steps": [
+      {
+        "name": "structure",
+        "module": {"name": "dapple_library.glazed_bricks", "version": 1},
+        "params": {
+          "field": {"param": "field"},
+          "band": {"param": "band"},
+          "dado": {"param": "dado"},
+          "dado_courses": {"param": "dado_courses"},
+          "band_courses": {"param": "band_courses"},
+          "variation": {"param": "variation"},
+          "battered": {"param": "battered"}
+        }
+      },
+      {"name": "body", "module": {"name": "dapple_library.ceramic_body", "version": 1}},
+      {
+        "name": "mortar",
+        "module": {"name": "dapple_library.mortar", "version": 1},
+        "inputs": {"joint": {"output": {"step": "structure", "output": "joint"}}}
+      },
+      {
+        "name": "bricks",
+        "module": {"name": "dapple_library.height_detail", "version": 1},
+        "inputs": {
+          "base": {"output": {"step": "body", "output": "material"}},
+          "height": {"output": {"step": "structure", "output": "height"}}
+        }
+      },
+      {
+        "name": "bedded",
+        "module": {"name": "dapple_library.select_by_mask", "version": 1},
+        "inputs": {
+          "base": {"output": {"step": "mortar", "output": "material"}},
+          "other": {"output": {"step": "bricks", "output": "material"}},
+          "mask": {"output": {"step": "structure", "output": "cover"}}
+        }
+      },
+      {
+        "name": "region",
+        "module": {"name": "dapple_library.set_region", "version": 1},
+        "inputs": {
+          "base": {"output": {"step": "bedded", "output": "material"}},
+          "region": {"output": {"step": "structure", "output": "owners"}}
+        }
+      },
+      {
+        "name": "glaze",
+        "module": {"name": "dapple_library.finish", "version": 1},
+        "params": {
+          "opacity": {"value": {"scalar": 0.94}},
+          "full_thickness": {"value": {"scalar": 0.0003}},
+          "tint": {"value": {"scalar": 0.15}},
+          "roughness": {"param": "glaze_roughness"},
+          "roughness_variation": {"value": {"scalar": 0.03}},
+          "peel": {"value": {"scalar": 6e-06}},
+          "peel_size": {"value": {"scalar": 0.004}},
+          "leveling": {"value": {"scalar": 0.0015}},
+          "surface": {"value": {"integer": 1}}
+        },
+        "inputs": {
+          "base": {"output": {"step": "region", "output": "material"}},
+          "coverage": {"output": {"step": "structure", "output": "coverage"}},
+          "thickness": {"output": {"step": "structure", "output": "thickness"}},
+          "color": {"output": {"step": "structure", "output": "color"}}
+        }
+      },
+      {
+        "name": "worn",
+        "module": {"name": "dapple_library.set_region", "version": 1},
+        "inputs": {
+          "base": {"output": {"step": "bricks", "output": "material"}},
+          "region": {"output": {"step": "structure", "output": "owners"}}
+        }
+      },
+      {
+        "name": "wear",
+        "module": {"name": "dapple_library.edge_wear", "version": 1},
+        "params": {
+          "radius": {"value": {"scalar": 0.002}},
+          "coverage": {"value": {"scalar": 0.006}},
+          "surface": {"value": {"integer": 1}}
+        },
+        "inputs": {
+          "base": {"output": {"step": "glaze", "output": "material"}},
+          "worn": {"output": {"step": "worn", "output": "material"}}
+        }
+      },
+      {
+        "name": "dirt",
+        "module": {"name": "dapple_library.grime", "version": 1},
+        "when": "weathered",
+        "otherwise": {"material": "base"},
+        "params": {"coverage": {"param": "dirt"}},
+        "inputs": {"base": {"output": {"step": "wear", "output": "material"}}}
+      },
+      {
+        "name": "streaks",
+        "module": {"name": "dapple_library.streaks", "version": 1},
+        "when": "weathered",
+        "otherwise": {"material": "base"},
+        "params": {"coverage": {"param": "streaks"}},
+        "inputs": {"base": {"output": {"step": "dirt", "output": "material"}}}
+      },
+      {
+        "name": "salts",
+        "module": {"name": "dapple_library.efflorescence", "version": 1},
+        "when": "weathered",
+        "otherwise": {"material": "base"},
+        "params": {"coverage": {"param": "salts"}, "rise": {"value": {"scalar": 0.35}}},
+        "inputs": {"base": {"output": {"step": "streaks", "output": "material"}}}
+      },
+      {
+        "name": "moss",
+        "module": {"name": "dapple_library.moss", "version": 1},
+        "when": "weathered && moss > 0.0",
+        "otherwise": {"material": "base"},
+        "params": {"coverage": {"param": "moss"}, "damp": {"value": {"scalar": 0.25}}},
+        "inputs": {"base": {"output": {"step": "salts", "output": "material"}}}
+      }
+    ],
+    "outputs": {"material": {"step": "moss", "output": "material"}}
+  }
+}

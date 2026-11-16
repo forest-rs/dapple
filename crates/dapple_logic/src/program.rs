@@ -10,6 +10,7 @@ use core::cell::RefCell;
 use core::fmt;
 
 use execution_tape::host::{Host, HostContext, HostError, SigHash, ValueRef};
+use execution_tape::math::LIBM_VERSION;
 use execution_tape::program::{VERSION_MAJOR, VERSION_MINOR};
 use execution_tape::trace::TraceMask;
 use execution_tape::value::{FuncId, FuncRef, UnitId, Value as TapeValue};
@@ -26,19 +27,39 @@ use crate::{Span, Type, Value};
 /// its encoded bytes.
 ///
 /// From the high bits down: `execution_tape`'s wire format version (major,
-/// minor; 16 bits each), the `libm` release its math is defined as (0.2.16,
-/// 8 bits per part), and this crate's version of what the language means
-/// (8 bits). A fingerprint of a program's behavior is this word and the
-/// bytes ([`Program::content_words`]).
-///
-/// `execution_tape` pins `libm` to exactly 0.2.16 and does not export the
-/// version, so it is written here: moving the `execution_tape` revision
-/// means checking its pin against this word.
+/// minor; 16 bits each), the `libm` release its math is defined as
+/// ([`LIBM_VERSION`], 8 bits per part) and this crate's version of what the
+/// language means (8 bits). A fingerprint of a program's behavior is this
+/// word and the bytes ([`Program::content_words`]).
 pub const CONTRACT: u64 =
     ((VERSION_MAJOR as u64) << 48) | ((VERSION_MINOR as u64) << 32) | (LIBM << 8) | LANGUAGE;
 
-/// `libm` 0.2.16, a byte per part.
-const LIBM: u64 = 0x00_02_10;
+/// [`LIBM_VERSION`], a byte per part: 0.2.16 is `0x00_02_10`.
+const LIBM: u64 = version_word(LIBM_VERSION);
+
+/// `major.minor.patch`, each part a decimal below 256, as one byte per
+/// part. Anything else fails to compile where it is used in a constant.
+pub(crate) const fn version_word(version: &str) -> u64 {
+    let bytes = version.as_bytes();
+    let (mut word, mut part, mut parts, mut digits) = (0_u64, 0_u64, 0, 0);
+    let mut i = 0;
+    while i <= bytes.len() {
+        if i == bytes.len() || bytes[i] == b'.' {
+            assert!(digits > 0 && part < 256, "a version part is a byte");
+            word = (word << 8) | part;
+            (part, parts, digits) = (0, parts + 1, 0);
+        } else {
+            assert!(bytes[i].is_ascii_digit(), "a version is decimal");
+            part = part * 10 + (bytes[i] - b'0') as u64;
+            digits += 1;
+            assert!(digits <= 3, "a version part is a byte");
+        }
+        i += 1;
+    }
+    assert!(parts == 3, "a version has three parts");
+    word
+}
+
 /// The meaning of the language, versioned: bump when the same source
 /// should compute something else.
 const LANGUAGE: u64 = 1;

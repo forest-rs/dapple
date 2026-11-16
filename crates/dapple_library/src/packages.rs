@@ -20,9 +20,10 @@ use dapple_package::Registry;
 
 use crate::modules::{
     AshlarLimestone, Beech, Birch, ByExample, CeramicBody, Copper, EdgeWear, Efflorescence, Finish,
-    FlintWall, GlazedBrickWall, Grime, Marble, Mortar, Moss, Paint, PaintedSteel, Patches, Patina,
-    RomanBrick, RubbleWall, Rust, RustedSteel, ScotsPine, Spruce, Steel, Stone, StoneSill, Streaks,
-    TerracottaTile, Threshold, VarnishedBoard, WeatheredCopper, Wood,
+    FlintWall, GlazedBrickWall, GlazedBricks, Grime, HeightDetail, Marble, Mortar, Moss, Paint,
+    PaintedSteel, Patches, Patina, RomanBrick, RubbleWall, Rust, RustedSteel, ScotsPine,
+    SelectByMask, SetRegion, Spruce, Steel, Stone, StoneSill, Streaks, TerracottaTile, Threshold,
+    VarnishedBoard, WeatheredCopper, Wood,
 };
 
 /// The varnished board's package source, with preset `dark_and_worn`. Its
@@ -54,6 +55,10 @@ pub const PACKAGES: &[&str] = &[
 #[must_use]
 pub fn registry() -> Registry {
     Registry::new()
+        .with(Arc::new(GlazedBricks))
+        .with(Arc::new(HeightDetail))
+        .with(Arc::new(SelectByMask))
+        .with(Arc::new(SetRegion))
         .with(Arc::new(CeramicBody))
         .with(Arc::new(Mortar))
         .with(Arc::new(Stone))

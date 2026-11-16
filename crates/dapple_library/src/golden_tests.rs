@@ -54,6 +54,30 @@ use crate::packages::{PACKAGES, registry};
 /// version bump adds new entries; the old version's entries go with it.
 const GOLDEN: &[(&str, u32, &str, u64)] = &[
     (
+        "dapple_library.glazed_bricks",
+        1,
+        "defaults",
+        0x6d6321105b2c6565,
+    ),
+    (
+        "dapple_library.height_detail",
+        1,
+        "defaults",
+        0x3ec60b0de941a600,
+    ),
+    (
+        "dapple_library.select_by_mask",
+        1,
+        "defaults",
+        0x0d6501ee636d0c5d,
+    ),
+    (
+        "dapple_library.set_region",
+        1,
+        "defaults",
+        0xdd974e8a75ae6862,
+    ),
+    (
         "dapple_library.ceramic_body",
         1,
         "defaults",
@@ -381,6 +405,19 @@ fn bind_required(module: &dyn Module, mut bind: Bind) -> Bind {
                 port: PortType::Color(_),
                 ..
             }) => Input::Resource(ResourceRef("fixture".into())),
+            InputKind::Map(port) => Input::Map(
+                grid()
+                    .typed(
+                        port,
+                        (0..grid().len()).map(|i| match port {
+                            PortType::Scalar => Value::Scalar(0.001 * (i % 3) as f32),
+                            PortType::Mask => Value::Scalar((i % 3) as f32 * 0.5),
+                            PortType::Id => Value::Id(u32::try_from(i % 7).unwrap()),
+                            _ => panic!("no golden map fixture for {port:?}"),
+                        }),
+                    )
+                    .unwrap(),
+            ),
             other => panic!(
                 "{id} requires input {:?} of kind {other:?}, which has no golden fixture: \
                  add one to `bind_required` in golden_tests.rs",

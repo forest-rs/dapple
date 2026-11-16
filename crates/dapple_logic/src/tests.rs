@@ -5,6 +5,7 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::program::version_word;
 use crate::{Builder, CONTRACT, Error, ErrorKind, Program, RunErrorKind, Span, Type, Value};
 
 fn builder() -> Builder {
@@ -483,4 +484,15 @@ fn a_conditioned_expression_runs_only_where_its_condition_holds() {
     assert_eq!(build(true).bytes(), build(true).bytes());
     assert_ne!(build(true).bytes(), build(false).bytes());
     assert_ne!(build(true).bytes(), plain.bytes());
+}
+
+#[test]
+fn the_contract_names_the_pinned_libm() {
+    // A byte per part, as the word has always had it.
+    assert_eq!(version_word("0.2.16"), 0x00_02_10);
+    assert_eq!(version_word("1.0.255"), 0x01_00_ff);
+    assert_eq!(
+        (CONTRACT >> 8) & 0xff_ff_ff,
+        version_word(execution_tape::math::LIBM_VERSION)
+    );
 }

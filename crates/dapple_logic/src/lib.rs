@@ -39,9 +39,10 @@
 //! reassociated, never folded and never contracted into a fused
 //! multiply-add. Literals are read as `str::parse::<f32>` reads them.
 //! Arithmetic is IEEE 754 `f32` arithmetic, and the functions are the
-//! `libm` 0.2.16 routines dapple's native modules call (through
-//! `execution_tape::math`, which is defined as them). A NaN result is a
-//! NaN; its sign and payload are not part of the promise.
+//! `libm` routines dapple's native modules call (through
+//! `execution_tape::math`, which is defined as them: the release
+//! `execution_tape::math::LIBM_VERSION` names, 0.2.16 today). A NaN
+//! result is a NaN; its sign and payload are not part of the promise.
 //!
 //! [`Program::content_words`] is what a fingerprint of a program's behavior
 //! needs: the encoded tape (its encoding is canonical, so the same source

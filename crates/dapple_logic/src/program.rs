@@ -344,26 +344,39 @@ impl Program {
         }
         // A run cannot re-enter (the program calls nothing), so the parked
         // VM is free unless a caller shares this program across a run of
-        // its own; then the run takes a fresh one.
-        let taken = self.parked.try_borrow_mut().ok().and_then(|mut p| p.take());
-        let mut parked = match taken {
-            Some(p) => p,
-            None => self.fresh()?,
+        // its own; then the run takes a fresh one, and drops it after. The
+        // parked VM is borrowed where it is, not moved out and back.
+        let Ok(mut slot) = self.parked.try_borrow_mut() else {
+            return self.run_on(&mut self.fresh()?, inputs);
         };
-        parked.args.clear();
-        parked.args.extend(inputs.iter().map(|v| match *v {
-            Value::Scalar(x) => TapeValue::F32(x),
-            Value::Integer(n) => TapeValue::U32(n),
-            Value::Flag(b) => TapeValue::Bool(b),
-        }));
-        parked.results.clear();
+        let parked = match &mut *slot {
+            Some(parked) => parked,
+            empty => empty.insert(self.fresh()?),
+        };
+        let ran = self.run_on(parked, inputs);
+        if ran.is_err() {
+            // The VM is dropped rather than trusted after a trap.
+            *slot = None;
+        }
+        ran
+    }
+
+    /// [`Self::run`] on `parked`, with `inputs` checked.
+    fn run_on(&self, parked: &mut Parked, inputs: &[Value]) -> Result<Vec<Value>, RunError> {
         let Parked {
             vm,
             unit,
             scratch,
             args,
             results,
-        } = &mut parked;
+        } = parked;
+        args.clear();
+        args.extend(inputs.iter().map(|v| match *v {
+            Value::Scalar(x) => TapeValue::F32(x),
+            Value::Integer(n) => TapeValue::U32(n),
+            Value::Flag(b) => TapeValue::Bool(b),
+        }));
+        results.clear();
         let ran = vm.run_with_ctx(
             scratch,
             FuncRef::new(*unit, FuncId(0)),
@@ -374,7 +387,6 @@ impl Program {
             None,
         );
         if let Err(trap) = ran {
-            // The VM is dropped rather than trusted after a trap.
             let expression = expression_of(trap.span_id);
             let kind = match trap.trap {
                 Trap::FuelExceeded => RunErrorKind::OutOfFuel,
@@ -404,9 +416,6 @@ impl Program {
                     });
                 }
             });
-        }
-        if let Ok(mut slot) = self.parked.try_borrow_mut() {
-            *slot = Some(parked);
         }
         Ok(out)
     }

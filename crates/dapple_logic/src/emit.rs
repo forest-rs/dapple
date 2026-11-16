@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 
 use execution_tape::asm::{Asm, FunctionSig, Label, ProgramBuilder, Reg};
 use execution_tape::codec::decode_all;
-use execution_tape::program::ValueType;
+use execution_tape::program::{SpanId, ValueType};
 use execution_tape::value::FuncId;
 use execution_tape::verifier::VerifiedProgram;
 
@@ -33,8 +33,6 @@ pub(crate) const TRAP_CLAMP: u32 = 2;
 pub(crate) struct Emitted {
     pub(crate) program: VerifiedProgram,
     pub(crate) bytes: Vec<u8>,
-    /// Each expression's code, as a range of program counters.
-    pub(crate) ranges: Vec<(u32, u32)>,
     /// Instructions in the function: no run executes more, as nothing
     /// branches backward.
     pub(crate) instructions: u64,
@@ -50,6 +48,25 @@ pub(crate) const fn value_type(t: Type) -> ValueType {
 
 fn tape_error(e: impl core::fmt::Display) -> Error {
     Error::new(Span::default(), ErrorKind::Tape(e.to_string()))
+}
+
+/// The span of the code that is no expression's: the literal loads at the
+/// top of the function and the final `ret`. A trap there (out of fuel)
+/// names no expression.
+const GLUE: SpanId = SpanId::new(u64::MAX);
+
+/// The span of expression `index`'s code: `index + 1`, as span ids are
+/// non-zero.
+fn expression_span(index: usize) -> SpanId {
+    SpanId::new(index as u64 + 1)
+}
+
+/// The expression whose code a trap's span is, if any.
+pub(crate) fn expression_of(span: Option<SpanId>) -> Option<usize> {
+    match span {
+        Some(GLUE) | None => None,
+        Some(span) => usize::try_from(span.get() - 1).ok(),
+    }
 }
 
 /// A literal, by its bits.
@@ -108,7 +125,7 @@ impl Emitter {
     }
 
     fn place(&mut self, l: Label) -> Result<(), Error> {
-        self.asm.place(l).map_err(|e| tape_error(format!("{e:?}")))
+        self.asm.place(l).map_err(tape_error)
     }
 
     fn literal(&self, l: Literal) -> Reg {
@@ -416,7 +433,7 @@ pub(crate) fn emit(
             arg_types: inputs.iter().map(|(_, t)| value_type(*t)).collect(),
             ret_types: expressions.iter().map(|e| value_type(e.ty)).collect(),
         })
-        .map_err(|e| tape_error(format!("{e:?}")))?;
+        .map_err(tape_error)?;
     let mut regs = Vec::with_capacity(inputs.len());
     for (i, (name, _)) in inputs.iter().enumerate() {
         let i = u32::try_from(i).map_err(|_| tape_error("too many inputs"))?;
@@ -429,6 +446,9 @@ pub(crate) fn emit(
         literals: Vec::new(),
     };
 
+    // Each instruction is marked with the span of what it is for, so a trap
+    // names its expression (`expression_of`). A mark lasts until the next.
+    e.asm.span(GLUE);
     let mut all = Vec::new();
     for x in expressions {
         literals(x, &mut all);
@@ -455,9 +475,8 @@ pub(crate) fn emit(
     }
 
     let mut rets: Vec<Reg> = vec![];
-    let mut ranges = Vec::with_capacity(expressions.len());
-    for (x, condition) in expressions.iter().zip(conditions) {
-        let start = e.asm.pc().0;
+    for (i, (x, condition)) in expressions.iter().zip(conditions).enumerate() {
+        e.asm.span(expression_span(i));
         let r = match *condition {
             None => e.emit(x)?,
             Some((c, holds)) => {
@@ -486,9 +505,8 @@ pub(crate) fn emit(
             }
         };
         rets.push(r);
-        ranges.push((start, e.asm.pc().0));
     }
-    e.asm.ret(Reg::EFFECT, &rets);
+    e.asm.span(GLUE).ret(Reg::EFFECT, &rets);
     pb.define_function(f, e.asm).map_err(tape_error)?;
     let program = pb.build_verified().map_err(tape_error)?;
     let bytes = program.program().encode();
@@ -501,7 +519,6 @@ pub(crate) fn emit(
     Ok(Emitted {
         program,
         bytes,
-        ranges,
         instructions,
     })
 }

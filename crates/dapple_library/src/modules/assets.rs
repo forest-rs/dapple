@@ -3,28 +3,24 @@
 
 //! Assets: modules composed of modules.
 
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use dapple_elements::{Composite, Realized};
-use dapple_field::{Domain, Edge};
 use dapple_material::module::{
     Args, Bind, Context, Input, Interface, Module, ModuleError, ModuleId, Output, OutputDecl,
     OutputKind, Outputs,
 };
 use dapple_material::ops::{self, Detail, Layer, Transition};
-use dapple_material::{Aux, Channel, Grid, Material, Tiling};
-use dapple_raster::typed::Storage;
-use dapple_raster::{DistanceTransform, Raster, RasterOp};
-use glam::{Vec2, Vec3};
+use dapple_material::{Aux, Grid, Material, Tiling};
+use dapple_raster::Raster;
+use glam::Vec3;
 
 use super::{
-    CeramicBody, Copper, EdgeWear, Efflorescence, Finish, Grime, Mortar, Moss, Paint, Patches,
-    Patina, Rust, Steel, Stone, Streaks, Wood, color, fail, flag, fraction, integer, mask_map,
-    meters, scalar_map, seed, smoothstep,
+    CeramicBody, Copper, EdgeWear, Efflorescence, Finish, GlazedBricks, Grime, HeightDetail,
+    Mortar, Moss, Paint, Patches, Patina, Rust, SelectByMask, SetRegion, Steel, Stone, Streaks,
+    Wood, color, fail, flag, fraction, integer, mask_map, meters, seed, smoothstep,
 };
-use crate::glazed_brick::{self, GLAZE, JOINT, Palette, Structure, glazes};
+use crate::glazed_brick::{self, GLAZE, JOINT, Palette, glazes};
 
 fn material_output() -> Vec<OutputDecl> {
     vec![OutputDecl {
@@ -40,8 +36,12 @@ fn take(mut outputs: Outputs) -> Result<Material, ModuleError> {
         .ok_or_else(|| fail("a module did not return its material"))
 }
 
-fn composite_error<E>(_: E) -> ModuleError {
-    fail("the brick composite failed")
+fn map_input(outputs: &Outputs, name: &str) -> Result<Input, ModuleError> {
+    outputs
+        .map(name)
+        .cloned()
+        .map(Input::Map)
+        .ok_or_else(|| fail("a structure map is missing"))
 }
 
 /// A mask of texels whose center's `y` lies in `[lo, hi)`, softened over
@@ -63,7 +63,9 @@ fn band(grid: Grid, lo: f32, hi: f32) -> Result<Raster, ModuleError> {
 /// ([`glazed_brick`]) of a [`CeramicBody`], glazed with a [`Finish`] whose
 /// color, coverage and thickness the bricks decide, in [`Mortar`] tooled
 /// into their joints, and, when `weathered`, dirtied by [`Grime`],
-/// [`Streaks`] and [`Efflorescence`].
+/// [`Streaks`] and [`Efflorescence`]. [`GlazedBricks`] supplies its maps;
+/// [`HeightDetail`], [`SelectByMask`] and [`SetRegion`] assemble the wall
+/// before finishing. Optional weathering records every skipped child.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct GlazedBrickWall;
 
@@ -105,90 +107,63 @@ impl Module for GlazedBrickWall {
     }
 
     fn build(&self, cx: &mut Context<'_>, args: &Args) -> Result<Outputs, ModuleError> {
-        let grid = cx.grid();
-        #[expect(clippy::cast_precision_loss, reason = "grid sizes are small")]
-        let extent = grid.texel * Vec2::new(grid.width as f32, grid.height as f32);
-        if grid.edge != Edge::Wrap || (extent - Vec2::ONE).abs().max_element() > 1e-4 {
-            return Err(fail("glazed brick walls need a 1 m wrapping grid"));
-        }
-        let palette = Palette {
-            field: args.color("field"),
-            band: args.color("band"),
-            dado: args.color("dado"),
-            dado_courses: args.integer("dado_courses"),
-            band_courses: args.integer("band_courses"),
-            variation: args.scalar("variation"),
-            battered: args.scalar("battered"),
-        };
-        let set = glazed_brick::layout(&palette).map_err(composite_error)?;
-        let program = Arc::new(glazed_brick::program()?);
-        let instance = glazed_brick::instance(program)?;
-        let realized = Realized::composite(&Composite {
-            set: &set,
-            instance: &instance,
-            background: &glazed_brick::BACKGROUND,
-            domain: Domain::periodic(1, 1).expect("a unit period"),
-            width: grid.width,
-            height: grid.height,
-            tile_size: 64,
-        })
-        .map_err(composite_error)?;
-        let st = Structure::of(&realized).map_err(composite_error)?;
-        if !grid.holds_raster(&st.cover) {
-            return Err(fail("the composite is not on the context's grid"));
-        }
-        // Distance to the nearest brick, for tooling the joints.
-        let joint = DistanceTransform { threshold: 0.5 }.apply(&st.cover)?;
-
+        let st = cx.instantiate(
+            &GlazedBricks,
+            "structure",
+            Bind::new()
+                .color("field", args.color("field"))
+                .color("band", args.color("band"))
+                .color("dado", args.color("dado"))
+                .integer("dado_courses", args.integer("dado_courses"))
+                .integer("band_courses", args.integer("band_courses"))
+                .scalar("variation", args.scalar("variation"))
+                .scalar("battered", args.scalar("battered")),
+        )?;
+        // Existing children keep their paths and bindings: their seeds and
+        // fingerprints are independent of the new structure/op instances.
         let body = take(cx.instantiate(&CeramicBody, "body", Bind::new())?)?;
         let mortar = take(cx.instantiate(
             &Mortar,
             "mortar",
-            Bind::new().input("joint", Input::Map(scalar_map(grid, &joint)?)),
+            Bind::new().input("joint", map_input(&st, "joint")?),
         )?)?;
-        // The bricks' shape is geometric detail on the body.
-        let bricks = cx.record(ops::apply_detail(
-            &body,
-            &Detail {
-                height: Some(st.height.clone()),
-                ..Detail::identity(Layer::Base)
-            },
-        )?);
-        let mut wall = cx.record(ops::select(&mortar, &bricks, &st.cover, Transition::Mask)?);
-        wall.set_aux(Aux::Region, Channel::Map(st.owners.clone()))?;
-
-        // The glaze: each brick's color, darkened in crazing cracks, laid
-        // where it survives, as thick as the bricks say.
-        let Storage::F32x3(colors) = st.glaze_color.storage() else {
-            return Err(fail("glaze colors"));
-        };
-        let colors: Vec<Vec3> = colors
-            .values()
-            .iter()
-            .zip(st.craze.values())
-            .map(|(c, k)| Vec3::from_array(*c) * (1.0 - 0.35 * k))
-            .collect();
-        let glaze_cover = grid.raster(
-            st.glazed
-                .values()
-                .iter()
-                .zip(st.cover.values())
-                .map(|(g, c)| g * c)
-                .collect(),
+        let bricks = take(
+            cx.instantiate(
+                &HeightDetail,
+                "bricks",
+                Bind::new()
+                    .material("base", body)
+                    .input("height", map_input(&st, "height")?),
+            )?,
         )?;
-        let color_map = match super::color_map(grid, &colors)? {
-            Channel::Map(m) => m,
-            Channel::Constant(_) => unreachable!("a map"),
-        };
+        let bedded = take(
+            cx.instantiate(
+                &SelectByMask,
+                "bedded",
+                Bind::new()
+                    .material("base", mortar)
+                    .material("other", bricks.clone())
+                    .input("mask", map_input(&st, "cover")?),
+            )?,
+        )?;
+        let wall = take(
+            cx.instantiate(
+                &SetRegion,
+                "region",
+                Bind::new()
+                    .material("base", bedded)
+                    .input("region", map_input(&st, "owners")?),
+            )?,
+        )?;
         let mut wall = take(
             cx.instantiate(
                 &Finish,
                 "glaze",
                 Bind::new()
                     .material("base", wall)
-                    .input("coverage", Input::Map(mask_map(grid, &glaze_cover)?))
-                    .input("thickness", Input::Map(scalar_map(grid, &st.thickness)?))
-                    .input("color", Input::Map(color_map))
+                    .input("coverage", map_input(&st, "coverage")?)
+                    .input("thickness", map_input(&st, "thickness")?)
+                    .input("color", map_input(&st, "color")?)
                     .scalar("opacity", 0.94)
                     .scalar("full_thickness", 0.0003)
                     .scalar("tint", 0.15)
@@ -201,8 +176,15 @@ impl Module for GlazedBrickWall {
             )?,
         )?;
         // Glaze worn off the sharpest arrises, down to the body.
-        let mut worn = bricks;
-        worn.set_aux(Aux::Region, Channel::Map(st.owners.clone()))?;
+        let worn = take(
+            cx.instantiate(
+                &SetRegion,
+                "worn",
+                Bind::new()
+                    .material("base", bricks)
+                    .input("region", map_input(&st, "owners")?),
+            )?,
+        )?;
         wall = take(
             cx.instantiate(
                 &EdgeWear,
@@ -227,6 +209,11 @@ impl Module for GlazedBrickWall {
                 },
                 None,
             )?;
+        } else {
+            cx.skip("dirt", Grime.interface().id);
+            cx.skip("streaks", Streaks.interface().id);
+            cx.skip("salts", Efflorescence.interface().id);
+            cx.skip("moss", Moss.interface().id);
         }
         Ok(Outputs::new().with("material", Output::Material(wall)))
     }
@@ -285,6 +272,7 @@ fn weather(
             )?,
         )
     } else {
+        cx.skip("moss", Moss.interface().id);
         Ok(m)
     }
 }

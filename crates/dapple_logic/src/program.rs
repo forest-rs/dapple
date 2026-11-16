@@ -18,7 +18,7 @@ use execution_tape::verifier::VerifiedProgram;
 use execution_tape::vm::{ExecutionContext, Limits, Trap, Vm};
 
 use crate::check::{Scope, Typed};
-use crate::emit::{TRAP_CLAMP, TRAP_OVERFLOW, emit};
+use crate::emit::{TRAP_CLAMP, TRAP_OVERFLOW, emit, expression_of};
 use crate::error::{Error, ErrorKind, RunError, RunErrorKind};
 use crate::syntax::parse;
 use crate::{Span, Type, Value};
@@ -164,7 +164,6 @@ impl Builder {
             bytes: Arc::from(emitted.bytes),
             inputs: self.inputs.iter().map(|(_, t)| *t).collect(),
             outputs: self.expressions.iter().map(|e| e.ty).collect(),
-            ranges: emitted.ranges.into(),
             instructions: emitted.instructions,
             fuel: emitted.instructions,
             parked: RefCell::new(None),
@@ -207,7 +206,6 @@ pub struct Program {
     bytes: Arc<[u8]>,
     inputs: Vec<Type>,
     outputs: Vec<Type>,
-    ranges: Arc<[(u32, u32)]>,
     instructions: u64,
     fuel: u64,
     parked: RefCell<Option<Parked>>,
@@ -221,7 +219,6 @@ impl Clone for Program {
             bytes: Arc::clone(&self.bytes),
             inputs: self.inputs.clone(),
             outputs: self.outputs.clone(),
-            ranges: Arc::clone(&self.ranges),
             instructions: self.instructions,
             fuel: self.fuel,
             parked: RefCell::new(None),
@@ -318,7 +315,7 @@ impl Program {
             .install(Arc::clone(&self.program))
             .map_err(|e| RunError {
                 expression: None,
-                kind: RunErrorKind::Trap(alloc::format!("{e:?}")),
+                kind: RunErrorKind::Trap(e.to_string()),
             })?;
         Ok(Parked {
             vm,
@@ -378,10 +375,7 @@ impl Program {
         );
         if let Err(trap) = ran {
             // The VM is dropped rather than trusted after a trap.
-            let expression = self
-                .ranges
-                .iter()
-                .position(|&(start, end)| trap.pc.0 >= start && trap.pc.0 < end);
+            let expression = expression_of(trap.span_id);
             let kind = match trap.trap {
                 Trap::FuelExceeded => RunErrorKind::OutOfFuel,
                 Trap::TrapCode(TRAP_OVERFLOW) => RunErrorKind::Overflow,

@@ -354,6 +354,43 @@ fn a_run_stops_with_an_error_and_names_its_expression() {
 }
 
 #[test]
+fn a_trap_names_its_expression_and_glue_names_none() {
+    let mut b = builder();
+    b.expression("10 / count", Type::Integer).unwrap();
+    // No code of its own: an input.
+    b.expression("age", Type::Scalar).unwrap();
+    b.expression("0.5 * gloss", Type::Scalar).unwrap();
+    b.expression("count * 1000000", Type::Integer).unwrap();
+    let p = b.build().unwrap();
+    let fail = |p: &Program, at: [Value; 4]| p.run(&at).map(|_| ()).unwrap_err();
+    // The first expression, and the last.
+    let e = fail(&p, inputs(0.5, 0.0, 0, false));
+    assert_eq!(
+        (e.expression, e.kind),
+        (Some(0), RunErrorKind::DivisionByZero)
+    );
+    let e = fail(&p, inputs(0.5, 0.0, 5000, false));
+    assert_eq!((e.expression, e.kind), (Some(3), RunErrorKind::Overflow));
+
+    // Fuel runs out wherever the budget ends. A run that does not trap runs
+    // its instructions in order: the literal loads at the top, which are no
+    // expression's, then each expression's code, then the `ret`, which is
+    // no expression's either.
+    let at = inputs(0.5, 0.25, 2, false);
+    let mut short = p.clone();
+    let mut named = Vec::new();
+    for fuel in 0.. {
+        short.set_fuel(fuel);
+        let Err(e) = short.run(&at) else { break };
+        assert_eq!(e.kind, RunErrorKind::OutOfFuel);
+        if named.last() != Some(&e.expression) {
+            named.push(e.expression);
+        }
+    }
+    assert_eq!(named, [None, Some(0), Some(2), Some(3), None]);
+}
+
+#[test]
 fn only_the_arm_taken_runs() {
     // An arm that would fail does not, unless it is taken.
     let p = one("weather ? clamp(age, 1.0, 0.0) : age", Type::Scalar);
